@@ -14,7 +14,7 @@ pub use types::{
 pub use discovery::{discover_candidate_bundles, standard_search_paths, CandidateBundle};
 pub use info_plist::{detect_macho_architectures, extract_bundle_info, BundleInfo};
 pub use supervisor::PluginScannerSupervisor;
-pub use instance::{HostedPluginInstance, PluginInstance};
+pub use instance::{HostedPluginDevice, HostedPluginInstance, PluginInstance};
 
 #[cfg(test)]
 mod tests {

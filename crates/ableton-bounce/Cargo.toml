@@ -42,4 +42,12 @@ path = "../../tests/adversarial_m8_stress_test.rs"
 name = "e2e_m8_adversarial_filters_synths_test"
 path = "../../tests/e2e_m8_adversarial_filters_synths_test.rs"
 
+[dev-dependencies]
+ableton-timeline = { path = "../ableton-timeline" }
+ableton-plugin-scanner = { path = "../ableton-plugin-scanner" }
+
+[[test]]
+name = "e2e_m9_chains_fx_test"
+path = "../../tests/e2e_m9_chains_fx_test.rs"
+
 

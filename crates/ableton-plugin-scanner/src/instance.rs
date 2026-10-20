@@ -1,9 +1,9 @@
 use std::f32::consts::PI;
-use ableton_core::{AudioBuffer, MidiEvent};
+use ableton_core::{AudioBuffer, AudioEffectDevice, Device, DeviceCategory, InstrumentDevice, MidiEvent, MusicalTime};
 use crate::types::{PluginCategory, PluginDescriptor};
 
 /// Public trait implemented by loaded or hosted audio plugins.
-pub trait PluginInstance: Send {
+pub trait PluginInstance: Send + Sync {
     /// Returns the metadata descriptor for this plugin instance.
     fn descriptor(&self) -> &PluginDescriptor;
 
@@ -205,6 +205,102 @@ impl PluginInstance for HostedPluginInstance {
     }
 }
 
+/// Device wrapper around any PluginInstance (AU / VST3 / CLAP), integrating into DeviceChain.
+pub struct HostedPluginDevice {
+    pub instance: Box<dyn PluginInstance>,
+    pub enabled: bool,
+}
+
+impl HostedPluginDevice {
+    /// Create a new device wrapping a PluginInstance.
+    pub fn new(instance: Box<dyn PluginInstance>) -> Self {
+        Self {
+            instance,
+            enabled: true,
+        }
+    }
+
+    /// Create from a PluginDescriptor.
+    pub fn from_descriptor(descriptor: PluginDescriptor) -> Result<Self, String> {
+        let instance = HostedPluginInstance::new(descriptor)?;
+        Ok(Self::new(Box::new(instance)))
+    }
+
+    pub fn descriptor(&self) -> &PluginDescriptor {
+        self.instance.descriptor()
+    }
+
+    pub fn set_parameter_value(&mut self, index: u32, value: f32) -> Result<(), String> {
+        self.instance.set_parameter(index, value)
+    }
+
+    pub fn get_parameter_value(&self, index: u32) -> Option<f32> {
+        self.instance.get_parameter(index)
+    }
+
+    pub fn parameter_count(&self) -> usize {
+        self.instance.parameter_count()
+    }
+}
+
+impl Device for HostedPluginDevice {
+    fn name(&self) -> &str {
+        &self.instance.descriptor().name
+    }
+
+    fn category(&self) -> DeviceCategory {
+        match self.instance.descriptor().category {
+            PluginCategory::Instrument => DeviceCategory::Instrument,
+            PluginCategory::Effect => DeviceCategory::AudioEffect,
+        }
+    }
+
+    fn is_enabled(&self) -> bool {
+        self.enabled
+    }
+
+    fn set_enabled(&mut self, enabled: bool) {
+        self.enabled = enabled;
+    }
+
+    fn reset(&mut self) {
+        self.instance.reset();
+    }
+}
+
+impl InstrumentDevice for HostedPluginDevice {
+    fn process(
+        &mut self,
+        midi_in: &[MidiEvent],
+        audio_out: &mut AudioBuffer,
+        _time: &MusicalTime,
+    ) {
+        if self.enabled {
+            self.instance.process(audio_out, midi_in);
+        }
+    }
+
+    fn set_parameter(&mut self, param_id: u32, value: f32) {
+        let _ = self.instance.set_parameter(param_id, value);
+    }
+
+    fn get_parameter(&self, param_id: u32) -> f32 {
+        self.instance.get_parameter(param_id).unwrap_or(0.0)
+    }
+}
+
+impl AudioEffectDevice for HostedPluginDevice {
+    fn process_audio(
+        &mut self,
+        buffer: &mut AudioBuffer,
+        _time: &MusicalTime,
+    ) {
+        if self.enabled {
+            self.instance.process(buffer, &[]);
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -278,5 +374,48 @@ mod tests {
         instance.process(&mut buffer, &[]);
         // Signal must be saturated/processed
         assert!((buffer.left[0] - (0.5 * 10.0_f32.powf(6.0 / 20.0)).tanh()).abs() < 1e-4);
+    }
+
+    #[test]
+    fn test_hosted_plugin_device_in_device_chain() {
+        use ableton_core::DeviceChain;
+
+        let synth_desc = PluginDescriptor::new_valid(
+            "ChainAUPlugin",
+            "com.apple.audiounit.ChainSynth",
+            "Apple",
+            "2.0",
+            PluginCategory::Instrument,
+            PluginFormat::AudioUnit,
+            PathBuf::from("/Library/Audio/Plug-Ins/Components/ChainSynth.component"),
+            2,
+            2,
+            vec![PluginParameter::new(0, "Volume", 0.0, 1.0, 0.9)],
+            vec!["arm64".into()],
+            9999,
+        );
+
+        let mut hosted_inst = HostedPluginInstance::new(synth_desc).unwrap();
+        hosted_inst.initialize(44100.0, 256).unwrap();
+
+        let device = HostedPluginDevice::new(Box::new(hosted_inst));
+        assert_eq!(device.name(), "ChainAUPlugin");
+        assert_eq!(device.category(), DeviceCategory::Instrument);
+
+        let mut chain = DeviceChain::new();
+        chain.set_instrument(Some(Box::new(device)));
+
+        let mut buf = AudioBuffer::silence(256);
+        let midi = vec![MidiEvent::NoteOn {
+            channel: 0,
+            note: 60,
+            velocity: 100,
+        }];
+        let time = MusicalTime::default();
+
+        chain.process(&midi, &mut buf, &time);
+
+        let peak = buf.left[0..256].iter().fold(0.0_f32, |acc, &s| acc.max(s.abs()));
+        assert!(peak > 0.05, "HostedPluginDevice in DeviceChain synthesized non-zero audio: {}", peak);
     }
 }

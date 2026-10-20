@@ -1,5 +1,7 @@
 //! Master 128-sample lookahead brickwall limiter with -0.3 dBFS ceiling.
 
+use ableton_core::{AudioBuffer, AudioEffectDevice, Device, DeviceCategory, MusicalTime};
+
 pub const LOOKAHEAD_SAMPLES: usize = 128;
 pub const CEILING_LINEAR: f32 = 0.9660509; // -0.3 dBFS
 
@@ -103,6 +105,37 @@ impl MasterLimiter {
             left[i] = out_l;
             right[i] = out_r;
         }
+    }
+}
+
+impl Device for MasterLimiter {
+    fn name(&self) -> &str {
+        "Limiter"
+    }
+
+    fn category(&self) -> DeviceCategory {
+        DeviceCategory::AudioEffect
+    }
+
+    fn is_enabled(&self) -> bool {
+        true
+    }
+
+    fn set_enabled(&mut self, _enabled: bool) {}
+
+    fn reset(&mut self) {
+        self.reset();
+    }
+
+    fn latency_samples(&self) -> usize {
+        LOOKAHEAD_SAMPLES
+    }
+}
+
+impl AudioEffectDevice for MasterLimiter {
+    fn process_audio(&mut self, buffer: &mut AudioBuffer, _time: &MusicalTime) {
+        let count = buffer.frame_count.min(1024);
+        self.process_block(&mut buffer.left[0..count], &mut buffer.right[0..count]);
     }
 }
 
