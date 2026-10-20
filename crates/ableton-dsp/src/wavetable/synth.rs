@@ -12,6 +12,7 @@ use crate::wavetable::mod_matrix::{ModDestination, ModMatrix};
 use crate::wavetable::tables::{WavetableCategory, WavetableSet};
 
 pub const MAX_WAVETABLE_VOICES: usize = 8;
+pub const MAX_UNISON_VOICES: usize = 8;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WarpMode {
@@ -39,6 +40,8 @@ pub struct WavetableVoice {
     // Phase accumulators
     pub osc1_phase: f32,
     pub osc2_phase: f32,
+    pub osc1_phases: [f32; MAX_UNISON_VOICES],
+    pub osc2_phases: [f32; MAX_UNISON_VOICES],
     pub sub_phase: f32,
 
     // Sub filter 1-pole state
@@ -49,8 +52,9 @@ pub struct WavetableVoice {
     pub env2: AdsrEnvelope,
     pub env3: AdsrEnvelope,
 
-    // Dual Cytomic filters
+    // Dual Cytomic filters (stereo)
     pub dual_filter: DualCytomicFilter,
+    pub dual_filter_r: DualCytomicFilter,
 
     // Noise PRNG for stochastic unison
     pub rng: XorShift32,
@@ -65,12 +69,15 @@ impl WavetableVoice {
             age: 0,
             osc1_phase: 0.0,
             osc2_phase: 0.0,
+            osc1_phases: [0.0; MAX_UNISON_VOICES],
+            osc2_phases: [0.0; MAX_UNISON_VOICES],
             sub_phase: 0.0,
             sub_filter_state: 0.0,
             amp_env: AdsrEnvelope::new(sample_rate),
             env2: AdsrEnvelope::new(sample_rate),
             env3: AdsrEnvelope::new(sample_rate),
             dual_filter: DualCytomicFilter::new(sample_rate),
+            dual_filter_r: DualCytomicFilter::new(sample_rate),
             rng: XorShift32::new(0x2468ace0),
         }
     }
@@ -79,12 +86,15 @@ impl WavetableVoice {
         self.active = false;
         self.osc1_phase = 0.0;
         self.osc2_phase = 0.0;
+        self.osc1_phases = [0.0; MAX_UNISON_VOICES];
+        self.osc2_phases = [0.0; MAX_UNISON_VOICES];
         self.sub_phase = 0.0;
         self.sub_filter_state = 0.0;
         self.amp_env.reset();
         self.env2.reset();
         self.env3.reset();
         self.dual_filter.reset();
+        self.dual_filter_r.reset();
     }
 }
 
@@ -304,12 +314,26 @@ impl WavetableDevice {
         v.velocity = velocity as f32 / 127.0;
         v.age = self.voice_counter;
         v.dual_filter.reset();
+        v.dual_filter_r.reset();
 
-        if self.unison_mode == UnisonMode::PhaseSync {
-            v.osc1_phase = 0.0;
-            v.osc2_phase = 0.0;
-            v.sub_phase = 0.0;
+        let n_unison = self.unison_voices.clamp(1, MAX_UNISON_VOICES);
+        for u in 0..MAX_UNISON_VOICES {
+            if self.unison_mode == UnisonMode::PhaseSync {
+                v.osc1_phases[u] = 0.0;
+                v.osc2_phases[u] = 0.0;
+            } else {
+                let init_phase = if n_unison > 1 {
+                    (u as f32 / n_unison as f32).fract()
+                } else {
+                    0.0
+                };
+                v.osc1_phases[u] = init_phase;
+                v.osc2_phases[u] = (init_phase + 0.33).fract();
+            }
         }
+        v.osc1_phase = v.osc1_phases[0];
+        v.osc2_phase = v.osc2_phases[0];
+        v.sub_phase = 0.0;
 
         v.amp_env.trigger_attack();
         v.env2.trigger_attack();
@@ -377,8 +401,9 @@ impl WavetableDevice {
                 self.env3_adsr.3,
             );
 
-            // Mod matrix evaluation
+            // Mod matrix evaluation (all 14 destinations)
             let key_norm = (voice.note as f32 - 60.0) / 12.0;
+
             let osc1_pos_mod = self.mod_matrix.evaluate_destination(
                 ModDestination::Osc1Pos,
                 amp_val, env2_val, env3_val, lfo1_sig, lfo2_sig, voice.velocity, key_norm, 0.0, 0.0, 0.0,
@@ -387,8 +412,20 @@ impl WavetableDevice {
                 ModDestination::Osc2Pos,
                 amp_val, env2_val, env3_val, lfo1_sig, lfo2_sig, voice.velocity, key_norm, 0.0, 0.0, 0.0,
             );
+            let osc1_warp_mod = self.mod_matrix.evaluate_destination(
+                ModDestination::Osc1Warp,
+                amp_val, env2_val, env3_val, lfo1_sig, lfo2_sig, voice.velocity, key_norm, 0.0, 0.0, 0.0,
+            );
+            let osc2_warp_mod = self.mod_matrix.evaluate_destination(
+                ModDestination::Osc2Warp,
+                amp_val, env2_val, env3_val, lfo1_sig, lfo2_sig, voice.velocity, key_norm, 0.0, 0.0, 0.0,
+            );
             let osc1_pitch_mod = self.mod_matrix.evaluate_destination(
                 ModDestination::Osc1Pitch,
+                amp_val, env2_val, env3_val, lfo1_sig, lfo2_sig, voice.velocity, key_norm, 0.0, 0.0, 0.0,
+            );
+            let osc2_pitch_mod = self.mod_matrix.evaluate_destination(
+                ModDestination::Osc2Pitch,
                 amp_val, env2_val, env3_val, lfo1_sig, lfo2_sig, voice.velocity, key_norm, 0.0, 0.0, 0.0,
             );
             let f1_cut_mod = self.mod_matrix.evaluate_destination(
@@ -399,77 +436,178 @@ impl WavetableDevice {
                 ModDestination::Filter1Res,
                 amp_val, env2_val, env3_val, lfo1_sig, lfo2_sig, voice.velocity, key_norm, 0.0, 0.0, 0.0,
             );
+            let f1_morph_mod = self.mod_matrix.evaluate_destination(
+                ModDestination::Filter1Morph,
+                amp_val, env2_val, env3_val, lfo1_sig, lfo2_sig, voice.velocity, key_norm, 0.0, 0.0, 0.0,
+            );
+            let f2_cut_mod = self.mod_matrix.evaluate_destination(
+                ModDestination::Filter2Cutoff,
+                amp_val, env2_val, env3_val, lfo1_sig, lfo2_sig, voice.velocity, key_norm, 0.0, 0.0, 0.0,
+            );
+            let f2_res_mod = self.mod_matrix.evaluate_destination(
+                ModDestination::Filter2Res,
+                amp_val, env2_val, env3_val, lfo1_sig, lfo2_sig, voice.velocity, key_norm, 0.0, 0.0, 0.0,
+            );
+            let f2_morph_mod = self.mod_matrix.evaluate_destination(
+                ModDestination::Filter2Morph,
+                amp_val, env2_val, env3_val, lfo1_sig, lfo2_sig, voice.velocity, key_norm, 0.0, 0.0, 0.0,
+            );
+            let vol_mod = self.mod_matrix.evaluate_destination(
+                ModDestination::Volume,
+                amp_val, env2_val, env3_val, lfo1_sig, lfo2_sig, voice.velocity, key_norm, 0.0, 0.0, 0.0,
+            );
+            let pan_mod = self.mod_matrix.evaluate_destination(
+                ModDestination::Pan,
+                amp_val, env2_val, env3_val, lfo1_sig, lfo2_sig, voice.velocity, key_norm, 0.0, 0.0, 0.0,
+            );
 
             // Frequency calculations
             let note_pitch = voice.note as f32;
             let note_freq = 440.0 * 2.0f32.powf((note_pitch - 69.0) / 12.0);
 
             let osc1_semi = self.osc1_transpose as f32 + self.osc1_fine_cents * 0.01 + osc1_pitch_mod * 12.0;
-            let osc1_freq = (note_freq * 2.0f32.powf(osc1_semi / 12.0)).clamp(10.0, sr * 0.48);
-
-            let osc2_semi = self.osc2_transpose as f32 + self.osc2_fine_cents * 0.01;
-            let osc2_freq = (note_freq * 2.0f32.powf(osc2_semi / 12.0)).clamp(10.0, sr * 0.48);
+            let osc2_semi = self.osc2_transpose as f32 + self.osc2_fine_cents * 0.01 + osc2_pitch_mod * 12.0;
 
             let sub_freq = (note_freq * 2.0f32.powf(self.sub_octave as f32)).clamp(10.0, sr * 0.48);
-
-            // Advance phases
-            voice.osc1_phase = (voice.osc1_phase + osc1_freq * inv_sr).fract();
-            voice.osc2_phase = (voice.osc2_phase + osc2_freq * inv_sr).fract();
             voice.sub_phase = (voice.sub_phase + sub_freq * inv_sr).fract();
 
-            // Osc 1 synthesis
             let pos1 = (self.osc1_pos + osc1_pos_mod).clamp(0.0, 1.0);
-            let warped_phase1 = Self::apply_warp(voice.osc1_phase, self.osc1_warp_mode, self.osc1_warp_param);
-            let raw_osc1 = self.osc1_table.read_interpolated(warped_phase1, pos1);
-            let osc1_sample = Self::apply_fold(raw_osc1, self.osc1_warp_mode, self.osc1_warp_param) * self.osc1_gain;
-
-            // Osc 2 synthesis
             let pos2 = (self.osc2_pos + osc2_pos_mod).clamp(0.0, 1.0);
-            let warped_phase2 = Self::apply_warp(voice.osc2_phase, self.osc2_warp_mode, self.osc2_warp_param);
-            let raw_osc2 = self.osc2_table.read_interpolated(warped_phase2, pos2);
-            let osc2_sample = Self::apply_fold(raw_osc2, self.osc2_warp_mode, self.osc2_warp_param) * self.osc2_gain;
+            let warp1 = self.osc1_warp_param + osc1_warp_mod;
+            let warp2 = self.osc2_warp_param + osc2_warp_mod;
+
+            let voice_pan = (base_pan + pan_mod).clamp(-1.0, 1.0);
+
+            // Genuine Multi-Voice Unison Rendering
+            let n_unison = self.unison_voices.clamp(1, MAX_UNISON_VOICES);
+            let unison_amt = self.unison_amount.clamp(0.0, 1.0);
+            let voice_weight = 1.0 / (n_unison as f32).sqrt();
+
+            let mut osc1_sum_l = 0.0f32;
+            let mut osc1_sum_r = 0.0f32;
+            let mut osc2_sum_l = 0.0f32;
+            let mut osc2_sum_r = 0.0f32;
+
+            for u in 0..n_unison {
+                let spread_ratio = if n_unison > 1 {
+                    2.0 * (u as f32 / (n_unison - 1) as f32) - 1.0
+                } else {
+                    0.0
+                };
+
+                let (detune_semi, pan_offset) = match self.unison_mode {
+                    UnisonMode::Classic => {
+                        let detune = spread_ratio * unison_amt * 0.5;
+                        let pan = spread_ratio * unison_amt * 0.8;
+                        (detune, pan)
+                    }
+                    UnisonMode::Shimmer => {
+                        let shimmer_step = if u % 2 == 1 { 12.0 } else { 0.0 };
+                        let detune = (spread_ratio * 0.2 + shimmer_step * (u as f32 / n_unison as f32)) * unison_amt;
+                        let pan = spread_ratio * unison_amt * 0.8;
+                        (detune, pan)
+                    }
+                    UnisonMode::Noise => {
+                        let jitter = (voice.rng.next_f32() - 0.5) * 0.4;
+                        let detune = (spread_ratio * 0.3 + jitter) * unison_amt;
+                        let pan = (spread_ratio + (voice.rng.next_f32() - 0.5) * 0.2) * unison_amt * 0.8;
+                        (detune, pan)
+                    }
+                    UnisonMode::PhaseSync => {
+                        let detune = spread_ratio * unison_amt * 0.5;
+                        let pan = spread_ratio * unison_amt * 0.8;
+                        (detune, pan)
+                    }
+                };
+
+                let freq1_u = (note_freq * 2.0f32.powf((osc1_semi + detune_semi) / 12.0)).clamp(10.0, sr * 0.48);
+                let freq2_u = (note_freq * 2.0f32.powf((osc2_semi + detune_semi) / 12.0)).clamp(10.0, sr * 0.48);
+
+                voice.osc1_phases[u] = (voice.osc1_phases[u] + freq1_u * inv_sr).fract();
+                voice.osc2_phases[u] = (voice.osc2_phases[u] + freq2_u * inv_sr).fract();
+
+                let warped1 = Self::apply_warp(voice.osc1_phases[u], self.osc1_warp_mode, warp1);
+                let raw1 = self.osc1_table.read_interpolated(warped1, pos1);
+                let s1 = Self::apply_fold(raw1, self.osc1_warp_mode, warp1) * self.osc1_gain * voice_weight;
+
+                let warped2 = Self::apply_warp(voice.osc2_phases[u], self.osc2_warp_mode, warp2);
+                let raw2 = self.osc2_table.read_interpolated(warped2, pos2);
+                let s2 = Self::apply_fold(raw2, self.osc2_warp_mode, warp2) * self.osc2_gain * voice_weight;
+
+                let u_pan = (voice_pan + pan_offset).clamp(-1.0, 1.0);
+                let angle = (u_pan + 1.0) * 0.25 * PI;
+                let pan_l = angle.cos();
+                let pan_r = angle.sin();
+
+                osc1_sum_l += s1 * pan_l;
+                osc1_sum_r += s1 * pan_r;
+                osc2_sum_l += s2 * pan_l;
+                osc2_sum_r += s2 * pan_r;
+            }
+            voice.osc1_phase = voice.osc1_phases[0];
+            voice.osc2_phase = voice.osc2_phases[0];
 
             // Sub oscillator synthesis (Sine with tone filter)
-            let mut sub_sample = 0.0f32;
+            let mut sub_sample_l = 0.0f32;
+            let mut sub_sample_r = 0.0f32;
             if self.sub_active {
                 let sub_raw = (2.0 * PI * voice.sub_phase).sin();
                 let alpha = (self.sub_tone * 0.8 + 0.1).clamp(0.01, 0.95);
                 voice.sub_filter_state += alpha * (sub_raw - voice.sub_filter_state);
-                sub_sample = voice.sub_filter_state * self.sub_gain;
+                let sub_s = voice.sub_filter_state * self.sub_gain;
+                let angle = (voice_pan + 1.0) * 0.25 * PI;
+                sub_sample_l = sub_s * angle.cos();
+                sub_sample_r = sub_s * angle.sin();
             }
 
-            // Dual Cytomic ZDF filter
+            // Dual Cytomic ZDF filter (stereo)
             voice.dual_filter.routing = self.filter_routing;
             voice.dual_filter.filter1.filter_type = self.filter1_type;
             voice.dual_filter.filter1.circuit_model = self.filter1_model;
             voice.dual_filter.filter2.filter_type = self.filter2_type;
             voice.dual_filter.filter2.circuit_model = self.filter2_model;
 
+            voice.dual_filter_r.routing = self.filter_routing;
+            voice.dual_filter_r.filter1.filter_type = self.filter1_type;
+            voice.dual_filter_r.filter1.circuit_model = self.filter1_model;
+            voice.dual_filter_r.filter2.filter_type = self.filter2_type;
+            voice.dual_filter_r.filter2.circuit_model = self.filter2_model;
+
             let mod_cutoff1 = (self.filter1_cutoff * 2.0f32.powf(f1_cut_mod * 4.0)).clamp(20.0, 20000.0);
             let mod_res1 = (self.filter1_res + f1_res_mod * 0.5).clamp(0.0, 1.0);
+            let mod_morph1 = (self.filter1_morph + f1_morph_mod).clamp(0.0, 1.0);
 
-            let filtered_sample = voice.dual_filter.process(
-                osc1_sample + sub_sample,
-                osc2_sample,
+            let mod_cutoff2 = (self.filter2_cutoff * 2.0f32.powf(f2_cut_mod * 4.0)).clamp(20.0, 20000.0);
+            let mod_res2 = (self.filter2_res + f2_res_mod * 0.5).clamp(0.0, 1.0);
+            let mod_morph2 = (self.filter2_morph + f2_morph_mod).clamp(0.0, 1.0);
+
+            let fl = voice.dual_filter.process(
+                osc1_sum_l + sub_sample_l,
+                osc2_sum_l,
                 mod_cutoff1,
                 mod_res1,
-                self.filter1_morph,
-                self.filter2_cutoff,
-                self.filter2_res,
-                self.filter2_morph,
+                mod_morph1,
+                mod_cutoff2,
+                mod_res2,
+                mod_morph2,
+            );
+            let fr = voice.dual_filter_r.process(
+                osc1_sum_r + sub_sample_r,
+                osc2_sum_r,
+                mod_cutoff1,
+                mod_res1,
+                mod_morph1,
+                mod_cutoff2,
+                mod_res2,
+                mod_morph2,
             );
 
-            // VCA and Unison spread
-            let voice_gain = amp_val * voice.velocity * base_vol;
+            // VCA with Volume modulation
+            let mod_voice_vol = (base_vol * (1.0 + vol_mod).max(0.0)).clamp(0.0, 2.0);
+            let voice_gain = amp_val * voice.velocity * mod_voice_vol;
 
-            // Unison spread across stereo
-            let pan_angle = (base_pan + 1.0) * 0.25 * PI;
-            let left_pan = pan_angle.cos();
-            let right_pan = pan_angle.sin();
-
-            let sample = filtered_sample * voice_gain;
-            out_l += sample * left_pan;
-            out_r += sample * right_pan;
+            out_l += fl * voice_gain;
+            out_r += fr * voice_gain;
         }
 
         (out_l, out_r)
@@ -566,5 +704,84 @@ mod tests {
         assert!(energy > 0.001, "Wavetable must generate audible output");
 
         synth.trigger_note_off(60);
+    }
+
+    #[test]
+    fn test_wavetable_unison_modes_and_amount_spread() {
+        let mut synth_no_unison = WavetableDevice::new(44100.0);
+        synth_no_unison.unison_voices = 4;
+        synth_no_unison.unison_amount = 0.0;
+        synth_no_unison.trigger_note_on(60, 100);
+
+        let mut synth_with_unison = WavetableDevice::new(44100.0);
+        synth_with_unison.unison_voices = 4;
+        synth_with_unison.unison_amount = 0.5;
+        synth_with_unison.trigger_note_on(60, 100);
+
+        let mut diff = 0.0f32;
+        for _ in 0..256 {
+            let (l1, r1) = synth_no_unison.process_stereo_sample();
+            let (l2, r2) = synth_with_unison.process_stereo_sample();
+            diff += (l1 - l2).abs() + (r1 - r2).abs();
+        }
+        assert!(
+            diff > 0.01,
+            "Unison amount 0.0 vs 0.5 must produce measurable difference, diff={}",
+            diff
+        );
+
+        // Verify all 4 unison modes run without error and produce stereo spread
+        for mode in [UnisonMode::Classic, UnisonMode::Shimmer, UnisonMode::Noise, UnisonMode::PhaseSync] {
+            let mut synth = WavetableDevice::new(44100.0);
+            synth.unison_mode = mode;
+            synth.unison_voices = 4;
+            synth.unison_amount = 0.4;
+            synth.trigger_note_on(57, 100);
+
+            let mut energy_l = 0.0f32;
+            let mut energy_r = 0.0f32;
+            for _ in 0..256 {
+                let (l, r) = synth.process_stereo_sample();
+                energy_l += l * l;
+                energy_r += r * r;
+            }
+            assert!(energy_l > 0.001, "Unison mode {:?} left energy must be non-zero", mode);
+            assert!(energy_r > 0.001, "Unison mode {:?} right energy must be non-zero", mode);
+        }
+    }
+
+    #[test]
+    fn test_wavetable_mod_matrix_all_destinations() {
+        use crate::wavetable::mod_matrix::{ModDestination, ModSource};
+
+        // Test Filter 2 Cutoff destination
+        let mut synth_base = WavetableDevice::new(44100.0);
+        synth_base.trigger_note_on(60, 100);
+
+        let mut synth_mod = WavetableDevice::new(44100.0);
+        synth_mod.mod_matrix.set_slot(0, ModSource::AmpEnv, ModDestination::Filter2Cutoff, 1.0);
+        synth_mod.trigger_note_on(60, 100);
+
+        let mut diff_f2 = 0.0f32;
+        for _ in 0..256 {
+            let (l1, _) = synth_base.process_stereo_sample();
+            let (l2, _) = synth_mod.process_stereo_sample();
+            diff_f2 += (l1 - l2).abs();
+        }
+        assert!(diff_f2 > 0.001, "Filter2Cutoff modulation must affect output");
+
+        // Test Pan destination
+        let mut synth_pan = WavetableDevice::new(44100.0);
+        synth_pan.mod_matrix.set_slot(0, ModSource::AmpEnv, ModDestination::Pan, 1.0);
+        synth_pan.trigger_note_on(60, 100);
+
+        let mut energy_l = 0.0f32;
+        let mut energy_r = 0.0f32;
+        for _ in 0..256 {
+            let (l, r) = synth_pan.process_stereo_sample();
+            energy_l += l * l;
+            energy_r += r * r;
+        }
+        assert!(energy_r > energy_l * 1.5, "Positive Pan modulation must shift energy to right");
     }
 }

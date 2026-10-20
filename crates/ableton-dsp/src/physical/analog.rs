@@ -101,6 +101,8 @@ pub struct AnalogDevice {
     pub lfo1: Lfo,
     pub lfo1_freq: f32,
     pub lfo1_shape: LfoShape,
+    pub lfo1_to_pitch: f32,
+    pub lfo1_to_filter: f32,
 
     pub master_volume: f32,
     pub master_pan: f32,
@@ -142,6 +144,8 @@ impl AnalogDevice {
             lfo1: Lfo::new(),
             lfo1_freq: 2.5,
             lfo1_shape: LfoShape::Triangle,
+            lfo1_to_pitch: 0.0,
+            lfo1_to_filter: 0.0,
             master_volume: 0.7,
             master_pan: 0.0,
             voices,
@@ -228,6 +232,8 @@ impl AnalogDevice {
         let sr = self.sample_rate;
         let inv_sr = 1.0 / sr;
 
+        let (lfo1_sig, _) = self.lfo1.next_sample(self.lfo1_freq, 0.0, 0.0, self.lfo1_shape, sr);
+
         let mut out_l = 0.0f32;
         let mut out_r = 0.0f32;
 
@@ -263,14 +269,15 @@ impl AnalogDevice {
             let note_freq = 440.0 * 2.0f32.powf((voice.note as f32 - 69.0) / 12.0);
 
             // Osc 1
-            let osc1_semi = self.osc1_octave as f32 * 12.0 + self.osc1_detune_cents * 0.01;
+            let lfo_pitch_mod = lfo1_sig * self.lfo1_to_pitch * 2.0;
+            let osc1_semi = self.osc1_octave as f32 * 12.0 + self.osc1_detune_cents * 0.01 + lfo_pitch_mod;
             let osc1_freq = (note_freq * 2.0f32.powf(osc1_semi / 12.0)).clamp(10.0, sr * 0.48);
             let osc1_dt = osc1_freq * inv_sr;
             voice.osc1_phase = (voice.osc1_phase + osc1_dt).fract();
             let sig1 = Self::render_osc(self.osc1_waveform, voice.osc1_phase, osc1_dt, self.osc1_pwm) * self.osc1_gain;
 
             // Osc 2
-            let osc2_semi = self.osc2_octave as f32 * 12.0 + self.osc2_detune_cents * 0.01;
+            let osc2_semi = self.osc2_octave as f32 * 12.0 + self.osc2_detune_cents * 0.01 + lfo_pitch_mod;
             let osc2_freq = (note_freq * 2.0f32.powf(osc2_semi / 12.0)).clamp(10.0, sr * 0.48);
             let osc2_dt = osc2_freq * inv_sr;
             voice.osc2_phase = (voice.osc2_phase + osc2_dt).fract();
@@ -289,7 +296,8 @@ impl AnalogDevice {
             voice.dual_filter.filter2.filter_type = CytomicFilterType::Lowpass12;
             voice.dual_filter.filter2.circuit_model = CircuitModel::Clean;
 
-            let mod_cutoff1 = (self.filter1_cutoff * 2.0f32.powf(fenv_val * self.filter1_env_amt * 4.0)).clamp(20.0, 20000.0);
+            let lfo_filter_mod = lfo1_sig * self.lfo1_to_filter * 2.0;
+            let mod_cutoff1 = (self.filter1_cutoff * 2.0f32.powf(fenv_val * self.filter1_env_amt * 4.0 + lfo_filter_mod)).clamp(20.0, 20000.0);
 
             let filtered = voice.dual_filter.process(
                 sig1 + sub_sig + noise_sig,
@@ -397,5 +405,28 @@ mod tests {
             energy += buf.left[i] * buf.left[i];
         }
         assert!(energy > 0.0001, "Analog synth must render audible audio");
+    }
+
+    #[test]
+    fn test_analog_lfo1_modulation_pitch_and_filter() {
+        let mut analog_base = AnalogDevice::new(44100.0);
+        analog_base.trigger_note_on(60, 100);
+
+        let mut analog_mod = AnalogDevice::new(44100.0);
+        analog_mod.lfo1_to_pitch = 1.0;
+        analog_mod.lfo1_to_filter = 1.0;
+        analog_mod.trigger_note_on(60, 100);
+
+        let mut diff = 0.0f32;
+        for _ in 0..256 {
+            let (l1, _) = analog_base.process_stereo_sample();
+            let (l2, _) = analog_mod.process_stereo_sample();
+            diff += (l1 - l2).abs();
+        }
+        assert!(
+            diff > 0.01,
+            "LFO1 pitch and filter modulation must produce measurable audio change, diff={}",
+            diff
+        );
     }
 }

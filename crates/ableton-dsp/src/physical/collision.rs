@@ -4,6 +4,7 @@ use std::f32::consts::PI;
 use ableton_core::{AudioBuffer, Device, DeviceCategory, InstrumentDevice, MidiEvent, MusicalTime};
 
 use crate::envelope::AdsrEnvelope;
+use crate::oscillator::XorShift32;
 
 pub const MAX_COLLISION_VOICES: usize = 8;
 pub const NUM_MODAL_MODES: usize = 6;
@@ -121,6 +122,7 @@ pub struct CollisionDevice {
     // Mallet Exciter
     pub mallet_stiffness: f32, // 0.0 (soft felt) .. 1.0 (hard wood)
     pub mallet_noise: f32,     // Strike noise blend
+    pub noise_gen: XorShift32,
 
     // Resonator 1
     pub res1_structure: ResonatorStructure,
@@ -153,6 +155,7 @@ impl CollisionDevice {
             sample_rate: sr,
             mallet_stiffness: 0.6,
             mallet_noise: 0.15,
+            noise_gen: XorShift32::new(0x13579bdf),
             res1_structure: ResonatorStructure::Marimba,
             res1_decay: 1.2,
             res1_material: 0.4,
@@ -257,12 +260,13 @@ impl CollisionDevice {
                 continue;
             }
 
-            // Mallet Hertzian impact excitation pulse
+            // Mallet Hertzian impact excitation pulse with mallet_noise blend
             let exciter = if voice.mallet_samples_left > 0 {
                 let frac = voice.mallet_samples_left as f32 / 20.0;
                 let hertz_force = (frac.clamp(0.0, 1.0)).powf(1.5);
                 voice.mallet_samples_left -= 1;
-                hertz_force * voice.mallet_vel * 2.0
+                let noise = (self.noise_gen.next_f32() * 2.0 - 1.0) * self.mallet_noise;
+                (hertz_force * (1.0 - self.mallet_noise * 0.5) + noise) * voice.mallet_vel * 2.0
             } else {
                 0.0
             };
@@ -387,5 +391,28 @@ mod tests {
             energy += buf.left[i] * buf.left[i];
         }
         assert!(energy > 0.0001, "Collision must render audible modal physical modeling audio");
+    }
+
+    #[test]
+    fn test_collision_mallet_noise_blend() {
+        let mut coll_no_noise = CollisionDevice::new(44100.0);
+        coll_no_noise.mallet_noise = 0.0;
+        coll_no_noise.trigger_note_on(60, 100);
+
+        let mut coll_with_noise = CollisionDevice::new(44100.0);
+        coll_with_noise.mallet_noise = 0.5;
+        coll_with_noise.trigger_note_on(60, 100);
+
+        let mut diff = 0.0f32;
+        for _ in 0..128 {
+            let (l1, _) = coll_no_noise.process_stereo_sample();
+            let (l2, _) = coll_with_noise.process_stereo_sample();
+            diff += (l1 - l2).abs();
+        }
+        assert!(
+            diff > 0.001,
+            "Mallet noise blend must produce measurable difference in excitation pulse, diff={}",
+            diff
+        );
     }
 }

@@ -51,6 +51,14 @@ pub struct DrumRack {
     pub sample_rate: f32,
     pub return_a_level: f32,
     pub return_b_level: f32,
+    // Return chains state
+    pub return_a_buffer_l: [f32; 2048],
+    pub return_a_buffer_r: [f32; 2048],
+    pub return_a_pos: usize,
+    pub return_a_filter_l: f32,
+    pub return_a_filter_r: f32,
+    pub return_b_filter_l: f32,
+    pub return_b_filter_r: f32,
 }
 
 impl DrumRack {
@@ -107,10 +115,8 @@ impl DrumRack {
 
         // Banks B..H (remaining 112 pads, covering notes 0..35 and 52..127)
         for i in 16..TOTAL_DRUM_PADS {
-            let midi_note = if i < 36 {
-                (i - 16) as u8 // Notes 0..19
-            } else if i < 52 {
-                (i - 16) as u8 // Notes 20..35
+            let midi_note = if i < 52 {
+                (i - 16) as u8 // Notes 0..35
             } else {
                 i as u8        // Notes 52..127
             };
@@ -141,6 +147,13 @@ impl DrumRack {
             sample_rate: sr,
             return_a_level: 1.0,
             return_b_level: 1.0,
+            return_a_buffer_l: [0.0; 2048],
+            return_a_buffer_r: [0.0; 2048],
+            return_a_pos: 0,
+            return_a_filter_l: 0.0,
+            return_a_filter_r: 0.0,
+            return_b_filter_l: 0.0,
+            return_b_filter_r: 0.0,
         }
     }
 
@@ -220,8 +233,29 @@ impl DrumRack {
             return;
         }
 
-        self.sync_visible_to_all();
-        let pad = &self.pads[pad_idx as usize];
+        let global_idx = self.active_bank * PADS_PER_BANK + pad_idx as usize;
+        if global_idx >= self.all_pads.len() {
+            return;
+        }
+
+        // Sync pad DSP parameters from visible bank to all_pads without heap allocation
+        {
+            let vis = &self.pads[pad_idx as usize];
+            let all = &mut self.all_pads[global_idx];
+            all.source = vis.source.clone();
+            all.volume = vis.volume;
+            all.pan = vis.pan;
+            all.pitch_semitones = vis.pitch_semitones;
+            all.decay_seconds = vis.decay_seconds;
+            all.choke_group = vis.choke_group;
+            all.use_cubic_interpolation = vis.use_cubic_interpolation;
+            all.solo = vis.solo;
+            all.mute = vis.mute;
+            all.send_a = vis.send_a;
+            all.send_b = vis.send_b;
+        }
+
+        let pad = &self.all_pads[global_idx];
 
         // Solo & Mute check
         let any_solo = self.all_pads.iter().any(|p| p.solo);
@@ -243,7 +277,7 @@ impl DrumRack {
         let voice_idx = self.allocate_voice();
         let voice = &mut self.voices[voice_idx];
         voice.active = true;
-        voice.pad_idx = pad_idx;
+        voice.pad_idx = global_idx as u8;
         voice.choke_group = pad.choke_group;
         voice.phase = 0.0;
         voice.velocity = (velocity as f32) / 127.0;
@@ -298,7 +332,7 @@ impl DrumRack {
                 let voice_idx = self.allocate_voice();
                 let voice = &mut self.voices[voice_idx];
                 voice.active = true;
-                voice.pad_idx = (i % PADS_PER_BANK) as u8;
+                voice.pad_idx = i as u8;
                 voice.choke_group = pad.choke_group;
                 voice.phase = 0.0;
                 voice.velocity = (velocity as f32) / 127.0;
@@ -342,24 +376,45 @@ impl DrumRack {
     /// Steady-state block rendering with ZERO dynamic allocations.
     pub fn process_block(&mut self, out_left: &mut [f32], out_right: &mut [f32]) {
         let block_len = out_left.len().min(out_right.len());
+        if block_len == 0 {
+            return;
+        }
+
+        let n_frames = block_len.min(1024);
+        let mut send_a_l = [0.0f32; 1024];
+        let mut send_a_r = [0.0f32; 1024];
+        let mut send_b_l = [0.0f32; 1024];
+        let mut send_b_r = [0.0f32; 1024];
+
         for voice in &mut self.voices {
             if !voice.active {
                 continue;
             }
-            let pad = &self.pads[voice.pad_idx as usize];
+            let pad_idx = voice.pad_idx as usize;
+            if pad_idx >= self.all_pads.len() {
+                voice.active = false;
+                continue;
+            }
+            let pad = &self.all_pads[pad_idx];
 
             let pan_norm = pad.pan.clamp(-1.0, 1.0);
             let theta = (pan_norm + 1.0) * 0.25 * PI;
             let pan_l = theta.cos();
             let pan_r = theta.sin();
             let gain = pad.volume * voice.velocity;
+            let send_a_amt = pad.send_a.clamp(0.0, 1.0);
+            let send_b_amt = pad.send_b.clamp(0.0, 1.0);
 
-            for i in 0..block_len {
+            for i in 0..n_frames {
                 let sample = match &pad.source {
                     DrumPadSource::Sample { sample_data, channels, .. } => {
-                        let ch = *channels as usize;
+                        let ch = (*channels as usize).max(1);
+                        if sample_data.is_empty() || *channels == 0 {
+                            voice.active = false;
+                            break;
+                        }
                         let total_frames = sample_data.len() / ch;
-                        if voice.phase as usize >= total_frames {
+                        if total_frames == 0 || voice.phase as usize >= total_frames {
                             voice.active = false;
                             break;
                         }
@@ -394,9 +449,57 @@ impl DrumRack {
                 }
 
                 let sig = sample * voice.envelope_val * gain;
-                out_left[i] += sig * pan_l;
-                out_right[i] += sig * pan_r;
+                let sig_l = sig * pan_l;
+                let sig_r = sig * pan_r;
+
+                out_left[i] += sig_l;
+                out_right[i] += sig_r;
+
+                if send_a_amt > 0.0 {
+                    send_a_l[i] += sig_l * send_a_amt;
+                    send_a_r[i] += sig_r * send_a_amt;
+                }
+                if send_b_amt > 0.0 {
+                    send_b_l[i] += sig_l * send_b_amt;
+                    send_b_r[i] += sig_r * send_b_amt;
+                }
             }
+        }
+
+        // Return chains processing
+        let delay_len_l = 882;
+        let delay_len_r = 1146;
+        for i in 0..n_frames {
+            // Return Chain A: Stereo space delay with damping
+            let read_l = (self.return_a_pos + 2048 - delay_len_l) % 2048;
+            let read_r = (self.return_a_pos + 2048 - delay_len_r) % 2048;
+            let del_l = self.return_a_buffer_l[read_l];
+            let del_r = self.return_a_buffer_r[read_r];
+
+            self.return_a_filter_l += 0.35 * (del_l - self.return_a_filter_l);
+            self.return_a_filter_r += 0.35 * (del_r - self.return_a_filter_r);
+
+            self.return_a_buffer_l[self.return_a_pos] = send_a_l[i] + self.return_a_filter_r * 0.4;
+            self.return_a_buffer_r[self.return_a_pos] = send_a_r[i] + self.return_a_filter_l * 0.4;
+            self.return_a_pos = (self.return_a_pos + 1) % 2048;
+
+            let ret_a_l = self.return_a_filter_l * self.return_a_level;
+            let ret_a_r = self.return_a_filter_r * self.return_a_level;
+
+            // Return Chain B: Warm saturation
+            let sat_in_l = send_b_l[i] * 2.5;
+            let sat_in_r = send_b_r[i] * 2.5;
+            let sat_l = sat_in_l.tanh() * 0.6;
+            let sat_r = sat_in_r.tanh() * 0.6;
+
+            self.return_b_filter_l += 0.5 * (sat_l - self.return_b_filter_l);
+            self.return_b_filter_r += 0.5 * (sat_r - self.return_b_filter_r);
+
+            let ret_b_l = self.return_b_filter_l * self.return_b_level;
+            let ret_b_r = self.return_b_filter_r * self.return_b_level;
+
+            out_left[i] += ret_a_l + ret_b_l;
+            out_right[i] += ret_a_r + ret_b_r;
         }
     }
 
@@ -443,11 +546,8 @@ impl InstrumentDevice for DrumRack {
         }
 
         for event in midi_in {
-            match *event {
-                MidiEvent::NoteOn { note, velocity, .. } => {
-                    self.trigger_midi_note(note, velocity);
-                }
-                _ => {}
+            if let MidiEvent::NoteOn { note, velocity, .. } = *event {
+                self.trigger_midi_note(note, velocity);
             }
         }
 
@@ -464,5 +564,64 @@ impl InstrumentDevice for DrumRack {
         for v in &mut self.voices {
             v.active = false;
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_drum_rack_multi_bank_all_128_pads() {
+        let mut rack = DrumRack::new(44100.0);
+        // Bank A: pad 0 (MIDI 36)
+        rack.all_pads[0].volume = 0.5;
+        // Bank B: pad 16 (MIDI 0)
+        rack.all_pads[16].volume = 0.8;
+        // Bank D: pad 52 (MIDI 52)
+        rack.all_pads[52].volume = 0.7;
+        // Bank H: pad 127
+        rack.all_pads[127].volume = 0.2;
+
+        rack.trigger_midi_note(36, 100);
+        let v0 = rack.voices.iter().find(|v| v.active && v.pad_idx == 0);
+        assert!(v0.is_some(), "MIDI 36 should trigger pad 0");
+
+        rack.trigger_midi_note(0, 100);
+        let v16 = rack.voices.iter().find(|v| v.active && v.pad_idx == 16);
+        assert!(v16.is_some(), "MIDI 0 should trigger pad 16 in Bank B without aliasing to 0");
+
+        rack.trigger_midi_note(52, 100);
+        let v52 = rack.voices.iter().find(|v| v.active && v.pad_idx == 52);
+        assert!(v52.is_some(), "MIDI 52 should trigger pad 52 in Bank D without aliasing to Bank A");
+
+        rack.select_bank(7); // Bank H (pads 112..127)
+        rack.trigger_pad(15, 100); // 7 * 16 + 15 = 127
+        let v127 = rack.voices.iter().find(|v| v.active && v.pad_idx == 127);
+        assert!(v127.is_some(), "Triggering visible pad 15 in Bank H should activate voice with pad_idx 127");
+    }
+
+    #[test]
+    fn test_drum_rack_return_chains_send_a_and_b() {
+        let mut rack = DrumRack::new(44100.0);
+        // Mute dry pad volume to isolate send output
+        rack.all_pads[0].volume = 0.0;
+        rack.all_pads[0].send_a = 0.8;
+        rack.all_pads[0].send_b = 0.5;
+        rack.return_a_level = 1.0;
+        rack.return_b_level = 1.0;
+
+        rack.trigger_pad(0, 127);
+
+        let mut left = [0.0; 512];
+        let mut right = [0.0; 512];
+        rack.process_block(&mut left, &mut right);
+
+        let energy_l: f32 = left.iter().map(|s| s * s).sum();
+        let energy_r: f32 = right.iter().map(|s| s * s).sum();
+        assert!(
+            energy_l > 0.0001 && energy_r > 0.0001,
+            "Return chains A and B should produce audible wet audio even with zero dry gain"
+        );
     }
 }

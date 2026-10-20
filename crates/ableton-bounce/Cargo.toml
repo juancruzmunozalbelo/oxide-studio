@@ -34,3 +34,12 @@ path = "../../tests/e2e_bounce_render_test.rs"
 name = "e2e_m8_instruments_test"
 path = "../../tests/e2e_m8_instruments_test.rs"
 
+[[test]]
+name = "adversarial_m8_stress_test"
+path = "../../tests/adversarial_m8_stress_test.rs"
+
+[[test]]
+name = "e2e_m8_adversarial_filters_synths_test"
+path = "../../tests/e2e_m8_adversarial_filters_synths_test.rs"
+
+

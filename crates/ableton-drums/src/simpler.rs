@@ -319,11 +319,15 @@ impl SimplerDevice {
             return;
         }
 
+        if self.sample_channels == 0 {
+            return;
+        }
+
         let samples = match &self.sample_data {
             Some(s) if !s.is_empty() => s,
             _ => return,
         };
-        let total_frames = samples.len() / self.sample_channels.max(1) as usize;
+        let total_frames = samples.len() / (self.sample_channels as usize);
 
         let idx = self.allocate_voice();
         self.voice_counter += 1;
@@ -421,12 +425,19 @@ impl SimplerDevice {
         let mut out_l = 0.0f32;
         let mut out_r = 0.0f32;
 
+        if self.sample_channels == 0 {
+            return (0.0, 0.0);
+        }
+
         let samples = match &self.sample_data {
             Some(s) if !s.is_empty() => s,
             _ => return (0.0, 0.0),
         };
-        let ch = self.sample_channels.max(1) as usize;
+        let ch = self.sample_channels as usize;
         let total_frames = samples.len() / ch;
+        if total_frames == 0 {
+            return (0.0, 0.0);
+        }
 
         let base_vol = self.master_volume;
         let pan_angle = (self.master_pan.clamp(-1.0, 1.0) + 1.0) * 0.25 * std::f32::consts::PI;
@@ -434,7 +445,7 @@ impl SimplerDevice {
         let right_pan = pan_angle.sin();
 
         // LFO
-        let (_lfo_sig, _) = self.lfo.next_sample(self.lfo_freq, 0.0, 0.0, self.lfo_shape, sr);
+        let (lfo_sig, _) = self.lfo.next_sample(self.lfo_freq, 0.0, 0.0, self.lfo_shape, sr);
 
         for voice in &mut self.voices {
             if !voice.active {
@@ -455,20 +466,27 @@ impl SimplerDevice {
 
             voice.played_samples += 1;
 
-            // OneShot fade envelope
+            let curr_pos = voice.position;
+
+            // OneShot fade envelope (fade-in and fade-out)
             let fade_factor = if self.mode == SimplerMode::OneShot {
                 let fi = if voice.fade_in_samples > 0 && voice.played_samples < voice.fade_in_samples {
                     voice.played_samples as f32 / voice.fade_in_samples as f32
                 } else {
                     1.0
                 };
-                fi
+                let remaining_frames = (voice.slice_end as f64 - curr_pos).max(0.0) as usize;
+                let fo = if voice.fade_out_samples > 0 && remaining_frames < voice.fade_out_samples {
+                    remaining_frames as f32 / voice.fade_out_samples as f32
+                } else {
+                    1.0
+                };
+                (fi * fo).clamp(0.0, 1.0)
             } else {
                 1.0
             };
 
             // Interpolated sample reading
-            let curr_pos = voice.position;
             if curr_pos >= voice.slice_end as f64 {
                 if self.mode == SimplerMode::Classic && self.loop_enabled {
                     voice.position = voice.slice_start as f64;
@@ -494,15 +512,34 @@ impl SimplerDevice {
                 interp_l
             };
 
-            // Advance playback position
-            voice.position += voice.phase_step;
+            // Pitch envelope & LFO pitch modulation
+            let pitch_env_val = voice.pitch_env.next(
+                self.pitch_adsr.0,
+                self.pitch_adsr.1,
+                self.pitch_adsr.2,
+                self.pitch_adsr.3,
+            );
+            let pitch_mod_semi = pitch_env_val * self.pitch_env_semitones + lfo_sig * self.lfo_to_pitch * 12.0;
+            let effective_step = voice.phase_step * 2.0_f64.powf(pitch_mod_semi as f64 / 12.0);
 
-            // Filter processing
+            // Advance playback position
+            voice.position += effective_step;
+
+            // Filter envelope & LFO filter cutoff modulation
+            let filter_env_val = voice.filter_env.next(
+                self.filter_adsr.0,
+                self.filter_adsr.1,
+                self.filter_adsr.2,
+                self.filter_adsr.3,
+            );
+
             let (proc_l, proc_r) = if self.filter_enabled {
                 voice.filter.filter_type = self.filter_type;
                 voice.filter.circuit_model = self.filter_model;
-                let fl = voice.filter.process_sample(interp_l, self.filter_cutoff, self.filter_res, 0.0, 0.0);
-                let fr = voice.filter.process_sample(interp_r, self.filter_cutoff, self.filter_res, 0.0, 0.0);
+                let cutoff_mod_oct = filter_env_val * self.filter_env_amt * 4.0 + lfo_sig * self.lfo_to_filter * 3.0;
+                let mod_cutoff = (self.filter_cutoff * 2.0f32.powf(cutoff_mod_oct)).clamp(20.0, 20000.0);
+                let fl = voice.filter.process_sample(interp_l, mod_cutoff, self.filter_res, 0.0, 0.0);
+                let fr = voice.filter.process_sample(interp_r, mod_cutoff, self.filter_res, 0.0, 0.0);
                 (fl, fr)
             } else {
                 (interp_l, interp_r)
@@ -621,5 +658,59 @@ mod tests {
             slice_energy += buf2.left[i] * buf2.left[i];
         }
         assert!(slice_energy > 0.0001, "Simpler must render slice 0 audio");
+    }
+
+    #[test]
+    fn test_simpler_zero_channels_guard() {
+        let mut simpler = SimplerDevice::new(44100.0);
+        simpler.sample_channels = 0;
+        simpler.trigger_note_on(60, 100);
+
+        let mut buf = AudioBuffer::silence(256);
+        let time = MusicalTime::default();
+        simpler.process(&[], &mut buf, &time);
+
+        let energy: f32 = buf.left.iter().map(|s| s * s).sum();
+        assert_eq!(energy, 0.0, "Simpler with zero channels must safely produce silence without panicking");
+    }
+
+    #[test]
+    fn test_simpler_pitch_and_filter_modulation() {
+        // Run with neutral modulation
+        let mut simpler1 = SimplerDevice::new(44100.0);
+        simpler1.pitch_env_semitones = 0.0;
+        simpler1.lfo_to_pitch = 0.0;
+        simpler1.filter_enabled = true;
+        simpler1.filter_cutoff = 1000.0;
+        simpler1.filter_env_amt = 0.0;
+        simpler1.trigger_note_on(60, 100);
+
+        let mut buf1 = AudioBuffer::silence(256);
+        let time = MusicalTime::default();
+        simpler1.process(&[], &mut buf1, &time);
+
+        // Run with active pitch and filter envelope modulation
+        let mut simpler2 = SimplerDevice::new(44100.0);
+        simpler2.pitch_env_semitones = 12.0;
+        simpler2.pitch_adsr = (0.001, 0.2, 0.5, 0.2);
+        simpler2.lfo_to_pitch = 0.5;
+        simpler2.filter_enabled = true;
+        simpler2.filter_cutoff = 1000.0;
+        simpler2.filter_env_amt = 1.0;
+        simpler2.filter_adsr = (0.001, 0.2, 0.5, 0.2);
+        simpler2.lfo_to_filter = 0.8;
+        simpler2.trigger_note_on(60, 100);
+
+        let mut buf2 = AudioBuffer::silence(256);
+        simpler2.process(&[], &mut buf2, &time);
+
+        let mut diff = 0.0f32;
+        for i in 0..256 {
+            diff += (buf1.left[i] - buf2.left[i]).abs();
+        }
+        assert!(
+            diff > 0.01,
+            "Pitch and filter envelope/LFO modulation must produce distinct audio compared to neutral"
+        );
     }
 }

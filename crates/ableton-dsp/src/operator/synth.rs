@@ -445,12 +445,12 @@ impl OperatorDevice {
                     let phase_a = (voice.phases[0] + mod_index_scale * (out_c + out_b)).fract();
                     amp_a * Self::evaluate_waveform(self.ops[0].waveform, phase_a, dts[0], &self.ops[0].user_harmonics)
                 }
-                // Alg 4: (D -> C) -> A and B -> A
+                // Alg 4: D -> (C + B) -> A -> Out
                 FmAlgorithm::Alg4 => {
                     let phase_c = (voice.phases[2] + mod_index_scale * out_d).fract();
                     let out_c = amp_c * Self::evaluate_waveform(self.ops[2].waveform, phase_c, dts[2], &self.ops[2].user_harmonics);
-                    let raw_b = Self::evaluate_waveform(self.ops[1].waveform, voice.phases[1], dts[1], &self.ops[1].user_harmonics);
-                    let out_b = amp_b * raw_b;
+                    let phase_b = (voice.phases[1] + mod_index_scale * out_d).fract();
+                    let out_b = amp_b * Self::evaluate_waveform(self.ops[1].waveform, phase_b, dts[1], &self.ops[1].user_harmonics);
                     let phase_a = (voice.phases[0] + mod_index_scale * (out_c + out_b)).fract();
                     amp_a * Self::evaluate_waveform(self.ops[0].waveform, phase_a, dts[0], &self.ops[0].user_harmonics)
                 }
@@ -490,11 +490,11 @@ impl OperatorDevice {
                     let out_a = amp_a * Self::evaluate_waveform(self.ops[0].waveform, voice.phases[0], dts[0], &self.ops[0].user_harmonics);
                     0.5 * (out_b + out_a)
                 }
-                // Alg 9: (D -> C) -> B -> Out, A -> Out
+                // Alg 9: (D + C) -> B -> Out, A -> Out
                 FmAlgorithm::Alg9 => {
-                    let phase_c = (voice.phases[2] + mod_index_scale * out_d).fract();
-                    let out_c = amp_c * Self::evaluate_waveform(self.ops[2].waveform, phase_c, dts[2], &self.ops[2].user_harmonics);
-                    let phase_b = (voice.phases[1] + mod_index_scale * out_c).fract();
+                    let raw_c = Self::evaluate_waveform(self.ops[2].waveform, voice.phases[2], dts[2], &self.ops[2].user_harmonics);
+                    let out_c = amp_c * raw_c;
+                    let phase_b = (voice.phases[1] + mod_index_scale * (out_d + out_c)).fract();
                     let out_b = amp_b * Self::evaluate_waveform(self.ops[1].waveform, phase_b, dts[1], &self.ops[1].user_harmonics);
                     let out_a = amp_a * Self::evaluate_waveform(self.ops[0].waveform, voice.phases[0], dts[0], &self.ops[0].user_harmonics);
                     0.5 * (out_b + out_a)
@@ -639,6 +639,65 @@ mod tests {
                 energy += l * l + r * r;
             }
             assert!(energy > 0.0001, "Algorithm {:?} must produce sound", alg);
+        }
+    }
+
+    #[test]
+    fn test_operator_all_11_algorithms_produce_distinct_waveforms() {
+        let algorithms = [
+            FmAlgorithm::Alg1,
+            FmAlgorithm::Alg2,
+            FmAlgorithm::Alg3,
+            FmAlgorithm::Alg4,
+            FmAlgorithm::Alg5,
+            FmAlgorithm::Alg6,
+            FmAlgorithm::Alg7,
+            FmAlgorithm::Alg8,
+            FmAlgorithm::Alg9,
+            FmAlgorithm::Alg10,
+            FmAlgorithm::Alg11,
+        ];
+
+        let mut outputs: Vec<Vec<f32>> = Vec::new();
+
+        for &alg in &algorithms {
+            let mut op = OperatorDevice::new(44100.0);
+            op.algorithm = alg;
+            op.ops[0].coarse = 1.0;
+            op.ops[0].level = 1.0;
+            op.ops[1].coarse = 2.0;
+            op.ops[1].level = 0.8;
+            op.ops[2].coarse = 3.0;
+            op.ops[2].level = 0.7;
+            op.ops[3].coarse = 4.0;
+            op.ops[3].level = 0.6;
+            op.feedback_d = 0.2;
+
+            op.trigger_note_on(60, 100);
+
+            let mut buf = Vec::with_capacity(128);
+            for _ in 0..128 {
+                let (l, _) = op.process_stereo_sample();
+                buf.push(l);
+            }
+            outputs.push(buf);
+        }
+
+        // Pairwise verify every algorithm produces distinct waveform from all others
+        for i in 0..algorithms.len() {
+            for j in (i + 1)..algorithms.len() {
+                let mut diff = 0.0f32;
+                for k in 0..128 {
+                    diff += (outputs[i][k] - outputs[j][k]).abs();
+                }
+                assert!(
+                    diff > 0.001,
+                    "Algorithms {:?} and {:?} produced identical waveforms (diff: {})",
+                    algorithms[i],
+                    algorithms[j],
+                    diff
+                );
+            }
         }
     }
 }
