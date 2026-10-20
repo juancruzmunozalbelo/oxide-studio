@@ -1,11 +1,18 @@
 //! 16-pad Electronic Drum Rack and 909 percussion engine for ableton-rust.
 
 pub mod drum_rack;
+pub mod simpler;
 pub mod synth_models;
 pub mod voice;
 pub mod wav_loader;
 
-pub use drum_rack::{DrumPad, DrumPadSource, DrumRack, MAX_DRUM_VOICES, NUM_DRUM_PADS};
+pub use drum_rack::{
+    DrumPad, DrumPadSource, DrumRack, MAX_DRUM_VOICES, NUM_BANKS, NUM_DRUM_PADS, PADS_PER_BANK,
+    TOTAL_DRUM_PADS,
+};
+pub use simpler::{
+    OneShotRetrigger, SimplerDevice, SimplerMode, SimplerVoice, SimplerWarpMode, SlicingMode,
+};
 pub use synth_models::{SynthDrumType, SynthPercussion};
 pub use voice::DrumVoice;
 pub use wav_loader::{load_wav_file, DecodedWav};

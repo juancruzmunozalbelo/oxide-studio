@@ -1,7 +1,11 @@
 //! Core domain models and audio interfaces for ableton-rust.
 
+pub mod device;
+
 #[cfg(feature = "serde")]
 use serde::{Deserialize, Serialize};
+
+pub use device::{AudioEffectDevice, Device, DeviceCategory, InstrumentDevice, MidiEffectDevice};
 
 /// Fixed-size zero-allocation audio buffer holding up to 1024 stereo frames.
 #[derive(Debug, Clone, Copy, PartialEq)]

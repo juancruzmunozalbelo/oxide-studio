@@ -4,7 +4,7 @@
 //! XorShift white noise, dual ADSR envelopes, 4-shape LFO, monophonic last-note priority voice,
 //! parameter bank, and XY macro breakpoint modulation.
 
-use ableton_core::AudioBuffer;
+use ableton_core::{AudioBuffer, Device, DeviceCategory, InstrumentDevice, MidiEvent, MusicalTime};
 use crate::envelope::AdsrEnvelope;
 use crate::filter::MystranZdfLadder;
 use crate::lfo::{Lfo, LfoShape};
@@ -327,6 +327,66 @@ impl SynthEngine {
             left[i] = sample;
             right[i] = sample;
         }
+    }
+}
+
+impl Device for SynthEngine {
+    fn name(&self) -> &str {
+        "Synth"
+    }
+
+    fn category(&self) -> DeviceCategory {
+        DeviceCategory::Instrument
+    }
+
+    fn is_enabled(&self) -> bool {
+        true
+    }
+
+    fn set_enabled(&mut self, _enabled: bool) {}
+
+    fn reset(&mut self) {
+        self.reset();
+    }
+}
+
+impl InstrumentDevice for SynthEngine {
+    fn process(
+        &mut self,
+        midi_in: &[MidiEvent],
+        audio_out: &mut AudioBuffer,
+        _time: &MusicalTime,
+    ) {
+        for event in midi_in {
+            match *event {
+                MidiEvent::NoteOn { note, velocity, .. } => {
+                    self.note_on(note, velocity);
+                }
+                MidiEvent::NoteOff { note, .. } => {
+                    self.note_off(note);
+                }
+                _ => {}
+            }
+        }
+
+        let frames = audio_out.frame_count.min(1024);
+        for i in 0..frames {
+            let sample = self.process_sample();
+            audio_out.left[i] += sample;
+            audio_out.right[i] += sample;
+        }
+    }
+
+    fn note_on(&mut self, note: u8, velocity: u8) {
+        self.note_on(note, velocity);
+    }
+
+    fn note_off(&mut self, note: u8) {
+        self.note_off(note);
+    }
+
+    fn all_notes_off(&mut self) {
+        self.all_notes_off();
     }
 }
 

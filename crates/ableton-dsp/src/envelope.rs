@@ -119,6 +119,14 @@ impl AdsrEnvelope {
     pub fn is_idle(&self) -> bool {
         self.stage == EnvStage::Idle
     }
+
+    pub fn is_active(&self) -> bool {
+        self.stage != EnvStage::Idle
+    }
+
+    pub fn current_value(&self) -> f32 {
+        self.value
+    }
 }
 
 #[cfg(test)]

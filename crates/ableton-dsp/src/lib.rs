@@ -11,18 +11,30 @@
 //! - 38 factory synth presets catalog & 17 XY macro mappings with piece-wise breakpoint interpolation
 //! - Unified `SynthEngine` instrument
 
+pub mod cytomic;
+pub mod drift;
 pub mod envelope;
 pub mod filter;
 pub mod lfo;
+pub mod meld;
+pub mod operator;
 pub mod oscillator;
 pub mod parameters;
+pub mod physical;
 pub mod presets;
 pub mod synth;
 pub mod voice;
+pub mod wavetable;
 
+pub use cytomic::{CircuitModel, CytomicFilterType, CytomicSvfStage, CytomicZdfFilter, DualCytomicFilter, FilterRouting};
+pub use drift::{DriftDevice, DriftOsc2Waveform, DriftVoice, DriftVoiceMode};
 pub use envelope::{AdsrEnvelope, EnvStage};
 pub use filter::MystranZdfLadder;
 pub use lfo::{Lfo, LfoShape};
+pub use meld::{MeldDevice, MeldMacroEngine, MeldScale, MeldVoice, PlateResonator};
+pub use operator::{FmAlgorithm, OperatorDevice, OperatorFreqMode, OperatorUnit, OperatorVoice, OperatorWaveform};
+pub use physical::{AnalogDevice, CollisionDevice, ElectricDevice, ResonatorStructure, TensionDevice, TensionExciterType};
+pub use wavetable::{UnisonMode, WarpMode, WavetableCategory, WavetableDevice, WavetableSet, WavetableVoice};
 pub use oscillator::{mix_oscillators, poly_blep, PulseOscillator, SawOscillator, XorShift32};
 pub use parameters::{
     ParamId, ParameterBank, ParameterDescriptor, ScalingCurve, PARAMETER_COUNT,

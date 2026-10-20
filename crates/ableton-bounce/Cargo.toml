@@ -30,3 +30,7 @@ path = "../../tests/e2e_drum_rack_test.rs"
 name = "e2e_bounce_render_test"
 path = "../../tests/e2e_bounce_render_test.rs"
 
+[[test]]
+name = "e2e_m8_instruments_test"
+path = "../../tests/e2e_m8_instruments_test.rs"
+

@@ -12,6 +12,7 @@ pub enum LfoShape {
     SawDown = 1,
     Square = 2,
     SampleAndHold = 3,
+    Triangle = 4,
 }
 
 impl From<usize> for LfoShape {
@@ -20,6 +21,7 @@ impl From<usize> for LfoShape {
             1 => LfoShape::SawDown,
             2 => LfoShape::Square,
             3 => LfoShape::SampleAndHold,
+            4 => LfoShape::Triangle,
             _ => LfoShape::Sine,
         }
     }
@@ -92,6 +94,7 @@ impl Lfo {
                 }
             }
             LfoShape::SampleAndHold => self.sample_hold_value,
+            LfoShape::Triangle => 2.0 * (2.0 * (self.phase - (self.phase + 0.5).floor()).abs()) - 1.0,
         };
 
         (signal, freq)
