@@ -1,0 +1,428 @@
+{
+  "wowbass.mapping": {
+    "version": "0",
+    "macroX": [
+      {
+        "parameterName": "filter_frequency",
+        "minControlValue": 0.2934253246753247,
+        "maxControlValue": 0.6960227272727273,
+        "minValue": 152.87210221801917,
+        "maxValue": 2490.388954039436
+      }
+    ],
+    "macroY": [
+      {
+        "parameterName": "filter_resonance",
+        "minControlValue": 0.2544642857142857,
+        "maxControlValue": 0.6440746753246753,
+        "minValue": 0.2544642857142857,
+        "maxValue": 0.6440746753246753
+      }
+    ]
+  },
+  "west-coast-lead.mapping": {
+    "version": "0",
+    "macroX": [
+      {
+        "parameterName": "filter_frequency",
+        "minControlValue": 0.6094426406926406,
+        "maxControlValue": 0.8345508658008658,
+        "minValue": 1366.5802832452684,
+        "maxValue": 6505.466290198236
+      }
+    ],
+    "macroY": [
+      {
+        "parameterName": "filter_resonance",
+        "minControlValue": 0.06398809523809523,
+        "maxControlValue": 0.39299242424242425,
+        "minValue": 0.06398809523809523,
+        "maxValue": 0.39299242424242425
+      }
+    ]
+  },
+  "two-sounds-in-one.mapping": {
+    "version": "0",
+    "macroX": [
+      {
+        "parameterName": "lfo_frequency",
+        "minControlValue": 0.34544101731601734,
+        "maxControlValue": 0.5229301948051948,
+        "minValue": 0.30274390179704946,
+        "maxValue": 5.69121668591628
+      },
+      {
+        "parameterName": "oscillator_pulse_width",
+        "minControlValue": 0,
+        "maxControlValue": 1,
+        "minValue": -1,
+        "maxValue": 1
+      }
+    ],
+    "macroY": [
+      {
+        "parameterName": "filter_resonance",
+        "minControlValue": 0.12026515151515152,
+        "maxControlValue": 0.4362824675324675,
+        "minValue": 0.12026515151515152,
+        "maxValue": 0.4362824675324675
+      },
+      {
+        "parameterName": "filter_lfo_amount",
+        "minControlValue": 0,
+        "maxControlValue": 1,
+        "minValue": -1,
+        "maxValue": 1
+      }
+    ]
+  },
+  "synthkick.mapping": {
+    "version": "0",
+    "macroX": [
+      {
+        "parameterName": "amplitude_envelope_decay",
+        "minControlValue": 0.22409361471861472,
+        "maxControlValue": 0.648336038961039,
+        "minValue": 57.256354110478085,
+        "maxValue": 1363.3340980279245
+      }
+    ],
+    "macroY": [
+      {
+        "parameterName": "filter_resonance",
+        "minControlValue": 0.16355519480519481,
+        "maxControlValue": 0.7133387445887446,
+        "minValue": 0.16355519480519481,
+        "maxValue": 0.7133387445887446
+      }
+    ]
+  },
+  "subbass.mapping": {
+    "version": "0",
+    "macroX": [
+      {
+        "parameterName": "filter_frequency",
+        "minControlValue": 0.27610930735930733,
+        "maxControlValue": 0.48390151515151514,
+        "minValue": 135.58193620140867,
+        "maxValue": 572.4251488498752
+      }
+    ],
+    "macroY": [
+      {
+        "parameterName": "filter_resonance",
+        "minControlValue": 0.30641233766233766,
+        "maxControlValue": 0.6094426406926406,
+        "minValue": 0.30641233766233766,
+        "maxValue": 0.6094426406926406
+      }
+    ]
+  },
+  "strings.mapping": {
+    "version": "0",
+    "macroX": [
+      {
+        "parameterName": "lfo_frequency",
+        "minControlValue": 0.4926271645021645,
+        "maxControlValue": 0.5532332251082251,
+        "minValue": 3.5681942750160816,
+        "maxValue": 8.87450453763162
+      }
+    ],
+    "macroY": [
+      {
+        "parameterName": "filter_resonance",
+        "minControlValue": 0,
+        "maxControlValue": 0.43195346320346323,
+        "minValue": 0,
+        "maxValue": 0.43195346320346323
+      }
+    ]
+  },
+  "release-pluck.mapping": {
+    "version": "0",
+    "macroX": [
+      {
+        "parameterName": "filter_frequency",
+        "minControlValue": 0.652732683982684,
+        "maxControlValue": 0.9124729437229437,
+        "minValue": 1844.8079689230806,
+        "maxValue": 11164.705159328434
+      }
+    ],
+    "macroY": [
+      {
+        "parameterName": "filter_resonance",
+        "minControlValue": 0,
+        "maxControlValue": 0.45359848484848486,
+        "minValue": 0,
+        "maxValue": 0.45359848484848486
+      }
+    ]
+  },
+  "pluckedbass.mapping": {
+    "version": "0",
+    "macroX": [
+      {
+        "parameterName": "oscillator_pulse_width",
+        "minControlValue": 0.2803030303030303,
+        "maxControlValue": 0.7824675324675324,
+        "minValue": -0.43939393939393945,
+        "maxValue": 0.5649350649350648
+      },
+      {
+        "parameterName": "amplitude_envelope_decay",
+        "minControlValue": 0.3150027056277056,
+        "maxControlValue": 0.7435741341991342,
+        "minValue": 157.2521453428208,
+        "maxValue": 2056.208838838387
+      },
+      {
+        "parameterName": "filter_frequency",
+        "minControlValue": 0.22416125541125542,
+        "maxControlValue": 0.5748106060606061,
+        "minValue": 94.58507512201513,
+        "maxValue": 1074.9353325905524
+      }
+    ],
+    "macroY": [
+      {
+        "parameterName": "filter_resonance",
+        "minControlValue": 0,
+        "maxControlValue": 0.6354166666666666,
+        "minValue": 0,
+        "maxValue": 0.6354166666666666
+      }
+    ]
+  },
+  "old-fashioned-computer.mapping": {
+    "version": "0",
+    "macroX": [
+      {
+        "parameterName": "lfo_frequency",
+        "minControlValue": 0.45366612554112556,
+        "maxControlValue": 0.5878652597402597,
+        "minValue": 1.8941030648363357,
+        "maxValue": 14.361950893503423
+      }
+    ],
+    "macroY": [
+      {
+        "parameterName": "filter_resonance",
+        "minControlValue": 0,
+        "maxControlValue": 1,
+        "minValue": 0,
+        "maxValue": 1
+      },
+      {
+        "parameterName": "oscillator_noise_amplitude",
+        "minControlValue": 0.03354978354978355,
+        "maxControlValue": 0.9989177489177489,
+        "minValue": 0.0661533403084698,
+        "maxValue": 0.9991341053922191
+      }
+    ]
+  },
+  "noisy-lead.mapping": {
+    "version": "0",
+    "macroX": [
+      {
+        "parameterName": "lfo_frequency",
+        "minControlValue": 0.42336309523809523,
+        "maxControlValue": 0.6051812770562771,
+        "minValue": 1.1319545014319026,
+        "maxValue": 18.090384114858526
+      },
+      {
+        "parameterName": "oscillator_saw_detune_fine",
+        "minControlValue": 0.2803030303030303,
+        "maxControlValue": 0.45346320346320346,
+        "minValue": -43.939393939393945,
+        "maxValue": -9.307359307359306
+      },
+      {
+        "parameterName": "filter_frequency",
+        "minControlValue": 0.8821699134199135,
+        "maxControlValue": 1,
+        "minValue": 9049.530493457478,
+        "maxValue": 20480
+      }
+    ],
+    "macroY": [
+      {
+        "parameterName": "oscillator_pulse_width_lfo_amount",
+        "minControlValue": 0.4962686567164179,
+        "maxControlValue": 0.6405472636815921,
+        "minValue": -0.007462686567164201,
+        "maxValue": 0.2810945273631842
+      },
+      {
+        "parameterName": "filter_resonance",
+        "minControlValue": 0,
+        "maxControlValue": 0.1332521645021645,
+        "minValue": 0,
+        "maxValue": 0.1332521645021645
+      }
+    ]
+  },
+  "laser.mapping": {
+    "version": "0",
+    "macroX": [
+      {
+        "parameterName": "modulation_envelope_decay",
+        "minControlValue": 0.11600378787878787,
+        "maxControlValue": 0.5012851731601732,
+        "minValue": 8.803683521506299,
+        "maxValue": 630.7058311299489
+      }
+    ],
+    "macroY": [
+      {
+        "parameterName": "filter_resonance",
+        "minControlValue": 0,
+        "maxControlValue": 1,
+        "minValue": 0,
+        "maxValue": 1
+      },
+      {
+        "parameterName": "oscillator_pitch_offset",
+        "minControlValue": 0,
+        "maxControlValue": 1,
+        "minValue": -48,
+        "maxValue": 48
+      }
+    ]
+  },
+  "hihat.mapping": {
+    "version": "0",
+    "macroX": [
+      {
+        "parameterName": "modulation_envelope_decay",
+        "minControlValue": 0.10734577922077922,
+        "maxControlValue": 0.5402462121212122,
+        "minValue": 7.183552542340527,
+        "maxValue": 789.2397434335356
+      }
+    ],
+    "macroY": [
+      {
+        "parameterName": "filter_resonance",
+        "minControlValue": 0,
+        "maxControlValue": 0.2674512987012987,
+        "minValue": 0,
+        "maxValue": 0.2674512987012987
+      }
+    ]
+  },
+  "german-siren.mapping": {
+    "version": "0",
+    "macroX": [],
+    "macroY": [
+      {
+        "parameterName": "filter_resonance",
+        "minControlValue": 0,
+        "maxControlValue": 0.2674512987012987,
+        "minValue": 0,
+        "maxValue": 0.2674512987012987
+      }
+    ]
+  },
+  "dummy.mapping": {
+    "version": "0",
+    "macroX": [
+      {
+        "parameterName": "filter_frequency",
+        "minControlValue": 0.310741341991342,
+        "maxControlValue": 0.5618235930735931,
+        "minValue": 172.36720680725676,
+        "maxValue": 982.3981445146813
+      }
+    ],
+    "macroY": [
+      {
+        "parameterName": "filter_resonance",
+        "minControlValue": 0.5791396103896104,
+        "maxControlValue": 0.9341179653679653,
+        "minValue": 0.5791396103896104,
+        "maxValue": 0.9341179653679653
+      }
+    ]
+  },
+  "distortion.mapping": {
+    "version": "0",
+    "macroX": [
+      {
+        "parameterName": "lfo_frequency",
+        "minControlValue": 0.8086444805194806,
+        "maxControlValue": 1,
+        "minValue": 182.91742222761872,
+        "maxValue": 1000
+      },
+      {
+        "parameterName": "filter_frequency",
+        "minControlValue": 0.4752435064935065,
+        "maxControlValue": 0.903814935064935,
+        "minValue": 539.0828337930541,
+        "maxValue": 10514.389362255595
+      }
+    ],
+    "macroY": [
+      {
+        "parameterName": "filter_resonance",
+        "minControlValue": 0,
+        "maxControlValue": 0.626758658008658,
+        "minValue": 0,
+        "maxValue": 0.626758658008658
+      }
+    ]
+  },
+  "bouncingball.mapping": {
+    "version": "0",
+    "macroX": [
+      {
+        "parameterName": "oscillator_noise_amplitude",
+        "minControlValue": 0,
+        "maxControlValue": 1,
+        "minValue": 0,
+        "maxValue": 1
+      }
+    ],
+    "macroY": [
+      {
+        "parameterName": "filter_resonance",
+        "minControlValue": 0,
+        "maxControlValue": 1,
+        "minValue": 0,
+        "maxValue": 1
+      },
+      {
+        "parameterName": "oscillator_pulse_amplitude",
+        "minControlValue": 0,
+        "maxControlValue": 0.5227272727272727,
+        "minValue": 0,
+        "maxValue": 0.5951413525196113
+      }
+    ]
+  },
+  "american-siren.mapping": {
+    "version": "0",
+    "macroX": [
+      {
+        "parameterName": "oscillator_noise_amplitude",
+        "minControlValue": 0,
+        "maxControlValue": 1,
+        "minValue": 0,
+        "maxValue": 1
+      }
+    ],
+    "macroY": [
+      {
+        "parameterName": "filter_resonance",
+        "minControlValue": 0,
+        "maxControlValue": 0.2631222943722944,
+        "minValue": 0,
+        "maxValue": 0.2631222943722944
+      }
+    ]
+  }
+}

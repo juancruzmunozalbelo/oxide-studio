@@ -1,0 +1,30 @@
+[package]
+name = "ableton-mcp"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+ableton-core = { path = "../ableton-core" }
+ableton-dsp = { path = "../ableton-dsp" }
+ableton-drums = { path = "../ableton-drums" }
+ableton-fx = { path = "../ableton-fx" }
+ableton-audio = { path = "../ableton-audio" }
+ableton-bounce = { path = "../ableton-bounce" }
+ableton-timeline = { path = "../ableton-timeline" }
+ableton-project = { path = "../ableton-project" }
+ableton-plugin-scanner = { path = "../ableton-plugin-scanner" }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+
+[lib]
+name = "ableton_mcp"
+path = "src/lib.rs"
+
+[[test]]
+name = "e2e_mcp_server_test"
+path = "../../tests/e2e_mcp_server_test.rs"
+
+[[test]]
+name = "e2e_mcp_adversarial_m7_2_test"
+path = "../../tests/e2e_mcp_adversarial_m7_2_test.rs"
+

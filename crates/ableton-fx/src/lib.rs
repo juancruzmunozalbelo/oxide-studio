@@ -1,0 +1,49 @@
+//! Effects and mixing engine for ableton-rust.
+//!
+//! Includes:
+//! - Padé [4/4] tanh Saturator / Overdrive
+//! - Tempo-synced ping-pong Delay with feedback filtering
+//! - Algorithmic FDN Reverb and Convolution Reverb
+//! - 128-sample lookahead Master Brickwall Limiter (-0.3 dBFS ceiling)
+//! - 16-track Mixer with solo/mute and 300ms peak/RMS ballistics metering
+
+pub mod delay;
+pub mod limiter;
+pub mod mixer;
+pub mod reverb;
+pub mod saturator;
+
+pub use delay::{DelaySubdivision, TempoDelay, MAX_DELAY_SAMPLES};
+pub use limiter::{MasterLimiter, CEILING_LINEAR, LOOKAHEAD_SAMPLES};
+pub use mixer::{Mixer, MixerTrack, NUM_TRACKS};
+pub use reverb::{ConvolutionReverb, FdnReverb};
+pub use saturator::Saturator;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_full_fx_chain() {
+        let sr = 44100.0;
+        let saturator = Saturator::new();
+        let mut delay = TempoDelay::new(sr, 128.0);
+        let mut reverb = FdnReverb::new(sr);
+        let mut limiter = MasterLimiter::new(sr);
+
+        let mut left = vec![0.8f32; 256];
+        let mut right = vec![0.8f32; 256];
+
+        saturator.process_block(&mut left, &mut right);
+        delay.process_block(&mut left, &mut right);
+        reverb.process_block(&mut left, &mut right);
+        limiter.process_block(&mut left, &mut right);
+
+        for (l, r) in left.iter().zip(right.iter()) {
+            assert!(l.is_finite());
+            assert!(r.is_finite());
+            assert!(l.abs() <= CEILING_LINEAR + 1e-5);
+            assert!(r.abs() <= CEILING_LINEAR + 1e-5);
+        }
+    }
+}

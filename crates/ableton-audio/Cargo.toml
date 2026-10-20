@@ -1,0 +1,18 @@
+[package]
+name = "ableton-audio"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+ableton-core = { path = "../ableton-core" }
+ableton-dsp = { path = "../ableton-dsp" }
+ableton-drums = { path = "../ableton-drums" }
+ableton-fx = { path = "../ableton-fx" }
+cpal = "0.18"
+rtrb = "0.4"
+portable-atomic = { version = "1.15", features = ["float"] }
+serde = { version = "1.0", features = ["derive"], optional = true }
+
+[features]
+default = []
+serde = ["dep:serde"]

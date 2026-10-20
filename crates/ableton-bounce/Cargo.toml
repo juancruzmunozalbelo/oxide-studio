@@ -1,0 +1,32 @@
+[package]
+name = "ableton-bounce"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+ableton-core = { path = "../ableton-core" }
+ableton-dsp = { path = "../ableton-dsp" }
+ableton-drums = { path = "../ableton-drums" }
+ableton-fx = { path = "../ableton-fx" }
+serde = { version = "1.0", features = ["derive"], optional = true }
+
+[features]
+default = []
+serde = ["dep:serde"]
+
+[[test]]
+name = "e2e_dsp_filter_test"
+path = "../../tests/e2e_dsp_filter_test.rs"
+
+[[test]]
+name = "e2e_monophonic_presets_test"
+path = "../../tests/e2e_monophonic_presets_test.rs"
+
+[[test]]
+name = "e2e_drum_rack_test"
+path = "../../tests/e2e_drum_rack_test.rs"
+
+[[test]]
+name = "e2e_bounce_render_test"
+path = "../../tests/e2e_bounce_render_test.rs"
+

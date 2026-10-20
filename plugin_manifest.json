@@ -1,0 +1,581 @@
+{
+  "plugins": [
+    {
+      "name": "ASAF Channels Renderer",
+      "identifier": "com.Apple.ASAFChannelsRenderer",
+      "vendor": "Apple",
+      "version": "2.1.13",
+      "category": "Effect",
+      "format": "AudioUnit",
+      "path": "/Library/Audio/Plug-Ins/Components/ASAF Channels Renderer.component",
+      "is_instrument": false,
+      "is_valid": true,
+      "quarantined": false,
+      "quarantine_reason": null,
+      "error_message": null,
+      "num_inputs": 2,
+      "num_outputs": 2,
+      "num_parameters": 5,
+      "parameters": [
+        {
+          "index": 0,
+          "name": "InputGain",
+          "min_value": -24.0,
+          "max_value": 24.0,
+          "default_value": 0.0,
+          "current_value": 0.0
+        },
+        {
+          "index": 1,
+          "name": "OutputGain",
+          "min_value": -24.0,
+          "max_value": 24.0,
+          "default_value": 0.0,
+          "current_value": 0.0
+        },
+        {
+          "index": 2,
+          "name": "DryWet",
+          "min_value": 0.0,
+          "max_value": 1.0,
+          "default_value": 0.5,
+          "current_value": 0.5
+        },
+        {
+          "index": 3,
+          "name": "Parameter1",
+          "min_value": 0.0,
+          "max_value": 1.0,
+          "default_value": 0.5,
+          "current_value": 0.5
+        },
+        {
+          "index": 4,
+          "name": "Parameter2",
+          "min_value": 0.0,
+          "max_value": 1.0,
+          "default_value": 0.5,
+          "current_value": 0.5
+        }
+      ],
+      "architectures": [
+        "x86_64",
+        "arm64"
+      ],
+      "mtime_secs": 1783965634
+    },
+    {
+      "name": "ASAF Channels",
+      "identifier": "com.Apple.ASAFChannels",
+      "vendor": "Apple",
+      "version": "2.1.13",
+      "category": "Effect",
+      "format": "AudioUnit",
+      "path": "/Library/Audio/Plug-Ins/Components/ASAF Channels.component",
+      "is_instrument": false,
+      "is_valid": true,
+      "quarantined": false,
+      "quarantine_reason": null,
+      "error_message": null,
+      "num_inputs": 2,
+      "num_outputs": 2,
+      "num_parameters": 5,
+      "parameters": [
+        {
+          "index": 0,
+          "name": "InputGain",
+          "min_value": -24.0,
+          "max_value": 24.0,
+          "default_value": 0.0,
+          "current_value": 0.0
+        },
+        {
+          "index": 1,
+          "name": "OutputGain",
+          "min_value": -24.0,
+          "max_value": 24.0,
+          "default_value": 0.0,
+          "current_value": 0.0
+        },
+        {
+          "index": 2,
+          "name": "DryWet",
+          "min_value": 0.0,
+          "max_value": 1.0,
+          "default_value": 0.5,
+          "current_value": 0.5
+        },
+        {
+          "index": 3,
+          "name": "Parameter1",
+          "min_value": 0.0,
+          "max_value": 1.0,
+          "default_value": 0.5,
+          "current_value": 0.5
+        },
+        {
+          "index": 4,
+          "name": "Parameter2",
+          "min_value": 0.0,
+          "max_value": 1.0,
+          "default_value": 0.5,
+          "current_value": 0.5
+        }
+      ],
+      "architectures": [
+        "x86_64",
+        "arm64"
+      ],
+      "mtime_secs": 1783965608
+    },
+    {
+      "name": "ASAF Export",
+      "identifier": "com.Apple.ASAFExport",
+      "vendor": "Apple",
+      "version": "2.1.13",
+      "category": "Effect",
+      "format": "AudioUnit",
+      "path": "/Library/Audio/Plug-Ins/Components/ASAF Export.component",
+      "is_instrument": false,
+      "is_valid": true,
+      "quarantined": false,
+      "quarantine_reason": null,
+      "error_message": null,
+      "num_inputs": 2,
+      "num_outputs": 2,
+      "num_parameters": 5,
+      "parameters": [
+        {
+          "index": 0,
+          "name": "InputGain",
+          "min_value": -24.0,
+          "max_value": 24.0,
+          "default_value": 0.0,
+          "current_value": 0.0
+        },
+        {
+          "index": 1,
+          "name": "OutputGain",
+          "min_value": -24.0,
+          "max_value": 24.0,
+          "default_value": 0.0,
+          "current_value": 0.0
+        },
+        {
+          "index": 2,
+          "name": "DryWet",
+          "min_value": 0.0,
+          "max_value": 1.0,
+          "default_value": 0.5,
+          "current_value": 0.5
+        },
+        {
+          "index": 3,
+          "name": "Parameter1",
+          "min_value": 0.0,
+          "max_value": 1.0,
+          "default_value": 0.5,
+          "current_value": 0.5
+        },
+        {
+          "index": 4,
+          "name": "Parameter2",
+          "min_value": 0.0,
+          "max_value": 1.0,
+          "default_value": 0.5,
+          "current_value": 0.5
+        }
+      ],
+      "architectures": [
+        "x86_64",
+        "arm64"
+      ],
+      "mtime_secs": 1783965664
+    },
+    {
+      "name": "ASAF Object Renderer",
+      "identifier": "com.Apple.ASAFObjectRenderer",
+      "vendor": "Apple",
+      "version": "2.1.13",
+      "category": "Effect",
+      "format": "AudioUnit",
+      "path": "/Library/Audio/Plug-Ins/Components/ASAF Object Renderer.component",
+      "is_instrument": false,
+      "is_valid": true,
+      "quarantined": false,
+      "quarantine_reason": null,
+      "error_message": null,
+      "num_inputs": 2,
+      "num_outputs": 2,
+      "num_parameters": 5,
+      "parameters": [
+        {
+          "index": 0,
+          "name": "InputGain",
+          "min_value": -24.0,
+          "max_value": 24.0,
+          "default_value": 0.0,
+          "current_value": 0.0
+        },
+        {
+          "index": 1,
+          "name": "OutputGain",
+          "min_value": -24.0,
+          "max_value": 24.0,
+          "default_value": 0.0,
+          "current_value": 0.0
+        },
+        {
+          "index": 2,
+          "name": "DryWet",
+          "min_value": 0.0,
+          "max_value": 1.0,
+          "default_value": 0.5,
+          "current_value": 0.5
+        },
+        {
+          "index": 3,
+          "name": "Parameter1",
+          "min_value": 0.0,
+          "max_value": 1.0,
+          "default_value": 0.5,
+          "current_value": 0.5
+        },
+        {
+          "index": 4,
+          "name": "Parameter2",
+          "min_value": 0.0,
+          "max_value": 1.0,
+          "default_value": 0.5,
+          "current_value": 0.5
+        }
+      ],
+      "architectures": [
+        "x86_64",
+        "arm64"
+      ],
+      "mtime_secs": 1783965733
+    },
+    {
+      "name": "ASAF Object to Scene",
+      "identifier": "com.Apple.ASAFObjectToScene",
+      "vendor": "Apple",
+      "version": "2.1.13",
+      "category": "Effect",
+      "format": "AudioUnit",
+      "path": "/Library/Audio/Plug-Ins/Components/ASAF Object to Scene.component",
+      "is_instrument": false,
+      "is_valid": true,
+      "quarantined": false,
+      "quarantine_reason": null,
+      "error_message": null,
+      "num_inputs": 2,
+      "num_outputs": 2,
+      "num_parameters": 5,
+      "parameters": [
+        {
+          "index": 0,
+          "name": "InputGain",
+          "min_value": -24.0,
+          "max_value": 24.0,
+          "default_value": 0.0,
+          "current_value": 0.0
+        },
+        {
+          "index": 1,
+          "name": "OutputGain",
+          "min_value": -24.0,
+          "max_value": 24.0,
+          "default_value": 0.0,
+          "current_value": 0.0
+        },
+        {
+          "index": 2,
+          "name": "DryWet",
+          "min_value": 0.0,
+          "max_value": 1.0,
+          "default_value": 0.5,
+          "current_value": 0.5
+        },
+        {
+          "index": 3,
+          "name": "Parameter1",
+          "min_value": 0.0,
+          "max_value": 1.0,
+          "default_value": 0.5,
+          "current_value": 0.5
+        },
+        {
+          "index": 4,
+          "name": "Parameter2",
+          "min_value": 0.0,
+          "max_value": 1.0,
+          "default_value": 0.5,
+          "current_value": 0.5
+        }
+      ],
+      "architectures": [
+        "x86_64",
+        "arm64"
+      ],
+      "mtime_secs": 1783965758
+    },
+    {
+      "name": "ASAF Object",
+      "identifier": "com.Apple.ASAFObject",
+      "vendor": "Apple",
+      "version": "2.1.13",
+      "category": "Effect",
+      "format": "AudioUnit",
+      "path": "/Library/Audio/Plug-Ins/Components/ASAF Object.component",
+      "is_instrument": false,
+      "is_valid": true,
+      "quarantined": false,
+      "quarantine_reason": null,
+      "error_message": null,
+      "num_inputs": 2,
+      "num_outputs": 2,
+      "num_parameters": 5,
+      "parameters": [
+        {
+          "index": 0,
+          "name": "InputGain",
+          "min_value": -24.0,
+          "max_value": 24.0,
+          "default_value": 0.0,
+          "current_value": 0.0
+        },
+        {
+          "index": 1,
+          "name": "OutputGain",
+          "min_value": -24.0,
+          "max_value": 24.0,
+          "default_value": 0.0,
+          "current_value": 0.0
+        },
+        {
+          "index": 2,
+          "name": "DryWet",
+          "min_value": 0.0,
+          "max_value": 1.0,
+          "default_value": 0.5,
+          "current_value": 0.5
+        },
+        {
+          "index": 3,
+          "name": "Parameter1",
+          "min_value": 0.0,
+          "max_value": 1.0,
+          "default_value": 0.5,
+          "current_value": 0.5
+        },
+        {
+          "index": 4,
+          "name": "Parameter2",
+          "min_value": 0.0,
+          "max_value": 1.0,
+          "default_value": 0.5,
+          "current_value": 0.5
+        }
+      ],
+      "architectures": [
+        "x86_64",
+        "arm64"
+      ],
+      "mtime_secs": 1783965706
+    },
+    {
+      "name": "ASAF Panner",
+      "identifier": "com.Apple.ASAFPanner",
+      "vendor": "Apple",
+      "version": "2.1.13",
+      "category": "Effect",
+      "format": "AudioUnit",
+      "path": "/Library/Audio/Plug-Ins/Components/ASAF Panner.component",
+      "is_instrument": false,
+      "is_valid": true,
+      "quarantined": false,
+      "quarantine_reason": null,
+      "error_message": null,
+      "num_inputs": 2,
+      "num_outputs": 2,
+      "num_parameters": 5,
+      "parameters": [
+        {
+          "index": 0,
+          "name": "InputGain",
+          "min_value": -24.0,
+          "max_value": 24.0,
+          "default_value": 0.0,
+          "current_value": 0.0
+        },
+        {
+          "index": 1,
+          "name": "OutputGain",
+          "min_value": -24.0,
+          "max_value": 24.0,
+          "default_value": 0.0,
+          "current_value": 0.0
+        },
+        {
+          "index": 2,
+          "name": "DryWet",
+          "min_value": 0.0,
+          "max_value": 1.0,
+          "default_value": 0.5,
+          "current_value": 0.5
+        },
+        {
+          "index": 3,
+          "name": "Parameter1",
+          "min_value": 0.0,
+          "max_value": 1.0,
+          "default_value": 0.5,
+          "current_value": 0.5
+        },
+        {
+          "index": 4,
+          "name": "Parameter2",
+          "min_value": 0.0,
+          "max_value": 1.0,
+          "default_value": 0.5,
+          "current_value": 0.5
+        }
+      ],
+      "architectures": [
+        "x86_64",
+        "arm64"
+      ],
+      "mtime_secs": 1783965826
+    },
+    {
+      "name": "ASAF Scene Renderer",
+      "identifier": "com.Apple.ASAFSceneRenderer",
+      "vendor": "Apple",
+      "version": "2.1.13",
+      "category": "Effect",
+      "format": "AudioUnit",
+      "path": "/Library/Audio/Plug-Ins/Components/ASAF Scene Renderer.component",
+      "is_instrument": false,
+      "is_valid": true,
+      "quarantined": false,
+      "quarantine_reason": null,
+      "error_message": null,
+      "num_inputs": 2,
+      "num_outputs": 2,
+      "num_parameters": 5,
+      "parameters": [
+        {
+          "index": 0,
+          "name": "InputGain",
+          "min_value": -24.0,
+          "max_value": 24.0,
+          "default_value": 0.0,
+          "current_value": 0.0
+        },
+        {
+          "index": 1,
+          "name": "OutputGain",
+          "min_value": -24.0,
+          "max_value": 24.0,
+          "default_value": 0.0,
+          "current_value": 0.0
+        },
+        {
+          "index": 2,
+          "name": "DryWet",
+          "min_value": 0.0,
+          "max_value": 1.0,
+          "default_value": 0.5,
+          "current_value": 0.5
+        },
+        {
+          "index": 3,
+          "name": "Parameter1",
+          "min_value": 0.0,
+          "max_value": 1.0,
+          "default_value": 0.5,
+          "current_value": 0.5
+        },
+        {
+          "index": 4,
+          "name": "Parameter2",
+          "min_value": 0.0,
+          "max_value": 1.0,
+          "default_value": 0.5,
+          "current_value": 0.5
+        }
+      ],
+      "architectures": [
+        "x86_64",
+        "arm64"
+      ],
+      "mtime_secs": 1783965984
+    },
+    {
+      "name": "ASAF Scene",
+      "identifier": "com.Apple.ASAFScene",
+      "vendor": "Apple",
+      "version": "2.1.13",
+      "category": "Effect",
+      "format": "AudioUnit",
+      "path": "/Library/Audio/Plug-Ins/Components/ASAF Scene.component",
+      "is_instrument": false,
+      "is_valid": true,
+      "quarantined": false,
+      "quarantine_reason": null,
+      "error_message": null,
+      "num_inputs": 2,
+      "num_outputs": 2,
+      "num_parameters": 5,
+      "parameters": [
+        {
+          "index": 0,
+          "name": "InputGain",
+          "min_value": -24.0,
+          "max_value": 24.0,
+          "default_value": 0.0,
+          "current_value": 0.0
+        },
+        {
+          "index": 1,
+          "name": "OutputGain",
+          "min_value": -24.0,
+          "max_value": 24.0,
+          "default_value": 0.0,
+          "current_value": 0.0
+        },
+        {
+          "index": 2,
+          "name": "DryWet",
+          "min_value": 0.0,
+          "max_value": 1.0,
+          "default_value": 0.5,
+          "current_value": 0.5
+        },
+        {
+          "index": 3,
+          "name": "Parameter1",
+          "min_value": 0.0,
+          "max_value": 1.0,
+          "default_value": 0.5,
+          "current_value": 0.5
+        },
+        {
+          "index": 4,
+          "name": "Parameter2",
+          "min_value": 0.0,
+          "max_value": 1.0,
+          "default_value": 0.5,
+          "current_value": 0.5
+        }
+      ],
+      "architectures": [
+        "x86_64",
+        "arm64"
+      ],
+      "mtime_secs": 1783965888
+    }
+  ],
+  "scan_timestamp": 1792525097
+}

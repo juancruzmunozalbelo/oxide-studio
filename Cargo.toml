@@ -1,0 +1,15 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/ableton-core",
+    "crates/ableton-dsp",
+    "crates/ableton-drums",
+    "crates/ableton-fx",
+    "crates/ableton-audio",
+    "crates/ableton-bounce",
+    "crates/ableton-timeline",
+    "crates/ableton-project",
+    "crates/ableton-plugin-scanner",
+    "crates/ableton-gui",
+    "crates/ableton-mcp",
+]

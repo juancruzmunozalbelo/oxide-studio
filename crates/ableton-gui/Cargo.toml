@@ -1,0 +1,27 @@
+[package]
+name = "ableton-gui"
+version = "0.1.0"
+edition = "2021"
+default-run = "ableton-rust"
+
+[lib]
+name = "ableton_gui"
+path = "src/lib.rs"
+
+[[bin]]
+name = "ableton-rust"
+path = "../../src/main.rs"
+
+[dependencies]
+eframe = { version = "0.29", default-features = false, features = ["default_fonts", "wgpu"] }
+egui = "0.29"
+ableton-core = { path = "../ableton-core" }
+ableton-dsp = { path = "../ableton-dsp" }
+ableton-drums = { path = "../ableton-drums" }
+ableton-fx = { path = "../ableton-fx" }
+ableton-audio = { path = "../ableton-audio" }
+ableton-bounce = { path = "../ableton-bounce" }
+ableton-timeline = { path = "../ableton-timeline" }
+ableton-project = { path = "../ableton-project" }
+ableton-plugin-scanner = { path = "../ableton-plugin-scanner" }
+ableton-mcp = { path = "../ableton-mcp" }
