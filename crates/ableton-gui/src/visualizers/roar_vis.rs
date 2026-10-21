@@ -99,7 +99,10 @@ pub fn render_roar_canvas(painter: &Painter, rect: Rect, state: &RoarVisualizerS
 
     for i in 0..pts_count {
         let x_norm = (i as f32 / (pts_count - 1) as f32) * 2.0 - 1.0; // -1.0 .. +1.0
-        let driven_x = x_norm * drive_linear;
+        // Tone shifts asymmetrical harmonic bias; Feedback adds resonant harmonic ripple
+        let tone_bias = state.tone * 0.35;
+        let fb_ripple = (x_norm * std::f32::consts::PI * (2.0 + state.feedback * 6.0)).sin() * (state.feedback * 0.22);
+        let driven_x = (x_norm + tone_bias) * drive_linear + fb_ripple;
 
         // Transfer curve functions
         let y_val = match state.mode {

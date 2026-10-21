@@ -114,7 +114,21 @@ pub fn render_simpler_canvas(painter: &Painter, rect: Rect, state: &SimplerVisua
         );
     }
 
-    // 2. Slice Markers & Active Region Highlight
+    // 2. Start / End Sample Crop Curtains
+    let start_x = wave_rect.left() + state.start_pos.clamp(0.0, 1.0) * wave_rect.width();
+    let end_x = wave_rect.left() + state.end_pos.clamp(0.0, 1.0).max(state.start_pos + 0.02) * wave_rect.width();
+    if start_x > wave_rect.left() + 1.0 {
+        let left_curtain = Rect::from_min_max(wave_rect.min, pos2(start_x, wave_rect.bottom()));
+        painter.rect_filled(left_curtain, 0.0, Color32::from_rgba_unmultiplied(0, 0, 0, 150));
+        painter.line_segment([pos2(start_x, wave_rect.top()), pos2(start_x, wave_rect.bottom())], Stroke::new(1.5_f32, COLOR_GREEN));
+    }
+    if end_x < wave_rect.right() - 1.0 {
+        let right_curtain = Rect::from_min_max(pos2(end_x, wave_rect.top()), wave_rect.max);
+        painter.rect_filled(right_curtain, 0.0, Color32::from_rgba_unmultiplied(0, 0, 0, 150));
+        painter.line_segment([pos2(end_x, wave_rect.top()), pos2(end_x, wave_rect.bottom())], Stroke::new(1.5_f32, COLOR_GREEN));
+    }
+
+    // 3. Slice Markers & Active Region Highlight
     for (idx, &slice_t) in state.slice_markers.iter().enumerate() {
         let sx = wave_rect.left() + slice_t * wave_rect.width();
         let is_active = idx == state.active_slice;

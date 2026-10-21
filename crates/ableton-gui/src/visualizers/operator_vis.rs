@@ -222,12 +222,17 @@ pub fn render_operator_canvas(painter: &Painter, rect: Rect, state: &OperatorVis
     let gw = graph_rect.width();
     let gh = graph_rect.height();
 
-    // ADSR points
+    // ADSR points dynamically scaled by attack_ms, decay_ms, sustain, release_ms, and level
+    let atk_frac = (op_params.attack_ms / 100.0).clamp(0.05, 0.32);
+    let dec_frac = (atk_frac + (op_params.decay_ms / 1200.0).clamp(0.10, 0.35)).min(0.68);
+    let sus_end_frac = (dec_frac + 0.22).min(0.88);
+    let rel_end_frac = (sus_end_frac + (op_params.release_ms / 1500.0).clamp(0.08, 0.25)).min(1.0);
+
     let p_start = pos2(graph_rect.left(), graph_rect.bottom());
-    let p_attack = pos2(graph_rect.left() + gw * 0.2, graph_rect.top() + gh * (1.0 - op_params.level));
-    let p_decay = pos2(graph_rect.left() + gw * 0.45, graph_rect.top() + gh * (1.0 - op_params.level * op_params.sustain));
-    let p_sustain_end = pos2(graph_rect.left() + gw * 0.75, graph_rect.top() + gh * (1.0 - op_params.level * op_params.sustain));
-    let p_end = pos2(graph_rect.right(), graph_rect.bottom());
+    let p_attack = pos2(graph_rect.left() + gw * atk_frac, graph_rect.top() + gh * (1.0 - op_params.level));
+    let p_decay = pos2(graph_rect.left() + gw * dec_frac, graph_rect.top() + gh * (1.0 - op_params.level * op_params.sustain));
+    let p_sustain_end = pos2(graph_rect.left() + gw * sus_end_frac, graph_rect.top() + gh * (1.0 - op_params.level * op_params.sustain));
+    let p_end = pos2(graph_rect.left() + gw * rel_end_frac, graph_rect.bottom());
 
     let pts = vec![p_start, p_attack, p_decay, p_sustain_end, p_end];
     painter.add(egui::Shape::line(pts, Stroke::new(1.8_f32, COLOR_CYAN)));

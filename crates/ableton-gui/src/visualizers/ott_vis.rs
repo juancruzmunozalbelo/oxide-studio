@@ -57,6 +57,23 @@ impl Default for OttVisualizerState {
     }
 }
 
+impl OttVisualizerState {
+    /// Recomputes 3-band compression/expansion meter heights from `depth`, `time_scale`, and `output_gain_db`.
+    pub fn recompute_meters(&mut self) {
+        let gain_bias = (self.output_gain_db / 24.0).clamp(-0.6, 0.6);
+        let time_mod = (1.0 / self.time_scale.max(0.2)).clamp(0.6, 1.4);
+        let d = self.depth.clamp(0.0, 1.0);
+
+        let low_drive = ((-12.0 - self.low.above_thresh_db) / 16.0).clamp(-1.0, 1.0);
+        let mid_drive = ((-12.0 - self.mid.above_thresh_db) / 14.0).clamp(-1.0, 1.0);
+        let high_expand = ((-self.high.below_thresh_db - 18.0) / 28.0).clamp(-1.0, 1.0);
+
+        self.low.gr_meter = (-(0.25 + low_drive * 0.50) * d * time_mod - gain_bias * 0.35).clamp(-0.98, 0.98);
+        self.mid.gr_meter = (-(0.30 + mid_drive * 0.55) * d * time_mod - gain_bias * 0.40).clamp(-0.98, 0.98);
+        self.high.gr_meter = ((high_expand * 0.95) * d - gain_bias * 0.30).clamp(-0.98, 0.98);
+    }
+}
+
 pub struct OttVisualizerWidget<'a> {
     state: &'a mut OttVisualizerState,
     size: egui::Vec2,
@@ -70,7 +87,38 @@ impl<'a> OttVisualizerWidget<'a> {
 
 impl<'a> Widget for OttVisualizerWidget<'a> {
     fn ui(self, ui: &mut Ui) -> Response {
-        let (rect, response) = ui.allocate_exact_size(self.size, Sense::hover());
+        let (rect, mut response) = ui.allocate_exact_size(self.size, Sense::click_and_drag());
+
+        if response.dragged() || response.clicked() {
+            if let Some(pos) = response.interact_pointer_pos() {
+                let bands_w = rect.width() * 0.72;
+                let col_w = (bands_w - 16.0).max(12.0) / 3.0;
+                let norm_y = ((rect.bottom() - pos.y) / rect.height()).clamp(0.0, 1.0);
+                let signed_meter = (norm_y * 2.0 - 1.0).clamp(-0.95, 0.95);
+
+                if pos.x <= rect.left() + bands_w {
+                    let col_idx = (((pos.x - (rect.left() + 8.0)) / col_w).floor() as isize).clamp(0, 2) as usize;
+                    match col_idx {
+                        0 => {
+                            self.state.low.above_thresh_db = -24.0 + norm_y * 24.0;
+                            self.state.low.gr_meter = signed_meter;
+                        }
+                        1 => {
+                            self.state.mid.above_thresh_db = -24.0 + norm_y * 24.0;
+                            self.state.mid.gr_meter = signed_meter;
+                        }
+                        _ => {
+                            self.state.high.below_thresh_db = -48.0 + norm_y * 36.0;
+                            self.state.high.gr_meter = signed_meter;
+                        }
+                    }
+                } else {
+                    self.state.depth = norm_y;
+                    self.state.recompute_meters();
+                }
+                response.mark_changed();
+            }
+        }
 
         if ui.is_rect_visible(rect) {
             let painter = ui.painter_at(rect);

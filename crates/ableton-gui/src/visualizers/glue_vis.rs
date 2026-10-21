@@ -21,7 +21,7 @@ pub struct GlueCompressorVisualizerState {
 
 impl Default for GlueCompressorVisualizerState {
     fn default() -> Self {
-        Self {
+        let mut s = Self {
             gain_reduction_db: -4.5,
             threshold_db: -18.0,
             ratio: 4.0,
@@ -29,7 +29,27 @@ impl Default for GlueCompressorVisualizerState {
             release_ms: 200.0,
             soft_clip: true,
             soft_clip_active: false,
-        }
+        };
+        s.recompute_gain_reduction();
+        s
+    }
+}
+
+impl GlueCompressorVisualizerState {
+    /// Dynamically computes the SSL G-Bus gain reduction needle position (0.0 .. -20.0 dB)
+    /// and soft-clip LED state from `threshold_db`, `ratio`, `attack_ms`, and `release_ms`.
+    pub fn recompute_gain_reduction(&mut self) {
+        // Reference bus peak at -12.0 dB so default (-18 dB thresh, 4:1 ratio, 10 ms atk) yields -4.5 dB GR
+        let ref_input_db = -12.0_f32;
+        let overshoot = (ref_input_db - self.threshold_db).max(0.0);
+        let ratio_clamped = self.ratio.max(1.1);
+        let slope = 1.0 - (1.0 / ratio_clamped);
+        // Faster attack catches more transient; slower attack lets punch through
+        let atk_factor = (1.0 - (self.attack_ms - 10.0) / 80.0).clamp(0.65, 1.15);
+        let rel_factor = (1.0 + (200.0 - self.release_ms) / 1200.0).clamp(0.85, 1.10);
+
+        self.gain_reduction_db = -(overshoot * slope * atk_factor * rel_factor).clamp(0.0, 20.0);
+        self.soft_clip_active = self.soft_clip && self.gain_reduction_db <= -8.0;
     }
 }
 
@@ -50,11 +70,28 @@ impl<'a> Widget for GlueCompressorVisualizerWidget<'a> {
 
         if response.dragged() || response.clicked() {
             if let Some(pos) = response.interact_pointer_pos() {
-                // Dragging horizontally adjusts threshold
-                let norm_x = ((pos.x - rect.left()) / rect.width()).clamp(0.0, 1.0);
-                self.state.threshold_db = -40.0 + norm_x * 40.0;
+                let meter_w = rect.width() * 0.62;
+                let led_rect = Rect::from_min_size(
+                    pos2(rect.right() - 48.0, rect.top() + 2.0),
+                    egui::vec2(44.0, 18.0),
+                );
+                if response.clicked() && led_rect.contains(pos) {
+                    self.state.soft_clip = !self.state.soft_clip;
+                } else if pos.x <= rect.left() + meter_w {
+                    // Dragging horizontally on the meter adjusts threshold (-40..0 dB) and moves the needle live
+                    let norm_x = ((pos.x - rect.left()) / meter_w).clamp(0.0, 1.0);
+                    self.state.threshold_db = -40.0 + norm_x * 40.0;
+                } else {
+                    // Dragging vertically on the right SSL parameter pane adjusts Ratio
+                    let norm_y = ((rect.bottom() - pos.y) / rect.height()).clamp(0.0, 1.0);
+                    self.state.ratio = (2.0 + norm_y * 8.0).round();
+                }
+                self.state.recompute_gain_reduction();
                 response.mark_changed();
             }
+        } else {
+            // Ensure needle always reflects any external parameter changes (DragValues / MCP)
+            self.state.recompute_gain_reduction();
         }
 
         if ui.is_rect_visible(rect) {
@@ -105,11 +142,20 @@ pub fn render_glue_canvas(painter: &Painter, rect: Rect, state: &GlueCompressorV
         painter.text(p_text, egui::Align2::CENTER_CENTER, label, egui::FontId::monospace(8.0), COLOR_TEXT_MUTED);
     }
 
-    // Pivoting Analog Needle
-    let clamped_gr = state.gain_reduction_db.clamp(-20.0, 0.0);
+    // Pivoting Analog Needle (always synchronized with threshold_db, ratio, attack_ms, release_ms)
+    let mut live_state = state.clone();
+    live_state.recompute_gain_reduction();
+    let clamped_gr = live_state.gain_reduction_db.clamp(-20.0, 0.0);
     let gr_norm = (clamped_gr + 20.0) / 20.0;
     let needle_angle = min_angle + gr_norm * (max_angle - min_angle);
     let needle_tip = pos2(pivot.x + (radius - 2.0) * needle_angle.cos(), pivot.y + (radius - 2.0) * needle_angle.sin());
+
+    // Cyan Threshold Setpoint Marker on Arc so user also sees exact threshold position
+    let thresh_norm = ((state.threshold_db + 40.0) / 40.0).clamp(0.0, 1.0);
+    let thresh_angle = min_angle + thresh_norm * (max_angle - min_angle);
+    let thresh_outer = pos2(pivot.x + (radius + 3.0) * thresh_angle.cos(), pivot.y + (radius + 3.0) * thresh_angle.sin());
+    let thresh_inner = pos2(pivot.x + (radius - 5.0) * thresh_angle.cos(), pivot.y + (radius - 5.0) * thresh_angle.sin());
+    painter.line_segment([thresh_inner, thresh_outer], Stroke::new(1.8_f32, COLOR_CYAN));
 
     painter.line_segment([pivot, needle_tip], Stroke::new(1.8_f32, COLOR_AMBER));
     painter.circle_filled(pivot, 5.0, COLOR_BG_PANEL_ALT);
@@ -119,7 +165,7 @@ pub fn render_glue_canvas(painter: &Painter, rect: Rect, state: &GlueCompressorV
     painter.text(
         pos2(meter_rect.left() + 8.0, meter_rect.top() + 6.0),
         egui::Align2::LEFT_TOP,
-        format!("Glue GR: {:.1} dB", state.gain_reduction_db),
+        format!("Glue GR: {:.1} dB", clamped_gr),
         egui::FontId::monospace(10.0),
         COLOR_AMBER,
     );

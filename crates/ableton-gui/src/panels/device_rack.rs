@@ -359,16 +359,22 @@ pub fn render_device_chain_view(
                                     }
                                 }
                                 DeviceKind::Operator => {
+                                    let sel_op_idx = match dev.operator.selected_op {
+                                        crate::visualizers::OperatorId::A => 0,
+                                        crate::visualizers::OperatorId::B => 1,
+                                        crate::visualizers::OperatorId::C => 2,
+                                        crate::visualizers::OperatorId::D => 3,
+                                    };
                                     ui.label(RichText::new("Algo").size(9.0).color(COLOR_TEXT_MUTED));
                                     if ui.add(DragValue::new(&mut dev.operator.algorithm_id).range(0..=10)).changed() {
                                         param_changed = true;
                                     }
                                     ui.label(RichText::new("Ratio").size(9.0).color(COLOR_TEXT_MUTED));
-                                    if ui.add(DragValue::new(&mut dev.operator.ops[0].ratio).range(0.25..=16.0).speed(0.25).suffix("x")).changed() {
+                                    if ui.add(DragValue::new(&mut dev.operator.ops[sel_op_idx].ratio).range(0.25..=16.0).speed(0.25).suffix("x")).changed() {
                                         param_changed = true;
                                     }
                                     ui.label(RichText::new("Lvl").size(9.0).color(COLOR_TEXT_MUTED));
-                                    if ui.add(DragValue::new(&mut dev.operator.ops[0].level).range(0.0..=1.0).speed(0.01)).changed() {
+                                    if ui.add(DragValue::new(&mut dev.operator.ops[sel_op_idx].level).range(0.0..=1.0).speed(0.01)).changed() {
                                         param_changed = true;
                                     }
                                     if ui.add(Button::new(RichText::new("R").size(9.0).color(COLOR_TEXT_MUTED)).min_size(vec2(16.0, 16.0))).on_hover_text("Reset to Defaults").clicked() {
@@ -416,14 +422,17 @@ pub fn render_device_chain_view(
                                 DeviceKind::GlueCompressor => {
                                     ui.label(RichText::new("Thresh").size(9.0).color(COLOR_TEXT_MUTED));
                                     if ui.add(DragValue::new(&mut dev.glue.threshold_db).range(-40.0..=0.0).speed(0.2).suffix(" dB")).changed() {
+                                        dev.glue.recompute_gain_reduction();
                                         param_changed = true;
                                     }
                                     ui.label(RichText::new("Ratio").size(9.0).color(COLOR_TEXT_MUTED));
                                     if ui.add(DragValue::new(&mut dev.glue.ratio).range(2.0..=10.0).speed(1.0).suffix(":1")).changed() {
+                                        dev.glue.recompute_gain_reduction();
                                         param_changed = true;
                                     }
                                     ui.label(RichText::new("Atk").size(9.0).color(COLOR_TEXT_MUTED));
                                     if ui.add(DragValue::new(&mut dev.glue.attack_ms).range(0.1..=30.0).speed(0.5).suffix(" ms")).changed() {
+                                        dev.glue.recompute_gain_reduction();
                                         param_changed = true;
                                     }
                                     if ui.add(Button::new(RichText::new("R").size(9.0).color(COLOR_TEXT_MUTED)).min_size(vec2(16.0, 16.0))).on_hover_text("Reset to Defaults").clicked() {
@@ -452,14 +461,17 @@ pub fn render_device_chain_view(
                                 DeviceKind::OTT => {
                                     ui.label(RichText::new("Depth").size(9.0).color(COLOR_TEXT_MUTED));
                                     if ui.add(DragValue::new(&mut dev.ott.depth).range(0.0..=1.0).speed(0.01)).changed() {
+                                        dev.ott.recompute_meters();
                                         param_changed = true;
                                     }
                                     ui.label(RichText::new("Time").size(9.0).color(COLOR_TEXT_MUTED));
                                     if ui.add(DragValue::new(&mut dev.ott.time_scale).range(0.1..=10.0).speed(0.1).suffix("x")).changed() {
+                                        dev.ott.recompute_meters();
                                         param_changed = true;
                                     }
                                     ui.label(RichText::new("Gain").size(9.0).color(COLOR_TEXT_MUTED));
                                     if ui.add(DragValue::new(&mut dev.ott.output_gain_db).range(-24.0..=24.0).speed(0.2).suffix(" dB")).changed() {
+                                        dev.ott.recompute_meters();
                                         param_changed = true;
                                     }
                                     if ui.add(Button::new(RichText::new("R").size(9.0).color(COLOR_TEXT_MUTED)).min_size(vec2(16.0, 16.0))).on_hover_text("Reset to Defaults").clicked() {
@@ -509,6 +521,7 @@ pub fn render_device_chain_view(
                         });
                         if param_changed {
                             action.device_parameter_changed = Some(idx);
+                            ui.ctx().request_repaint();
                         }
                     });
 
@@ -684,5 +697,34 @@ mod tests {
         assert!(!chains[0].devices[0].is_enabled);
         assert!(chains[1].devices[0].is_enabled);
         assert!(chains[2].devices[0].is_enabled);
+    }
+
+    #[test]
+    fn test_glue_compressor_needle_and_ott_meters_respond_to_params() {
+        let mut glue = GlueCompressorVisualizerState::default();
+        assert!((glue.gain_reduction_db - (-4.5)).abs() < 0.05);
+
+        // Lowering threshold to -33.902 dB (as in user test) swings needle deep left (~-16.4 dB) and lights CLIP
+        glue.threshold_db = -33.902;
+        glue.recompute_gain_reduction();
+        assert!(
+            glue.gain_reduction_db < -15.0,
+            "Expected needle to move below -15 dB at -33.9 dB threshold, got {}",
+            glue.gain_reduction_db
+        );
+        assert!(glue.soft_clip_active);
+
+        // Raising threshold to -2.0 dB releases compression to 0.0 dB
+        glue.threshold_db = -2.0;
+        glue.recompute_gain_reduction();
+        assert_eq!(glue.gain_reduction_db, 0.0);
+        assert!(!glue.soft_clip_active);
+
+        // Changing OTT depth from 1.0 to 0.2 scales all 3 band meters proportionally
+        let mut ott = OttVisualizerState::default();
+        let full_mid = ott.mid.gr_meter;
+        ott.depth = 0.2;
+        ott.recompute_meters();
+        assert!(ott.mid.gr_meter.abs() < full_mid.abs());
     }
 }
