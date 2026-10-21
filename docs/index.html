@@ -1,0 +1,739 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Oxide Studio — Native Electronic Music Workstation in Rust</title>
+  <meta name="description" content="Oxide Studio: High-performance, single-window electronic music DAW in pure Rust. Low-latency CoreAudio engine, in-browser Web Audio playground, 76 MCP tools, bidirectional .als interop, and 1-click remix stems.">
+  <link rel="stylesheet" href="style.css">
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><rect width='100' height='100' rx='8' fill='%23ffbe00'/><text x='50' y='68' font-family='monospace' font-weight='900' font-size='60' text-anchor='middle' fill='%2307080a'>O</text></svg>">
+</head>
+<body>
+
+  <!-- =========================================================================
+       Studio Navigation Bar
+       ========================================================================= -->
+  <header class="studio-nav">
+    <div class="container studio-nav-inner">
+      <a href="#" class="brand-anchor">
+        <span class="brand-badge">O</span>
+        <span class="brand-title">OXIDE STUDIO</span>
+        <span class="brand-sub">RUST DAW</span>
+      </a>
+
+      <nav>
+        <ul class="nav-links">
+          <li><a href="#playground" class="nav-link">Playground</a></li>
+          <li><a href="#subsystems" class="nav-link">Subsystems</a></li>
+          <li><a href="#mcp-tools" class="nav-link">76 MCP Tools</a></li>
+          <li><a href="#copilot" class="nav-link">AI Copilot</a></li>
+          <li><a href="#beyond-stock" class="nav-link">Beyond Stock</a></li>
+          <li><a href="#interop" class="nav-link">.als & Stems</a></li>
+          <li><a href="#clean-room" class="nav-link">Governance</a></li>
+        </ul>
+      </nav>
+
+      <div class="nav-actions">
+        <a href="https://github.com/juancruzmunozalbelo/oxide-studio" target="_blank" rel="noopener noreferrer" class="btn btn-tactile btn-sm">
+          <span>GitHub</span>
+          <span class="tabular">v0.1.0</span>
+        </a>
+      </div>
+    </div>
+  </header>
+
+  <main>
+
+    <!-- =========================================================================
+         Hero Section
+         ========================================================================= -->
+    <section class="hero-section">
+      <div class="container">
+        <div class="hero-grid">
+          <div>
+            <div class="hero-meta">
+              <span class="pulse-dot"></span>
+              <span>CLEAN-ROOM NATIVE RUST WORKSTATION</span>
+              <span>•</span>
+              <span class="tabular">76 MCP TOOLS</span>
+              <span>•</span>
+              <span class="tabular">COREAUDIO 0-ALLOC</span>
+            </div>
+
+            <h1 class="hero-title">
+              The Native Electronic Music Studio in <span class="highlight-amber">Pure Rust</span>.
+            </h1>
+
+            <p class="hero-lead">
+              A single-window, GPU-accelerated DAW purpose-built for electronic producers. Zero-allocation real-time DSP, 
+              bidirectional Ableton Live 12 <span class="mono">.als</span> interop, 1-click remix stem separation, 
+              and an autonomous 76-tool Model Context Protocol server.
+            </p>
+
+            <div class="hero-specs-row">
+              <div class="spec-pill"><span class="k">ENGINE:</span> <span class="v">Pure Rust 1.80+</span></div>
+              <div class="spec-pill"><span class="k">AUDIO:</span> <span class="v">CoreAudio / Metal GPU</span></div>
+              <div class="spec-pill"><span class="k">DSP:</span> <span class="v">Cytomic ZDF / Mystran 4-Pole</span></div>
+              <div class="spec-pill"><span class="k">INTEROP:</span> <span class="v">Live 12 .als Gzip XML</span></div>
+              <div class="spec-pill"><span class="k">LICENSE:</span> <span class="v">MIT OR Apache-2.0</span></div>
+            </div>
+
+            <div style="display: flex; gap: 12px; flex-wrap: wrap;">
+              <a href="#playground" class="btn btn-primary">▶ Launch Web Audio Playground</a>
+              <a href="https://github.com/juancruzmunozalbelo/oxide-studio" target="_blank" rel="noopener noreferrer" class="btn btn-cyan">View on GitHub</a>
+            </div>
+          </div>
+        </div>
+
+        <!-- =========================================================================
+             In-Browser Oxide Web Playground
+             ========================================================================= -->
+        <div class="playground-shell" id="playground">
+          <div class="playground-header">
+            <div class="transport-bar">
+              <div class="transport-controls">
+                <button class="btn btn-primary btn-sm" id="btn-play">▶ PLAY</button>
+                <button class="btn btn-tactile btn-sm" id="btn-stop">■ STOP</button>
+                <button class="btn btn-tactile btn-sm" id="btn-clear">CLEAR</button>
+              </div>
+
+              <div class="bpm-control">
+                <span class="k">TEMPO</span>
+                <input type="range" id="slider-bpm" min="60" max="190" value="136">
+                <span class="v tabular" id="val-bpm">136</span> <span class="mono" style="font-size: 10px; color: var(--text-muted);">BPM</span>
+              </div>
+
+              <select class="preset-select" id="select-groove">
+                <option value="techno-136">Techno 4/4 Peak (136 BPM)</option>
+                <option value="house-128">House 909 Groove (128 BPM)</option>
+                <option value="rkt-105">RKT / Turreo Tresillo (105 BPM)</option>
+                <option value="dnb-174">Drum & Bass Break (174 BPM)</option>
+              </select>
+            </div>
+
+            <div class="telemetry-badge" id="telemetry-stats">
+              <span>● LIVE DSP</span>
+              <span class="tabular">44.1 kHz | 64-band FFT</span>
+            </div>
+          </div>
+
+          <!-- 60 FPS HTML5 Canvas DSP Visualizers Deck -->
+          <div class="visualizer-deck">
+            <!-- 1. Dual Phosphor Oscilloscope -->
+            <div class="vis-card">
+              <div class="vis-header">
+                <span class="title"><span>⚡</span> DUAL PHOSPHOR OSCILLOSCOPE</span>
+                <span class="mono" style="color: var(--laser-cyan);">TIME DOMAIN</span>
+              </div>
+              <canvas id="canvas-oscilloscope" class="vis-canvas"></canvas>
+            </div>
+
+            <!-- 2. 64-Band FFT Spectrum Analyzer -->
+            <div class="vis-card">
+              <div class="vis-header">
+                <span class="title"><span>📊</span> 64-BAND FFT SPECTRUM</span>
+                <span class="mono" style="color: var(--signal-amber);">20 Hz – 20 kHz</span>
+              </div>
+              <canvas id="canvas-spectrum" class="vis-canvas"></canvas>
+            </div>
+
+            <!-- 3. Interactive 4-Pole ZDF Filter Bode Curve -->
+            <div class="vis-card">
+              <div class="vis-header">
+                <span class="title"><span>🎛️</span> 4-POLE ZDF BODE CURVE</span>
+                <span class="mono" style="color: var(--meter-green);">-24 dB/OCT</span>
+              </div>
+              <canvas id="canvas-filter" class="vis-canvas" style="cursor: crosshair;"></canvas>
+              <div class="interactive-hint">✦ Drag puck on curve to adjust Cutoff & Q live</div>
+            </div>
+          </div>
+
+          <!-- Playground Workstation Body -->
+          <div class="playground-body">
+            <!-- Left: 16-Step TR-909 Drum Sequencer -->
+            <div class="rack-panel">
+              <div class="panel-title-bar">
+                <div class="panel-title">
+                  <span>🥁</span>
+                  <span>TR-909 STEP SEQUENCER (16-STEP QUANTIZED)</span>
+                </div>
+                <span class="mono" style="font-size: 11px; color: var(--text-muted);">MUTE / SOLO</span>
+              </div>
+
+              <div class="sequencer-grid" id="sequencer-grid">
+                <!-- Dynamically populated by app.js -->
+              </div>
+            </div>
+
+            <!-- Right: Polyphonic Synthesizer Controls & Piano Keys -->
+            <div class="rack-panel" style="background: var(--surface-base);">
+              <div class="panel-title-bar">
+                <div class="panel-title">
+                  <span>🎹</span>
+                  <span>POLYPHONIC SYNTH & 4-POLE ZDF FILTER</span>
+                </div>
+
+                <select class="preset-select" id="select-synth-preset">
+                  <option value="acid-lead">Acid 303 Lead</option>
+                  <option value="deep-sub">Deep Tech Sub</option>
+                  <option value="dorian-pad">Dorian Poly Pad</option>
+                  <option value="punchy-pluck">Punchy Pluck</option>
+                </select>
+              </div>
+
+              <!-- Parameter Sliders -->
+              <div class="synth-controls-grid">
+                <div class="control-block">
+                  <label>CUTOFF <span class="control-val tabular" id="val-cutoff">1200 Hz</span></label>
+                  <input type="range" id="slider-cutoff" min="20" max="18000" value="1200">
+                </div>
+
+                <div class="control-block">
+                  <label>RESONANCE <span class="control-val tabular" id="val-resonance">6.0</span></label>
+                  <input type="range" id="slider-resonance" min="0.5" max="22" step="0.1" value="6.0">
+                </div>
+
+                <div class="control-block">
+                  <label>ATTACK <span class="control-val tabular" id="val-attack">10 ms</span></label>
+                  <input type="range" id="slider-attack" min="0.005" max="0.5" step="0.005" value="0.01">
+                </div>
+
+                <div class="control-block">
+                  <label>DECAY <span class="control-val tabular" id="val-decay">350 ms</span></label>
+                  <input type="range" id="slider-decay" min="0.05" max="2.0" step="0.01" value="0.35">
+                </div>
+              </div>
+
+              <!-- Playable Piano Keyboard -->
+              <div class="piano-keyboard-wrap">
+                <div class="piano-keys">
+                  <!-- White keys with black keys positioned absolutely -->
+                  <div class="piano-key" data-pitch-offset="0"><span>A (C)</span></div>
+                  <div class="piano-key black key-cs" data-pitch-offset="1"><span>W</span></div>
+                  <div class="piano-key" data-pitch-offset="2"><span>S (D)</span></div>
+                  <div class="piano-key black key-ds" data-pitch-offset="3"><span>E</span></div>
+                  <div class="piano-key" data-pitch-offset="4"><span>D (E)</span></div>
+                  <div class="piano-key" data-pitch-offset="5"><span>F (F)</span></div>
+                  <div class="piano-key black key-fs" data-pitch-offset="6"><span>T</span></div>
+                  <div class="piano-key" data-pitch-offset="7"><span>G (G)</span></div>
+                  <div class="piano-key black key-gs" data-pitch-offset="8"><span>Y</span></div>
+                  <div class="piano-key" data-pitch-offset="9"><span>H (A)</span></div>
+                  <div class="piano-key black key-as" data-pitch-offset="10"><span>U</span></div>
+                  <div class="piano-key" data-pitch-offset="11"><span>J (B)</span></div>
+                  <div class="piano-key" data-pitch-offset="12"><span>K (C5)</span></div>
+                </div>
+
+                <div class="keyboard-help-bar">
+                  <span>Play with keys <span class="kbd">A</span>–<span class="kbd">K</span> or click keys</span>
+                  <div style="display: flex; gap: 8px; align-items: center;">
+                    <span class="kbd">Z / X</span> <span id="octave-display" class="tabular">OCT 3</span>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- =========================================================================
+         Beyond Stock Ableton: Purpose-Built for Electronic Producers
+         ========================================================================= -->
+    <section class="section" id="beyond-stock">
+      <div class="container">
+        <div class="section-header">
+          <div class="section-eyebrow"><span>⚡</span> Beyond Stock Ableton Live</div>
+          <h2 class="section-title">Built for What Electronic Producers Actually Need.</h2>
+          <p class="section-desc">
+            Stock Ableton forces producers into expensive 3rd-party plugins for sidechain ducking, phase alignment, 
+            and bus clipping. Oxide Studio ships these 5 missing essentials natively with zero-latency DSP.
+          </p>
+        </div>
+
+        <div class="bento-grid">
+          <!-- Card 1: Bounce-in-Place (Cmd+B) -->
+          <div class="bento-card col-6">
+            <span class="bento-tag">WORKFLOW SPEED</span>
+            <h3 class="bento-title">1. One-Click Bounce-in-Place (<span class="mono">Cmd+B</span>)</h3>
+            <p class="bento-desc">
+              Stock Ableton's "Freeze & Flatten" is destructive—it wipes MIDI, synths, and automation unless manually cloned, 
+              and cannot freeze groups with sidechains. In Oxide Studio, <span class="mono">Cmd+B</span> renders offline in-process, 
+              preserves the original synth in an underlying inactive take lane, and adds a 1-click <em>Revert to MIDI</em> header.
+            </p>
+            <div class="bento-comparison">
+              <div class="comp-row"><span class="comp-label">Ableton Live 12:</span> <span class="comp-ableton">Destructive Freeze+Flatten / No Group Freeze</span></div>
+              <div class="comp-row"><span class="comp-label">Oxide Studio:</span> <span class="comp-oxide">1-Click Cmd+B / Non-Destructive Take Lane Revert</span></div>
+            </div>
+          </div>
+
+          <!-- Card 2: DuckShaper -->
+          <div class="bento-card col-6">
+            <span class="bento-tag cyan">SIDECHAIN SHAPER</span>
+            <h3 class="bento-title">2. Native DuckShaper (Pump LFO Crossover)</h3>
+            <p class="bento-desc">
+              Producers spend $49 on Kickstart 2 or Cableguys ShaperBox to avoid compressor sidechain detector lag. 
+              DuckShaper evaluates a 2048-point sample-accurate bezier curve per sample on the audio thread with zero latency, 
+              complete with a 4th-order Linkwitz-Riley crossover (120 Hz) to duck ONLY the sub-bass while leaving punch untouched.
+            </p>
+            <div class="bento-comparison">
+              <div class="comp-row"><span class="comp-label">Ableton Live 12:</span> <span class="comp-ableton">Requires $49 3rd-Party VST or Clunky Sidechain Routing</span></div>
+              <div class="comp-row"><span class="comp-label">Oxide Studio:</span> <span class="comp-oxide">Native 2048-pt Bezier Curve + 120Hz Sub Crossover</span></div>
+            </div>
+          </div>
+
+          <!-- Card 3: Club Clipper -->
+          <div class="bento-card col-4">
+            <span class="bento-tag pink">CLUB MASTERING</span>
+            <h3 class="bento-title">3. Club Clipper with 8x Oversampling</h3>
+            <p class="bento-desc">
+              Peak-Time Techno, RKT, and Drum & Bass require extreme loudness (-6 to -4 LUFS). 
+              Stock Saturator creates harsh aliasing foldback. Club Clipper provides continuously adjustable polynomial knee 
+              and 2x, 4x, 8x linear-phase FIR oversampling with shave-meter and instantaneous crest factor readout.
+            </p>
+            <div class="bento-comparison">
+              <div class="comp-row"><span class="comp-label">Oversampling:</span> <span class="comp-oxide">2x / 4x / 8x Linear FIR</span></div>
+              <div class="comp-row"><span class="comp-label">Shave Meter:</span> <span class="comp-oxide">Peak-to-RMS dB Telemetry</span></div>
+            </div>
+          </div>
+
+          <!-- Card 4: PhaseScope -->
+          <div class="bento-card col-4">
+            <span class="bento-tag cyan">SUB-BASS CORRELATION</span>
+            <h3 class="bento-title">4. Kick + Bass PhaseScope</h3>
+            <p class="bento-desc">
+              When kick and sub-bass fundamental waveforms oppose each other (30–100 Hz), sound cancels out on club systems. 
+              PhaseScope renders dual superimposed circular ring buffers (Kick in neon pink, Bass in laser cyan) with real-time 
+              Pearson correlation index (&rho; &isin; [-1.0, +1.0]), cancellation warning, and Hilbert phase rotator.
+            </p>
+            <div class="bento-comparison">
+              <div class="comp-row"><span class="comp-label">Correlation:</span> <span class="comp-oxide">Pearson &rho; [-1.0 .. +1.0]</span></div>
+              <div class="comp-row"><span class="comp-label">Alignment:</span> <span class="comp-oxide">0°–360° Hilbert Phase Rotator</span></div>
+            </div>
+          </div>
+
+          <!-- Card 5: ClubDeck -->
+          <div class="bento-card col-4">
+            <span class="bento-tag green">LOUDNESS DECK</span>
+            <h3 class="bento-title">5. ClubDeck Reference Analyzer</h3>
+            <p class="bento-desc">
+              Master telemetry deck with EBU R128 integrated, short-term (3s), and momentary LUFS with selectable target markers 
+              (-6 to -8 LUFS for club, -14 LUFS for streaming). Features 4x oversampled true-peak detection, Sub Mono audition switch (&lt;90 Hz), 
+              and 1-click Reference Track A/B slot with loudness matching.
+            </p>
+            <div class="bento-comparison">
+              <div class="comp-row"><span class="comp-label">Standards:</span> <span class="comp-oxide">ITU-R BS.1770 / EBU R128</span></div>
+              <div class="comp-row"><span class="comp-label">Sub Mono:</span> <span class="comp-oxide">Side Cancellation Check</span></div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- =========================================================================
+         In-App AI Copilot Showcase ("Knows What We're Doing")
+         ========================================================================= -->
+    <section class="section" id="copilot">
+      <div class="container">
+        <div class="section-header">
+          <div class="section-eyebrow"><span>🤖</span> Autonomous Studio Assistant</div>
+          <h2 class="section-title">In-App AI Copilot. Knows What We're Doing.</h2>
+          <p class="section-desc">
+            Embedded inside the native macOS studio window and connected directly to the 76 MCP tools. 
+            The Copilot inspects live track state, hears the master spectrum ("Agent Ears"), and understands electronic producer slang in Spanish and English.
+          </p>
+        </div>
+
+        <div class="copilot-showcase-grid">
+          <!-- Interactive Mock Copilot Window -->
+          <div class="copilot-mock-window">
+            <div class="copilot-window-header">
+              <div style="display: flex; align-items: center; gap: 8px;">
+                <span class="pulse-dot"></span>
+                <span class="mono" style="font-size: 12px; font-weight: 700;">🤖 AI COPILOT — MCP CONNECTED</span>
+              </div>
+              <span class="mono" style="font-size: 10px; color: var(--meter-green);">127.0.0.1:9877 ONLINE</span>
+            </div>
+
+            <!-- Live Telemetry Card -->
+            <div class="copilot-context-card">
+              <div class="context-title">Live Context Card</div>
+              <div class="context-item">🎯 <span>Selected Track:</span> Track 2 (909 Core Kit)</div>
+              <div class="context-item">🎚️ <span>Kick State:</span> 48 Hz | Drive: +6.5 dB | Decay: 480 ms</div>
+              <div class="context-item">👂 <span>Agent Ears:</span> Sub (20-60Hz): -6.2 dBFS | RMS: -11.4 dBFS</div>
+            </div>
+
+            <!-- Chat History -->
+            <div class="copilot-chat-history" id="copilot-chat-history">
+              <div class="chat-bubble copilot">
+                <p>¡Buenas! Estoy conectado al motor de audio Oxide Studio y escuchando la telemetría en tiempo real. ¿Qué modificamos en la sesión?</p>
+              </div>
+
+              <div class="chat-bubble user">
+                hace este kick mas gordo
+              </div>
+
+              <div class="chat-bubble copilot">
+                <p>¡Ajuste aplicado de una! Bajé la afinación fundamental del Kick 909 a 48 Hz para máximo impacto de sub, empujé el Roar / Saturator +6.5 dB y extendí el decay a 480 ms.</p>
+                <div>
+                  <span class="mcp-executed-badge">⚡ drums_configure_pad()</span>
+                  <span class="mcp-executed-badge">⚡ fx_set_saturator()</span>
+                  <span class="mcp-executed-badge">⚡ analyze_rendered_audio()</span>
+                </div>
+              </div>
+            </div>
+
+            <!-- Quick Chips Bar -->
+            <div class="copilot-chips-bar">
+              <button class="copilot-chip" data-prompt="hace este kick mas gordo">🥁 Hacer Kick más gordo</button>
+              <button class="copilot-chip" data-prompt="dale mas acido al bajo">🧪 Bajo Acid 303</button>
+              <button class="copilot-chip" data-prompt="arma un drop de techno a 136 bpm">🔥 Drop Techno 136</button>
+              <button class="copilot-chip" data-prompt="mete un patron de rkt / cachengue">🇦🇷 Ritmo RKT / Turreo</button>
+              <button class="copilot-chip" data-prompt="limpia el barro">✨ Abrir Filtro + OTT</button>
+            </div>
+
+            <!-- Interactive Input -->
+            <div style="display: flex; padding: 10px; background: #07080a; border-top: 1px solid var(--surface-border);">
+              <input type="text" id="copilot-chat-input" placeholder="Escribí un comando en español o inglés..." style="flex: 1; background: var(--surface-sunken); border: 1px solid var(--surface-border); padding: 8px 12px; border-radius: var(--radius-sm); font-size: 12px; outline: none;">
+              <button id="btn-copilot-send" class="btn btn-primary btn-sm" style="margin-left: 8px;">ENVIAR</button>
+            </div>
+          </div>
+
+          <!-- Feature Description & Code -->
+          <div>
+            <h3 style="font-size: 1.5rem; margin-bottom: 14px;">Deterministic Intent Router & Spectral Perception</h3>
+            <p style="color: var(--text-secondary); line-height: 1.6; margin-bottom: 18px;">
+              Unlike generic chatbots that hallucinate DAW shortcuts, Oxide Studio's Copilot features an internal 
+              deterministic Studio Intent Router coupled with <strong>"Agent Ears"</strong>. It measures 4-band spectral balance, 
+              crest factor, and RMS dBFS before and after mutating the native audio engine.
+            </p>
+
+            <div style="background: var(--surface-sunken); border: 1px solid var(--surface-border); border-radius: var(--radius-sm); padding: 16px; font-family: var(--font-mono); font-size: 11px; color: var(--text-muted); line-height: 1.6;">
+              <div style="color: var(--laser-cyan); margin-bottom: 8px;">// Native Rust GUI Copilot Integration (crates/ableton-gui)</div>
+              <div>app.dispatch_studio_intent(<span style="color: var(--signal-amber);">"hace este kick mas gordo"</span>);</div>
+              <div style="color: var(--text-dim); margin: 6px 0;">&gt;&gt; Executes drums_configure_pad(pitch=48.0, decay=480)</div>
+              <div style="color: var(--text-dim);">&gt;&gt; Executes fx_set_saturator(drive_db=+6.5, curve="Pade44")</div>
+              <div style="color: var(--text-dim);">&gt;&gt; Executes app.drum_pattern.set_step(0, 4, 8, 12, Kick)</div>
+              <div style="color: var(--meter-green); margin-top: 8px;">✓ Live telemetry updated: Sub-bass +4.8 dBFS</div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- =========================================================================
+         Subsystems & Architecture Explorer
+         ========================================================================= -->
+    <section class="section" id="subsystems">
+      <div class="container">
+        <div class="section-header">
+          <div class="section-eyebrow"><span>⚙️</span> Modular Rust Architecture</div>
+          <h2 class="section-title">9 Crates, 10 Instruments & 15 Audio Effects.</h2>
+          <p class="section-desc">
+            Organized into clean, decoupled crates with zero circular dependencies. 
+            Real-time audio threads maintain zero allocations while GUI and MCP servers interact over lock-free ring buffers.
+          </p>
+        </div>
+
+        <!-- Navigation Tabs -->
+        <div class="tabs-nav">
+          <button class="tab-btn active" data-tab="tab-crates">9 RUST CRATES</button>
+          <button class="tab-btn" data-tab="tab-instruments">10 INSTRUMENTS</button>
+          <button class="tab-btn" data-tab="tab-effects">15 AUDIO EFFECTS</button>
+        </div>
+
+        <!-- Tab 1: 9 Crates -->
+        <div class="crates-grid tab-content" id="tab-crates">
+          <div class="crate-card">
+            <div class="crate-name">ableton-core</div>
+            <p class="crate-desc">Lock-free SPSC ring buffers (<span class="mono">rtrb</span>), audio buffer slices, sample clock, GlobalScale, and project definitions.</p>
+            <ul class="crate-invariants">
+              <li>Zero audio-thread heap allocations</li>
+              <li>Lock-free atomic communication</li>
+            </ul>
+          </div>
+
+          <div class="crate-card">
+            <div class="crate-name">ableton-dsp</div>
+            <p class="crate-desc">PolyBLEP oscillators, Cytomic ZDF filters, Mystran 2x-oversampled 4-pole ladder filter, Wavetable, Operator, Drift, and Meld.</p>
+            <ul class="crate-invariants">
+              <li>Padé [4/4] rational saturation</li>
+              <li>Strictly bounded, non-NaN audio</li>
+            </ul>
+          </div>
+
+          <div class="crate-card">
+            <div class="crate-name">ableton-drums</div>
+            <p class="crate-desc">TR-909 physical drum synthesis models, multi-pad Drum Rack (128-pad bank view), sample slicing, and choke groups.</p>
+            <ul class="crate-invariants">
+              <li>Dual-component kick & tuned snare</li>
+              <li>Quantized transient slicing</li>
+            </ul>
+          </div>
+
+          <div class="crate-card">
+            <div class="crate-name">ableton-fx</div>
+            <p class="crate-desc">Dynamic multi-device chain hosting EQ Eight, Glue Compressor, Roar saturator, Auto Filter, OTT, Hybrid Reverb, and Limiter.</p>
+            <ul class="crate-invariants">
+              <li>Cytomic SSL bus compressor model</li>
+              <li>8-band parametric filter cascade</li>
+            </ul>
+          </div>
+
+          <div class="crate-card">
+            <div class="crate-name">ableton-audio</div>
+            <p class="crate-desc">Native macOS CoreAudio real-time output via CPAL with low-latency device streams and buffer callbacks.</p>
+            <ul class="crate-invariants">
+              <li>Sub-5ms hardware roundtrip latency</li>
+              <li>Real-time thread priority scheduling</li>
+            </ul>
+          </div>
+
+          <div class="crate-card">
+            <div class="crate-name">ableton-bounce</div>
+            <p class="crate-desc">Offline multi-track WAV renderer, sample-rate conversion, 16/24/32-bit RIFF export, and 4-stem remix extractor.</p>
+            <ul class="crate-invariants">
+              <li>Linkwitz-Riley 4-band crossover</li>
+              <li>Mid/Side harmonic decomposition</li>
+            </ul>
+          </div>
+
+          <div class="crate-card">
+            <div class="crate-name">ableton-timeline</div>
+            <p class="crate-desc">Session clip launcher, Arrangement multi-track timeline, automation ramps, comping take lanes, and 6-mode warping.</p>
+            <ul class="crate-invariants">
+              <li>OWarper phase vocoder reconstruction</li>
+              <li>Piecewise-linear automation curves</li>
+            </ul>
+          </div>
+
+          <div class="crate-card">
+            <div class="crate-name">ableton-project</div>
+            <p class="crate-desc">Atomic JSON/RON project persistence and bidirectional Ableton Live 12 Set (<span class="mono">.als</span>) Gzip XML parser/serializer.</p>
+            <ul class="crate-invariants">
+              <li>Full round-trip fidelity with Live 12</li>
+              <li>Flate2 Gzip automatic detection</li>
+            </ul>
+          </div>
+
+          <div class="crate-card">
+            <div class="crate-name">ableton-plugin-scanner</div>
+            <p class="crate-desc">Crash-isolated out-of-process supervisor enumerating and hosting AUv2, VST3, and CLAP plugins.</p>
+            <ul class="crate-invariants">
+              <li>Process isolation crash supervisor</li>
+              <li>Host DAW survives plugin segfaults</li>
+            </ul>
+          </div>
+        </div>
+
+        <!-- Tab 2: 10 Instruments -->
+        <div class="crates-grid tab-content" id="tab-instruments" style="display: none;">
+          <div class="crate-card"><div class="crate-name">1. Wavetable</div><p class="crate-desc">Dual wavetables with continuous morphing, sub oscillator, dual Cytomic ZDF filters, and 8-target modulation matrix.</p></div>
+          <div class="crate-card"><div class="crate-name">2. Operator</div><p class="crate-desc">4-Operator FM / additive synthesizer with 11 classic routing algorithms, feedback, and per-operator envelopes.</p></div>
+          <div class="crate-card"><div class="crate-name">3. Drift</div><p class="crate-desc">Analog drift instability, shape modulation, cycling envelope, and MPE per-voice expressive articulation.</p></div>
+          <div class="crate-card"><div class="crate-name">4. Meld</div><p class="crate-desc">Bi-timbral dual macro engines with scale-aware harmonic quantizer and cross-modulated plate resonators.</p></div>
+          <div class="crate-card"><div class="crate-name">5. Analog</div><p class="crate-desc">Virtual analog dual-oscillator / dual-filter architecture with noise generator and amplifier envelope.</p></div>
+          <div class="crate-card"><div class="crate-name">6. Collision</div><p class="crate-desc">Physical modeling mallet and membrane resonator simulating marimbas, vibraphones, and acoustic bodies.</p></div>
+          <div class="crate-card"><div class="crate-name">7. Tension</div><p class="crate-desc">String physical modeling synthesizing plucked, bowed, and hammered string instruments.</p></div>
+          <div class="crate-card"><div class="crate-name">8. Electric</div><p class="crate-desc">Electromechanical piano model synthesizing classic Rhodes and Wurlitzer tine/reed pianos.</p></div>
+          <div class="crate-card"><div class="crate-name">9. Simpler</div><p class="crate-desc">Polyphonic sample playback instrument with Classic, 1-Shot, and Transient Slicing modes.</p></div>
+          <div class="crate-card"><div class="crate-name">10. Drum Rack</div><p class="crate-desc">128-pad bank view (16 visible pads) with per-pad device chains, choke groups, and return buses.</p></div>
+        </div>
+
+        <!-- Tab 3: 15 Audio Effects -->
+        <div class="crates-grid tab-content" id="tab-effects" style="display: none;">
+          <div class="crate-card"><div class="crate-name">1. EQ Eight</div><p class="crate-desc">8-band parametric EQ (Stereo, L/R, M/S) with real-time FFT spectrum behind the filter curve.</p></div>
+          <div class="crate-card"><div class="crate-name">2. Glue Compressor</div><p class="crate-desc">Cytomic SSL bus compressor model with soft clip, range limiter, and dry/wet blend.</p></div>
+          <div class="crate-card"><div class="crate-name">3. Roar</div><p class="crate-desc">Multi-stage saturator with 10 saturation curves, nonlinear filter, and feedback delay.</p></div>
+          <div class="crate-card"><div class="crate-name">4. Auto Filter</div><p class="crate-desc">Cytomic ZDF multi-mode filter with analog drive models (Clean, OSR, MS2, SMP, PRD).</p></div>
+          <div class="crate-card"><div class="crate-name">5. Multiband Dynamics (OTT)</div><p class="crate-desc">3-band upward and downward compressor with Time and Amount macro controls.</p></div>
+          <div class="crate-card"><div class="crate-name">6. Hybrid Reverb</div><p class="crate-desc">Convolution impulse response engine blended with algorithmic feedback delay network.</p></div>
+          <div class="crate-card"><div class="crate-name">7. Echo</div><p class="crate-desc">Dual stereo delay lines with feedback, filter, and pitch-modulation analog tape emulation.</p></div>
+          <div class="crate-card"><div class="crate-name">8. Beat Repeat</div><p class="crate-desc">Live audio buffer capture with rhythmic stutter, pitch decay, and chance gating.</p></div>
+          <div class="crate-card"><div class="crate-name">9. Corpus</div><p class="crate-desc">Acoustic resonator simulating beams, plates, membranes, and open pipes.</p></div>
+          <div class="crate-card"><div class="crate-name">10. Redux</div><p class="crate-desc">Sample rate reduction and bit-depth crushing for industrial digital grit.</p></div>
+          <div class="crate-card"><div class="crate-name">11. Erosion</div><p class="crate-desc">Noise modulation and sine-wave harmonic degradation filter.</p></div>
+          <div class="crate-card"><div class="crate-name">12. Chorus-Ensemble</div><p class="crate-desc">Classic bucket-brigade analog chorus, vibrato, and lush ensemble modulation.</p></div>
+          <div class="crate-card"><div class="crate-name">13. Phaser-Flanger</div><p class="crate-desc">Multi-stage all-pass phaser and comb-filtering flanger with stereo phase offset.</p></div>
+          <div class="crate-card"><div class="crate-name">14. Utility</div><p class="crate-desc">Gain, pan, stereo width (0–400%), bass mono crossover, and phase inversion.</p></div>
+          <div class="crate-card"><div class="crate-name">15. Limiter</div><p class="crate-desc">Lookahead brickwall master limiter with peak hold and gain reduction metering.</p></div>
+        </div>
+      </div>
+    </section>
+
+    <!-- =========================================================================
+         76 Native MCP Tools Catalog Explorer
+         ========================================================================= -->
+    <section class="section" id="mcp-tools">
+      <div class="container">
+        <div class="section-header">
+          <div class="section-eyebrow"><span>⚡</span> Model Context Protocol</div>
+          <h2 class="section-title">76 Native MCP Tools Explorer.</h2>
+          <p class="section-desc">
+            Autonomous AI agents control every DAW subsystem over JSON-RPC 2.0. 
+            Filter by category, search parameter schemas, and copy ready-to-execute tool payloads.
+          </p>
+        </div>
+
+        <div class="mcp-explorer-shell">
+          <div class="mcp-filter-bar">
+            <input type="text" id="mcp-search-input" class="mcp-search-input" placeholder="Search 76 tools by name or description...">
+
+            <div class="category-pills">
+              <button class="cat-pill active" data-cat="all">ALL (76)</button>
+              <button class="cat-pill" data-cat="project">PROJECT</button>
+              <button class="cat-pill" data-cat="synth">SYNTHS</button>
+              <button class="cat-pill" data-cat="drums">DRUMS</button>
+              <button class="cat-pill" data-cat="clips">CLIPS</button>
+              <button class="cat-pill" data-cat="generative">GENERATIVE</button>
+              <button class="cat-pill" data-cat="fx">FX &amp; MIXER</button>
+              <button class="cat-pill" data-cat="devices">DEVICES</button>
+              <button class="cat-pill" data-cat="warping">WARPING</button>
+              <button class="cat-pill" data-cat="rpc">GUI RPC</button>
+            </div>
+          </div>
+
+          <div style="font-family: var(--font-mono); font-size: 11px; color: var(--text-muted); margin-bottom: 12px;" id="mcp-tool-count">
+            Showing 76 of 76 Tools
+          </div>
+
+          <!-- Tools Grid -->
+          <div class="mcp-tools-grid" id="mcp-tools-grid">
+            <!-- Dynamically populated by app.js -->
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- =========================================================================
+         Bidirectional .als Interoperability & 1-Click Remix Stems
+         ========================================================================= -->
+    <section class="section" id="interop">
+      <div class="container">
+        <div class="section-header">
+          <div class="section-eyebrow"><span>🔄</span> Seamless Workflow Bridging</div>
+          <h2 class="section-title">Bidirectional .als Interoperability &amp; 1-Click Remix Stems.</h2>
+          <p class="section-desc">
+            Move projects between Ableton Live 12 and Oxide Studio without friction. 
+            Extract isolated stems in seconds to remix or sample any track immediately.
+          </p>
+        </div>
+
+        <div class="bento-grid">
+          <!-- .als Interop -->
+          <div class="bento-card col-6">
+            <span class="bento-tag">LIVE SET INTEROP</span>
+            <h3 class="bento-title">Open &amp; Export Ableton Live 12 Sets (<span class="mono">.als</span>)</h3>
+            <p class="bento-desc">
+              Oxide Studio parses and serializes Gzip-compressed XML (<span class="mono">\x1f\x8b</span>) Live Sets directly. 
+              Export your Oxide Studio session to <span class="mono">project.als</span> to finish in Ableton Live, 
+              or open an existing Live 12 set directly in Oxide Studio.
+            </p>
+            <div style="background: var(--surface-sunken); border: 1px solid var(--surface-border-subtle); padding: 12px; border-radius: var(--radius-sm); font-family: var(--font-mono); font-size: 11px; color: var(--text-muted);">
+              <div><span style="color: var(--laser-cyan);">$</span> oxide-studio --import-als song.als</div>
+              <div style="margin-top: 4px;"><span style="color: var(--laser-cyan);">$</span> oxide-studio --export-als session.als</div>
+              <div style="color: var(--meter-green); margin-top: 6px;">✓ Tracks, Tempo, MIDI Clips, and Mixer faders preserved 1:1</div>
+            </div>
+          </div>
+
+          <!-- 1-Click Remix Stems -->
+          <div class="bento-card col-6">
+            <span class="bento-tag cyan">REMIX WORKFLOW</span>
+            <h3 class="bento-title">1-Click Remix Stem Extractor (<span class="mono">✂️ Stems</span>)</h3>
+            <p class="bento-desc">
+              Extract 4 sample-aligned stems from any stereo track using zero-dependency DSP: 
+              4-band Linkwitz-Riley crossovers, Mid/Side center-channel separation, and transient/sustain decomposition. 
+              Automatically creates 4 dedicated stem tracks in the Session Matrix for immediate remixing.
+            </p>
+            <div class="bento-comparison">
+              <div class="comp-row"><span class="comp-label">drums.wav:</span> <span class="comp-oxide">Transient-isolated percussion &amp; kick punch</span></div>
+              <div class="comp-row"><span class="comp-label">bass.wav:</span> <span class="comp-oxide">Phase-locked sub &amp; low bass (&lt;140 Hz)</span></div>
+              <div class="comp-row"><span class="comp-label">vocals.wav:</span> <span class="comp-oxide">Center-channel vocal formant band (220 Hz – 4.5 kHz)</span></div>
+              <div class="comp-row"><span class="comp-label">synths_other.wav:</span> <span class="comp-oxide">Stereo width harmonic residual</span></div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- =========================================================================
+         Clean-Room Open-Source FAQ, Dual Licensing & Governance
+         ========================================================================= -->
+    <section class="section" id="clean-room">
+      <div class="container">
+        <div class="section-header">
+          <div class="section-eyebrow"><span>🛡️</span> Clean-Room &amp; Governance</div>
+          <h2 class="section-title">Clean-Room Port, Dual Licensing &amp; Trademark Shield.</h2>
+          <p class="section-desc">
+            Built from mathematical first principles and published academic papers. Fully transparent open-source governance.
+          </p>
+        </div>
+
+        <div class="faq-grid">
+          <div class="faq-card">
+            <h3 class="faq-question"><span>⚖️</span> Dual MIT OR Apache-2.0 License</h3>
+            <p class="faq-answer">
+              Oxide Studio is dual-licensed under <strong>MIT OR Apache-2.0</strong>. You are free to inspect, modify, fork, 
+              compile, distribute, and embed the code in commercial or open-source products according to your preferred license.
+            </p>
+          </div>
+
+          <div class="faq-card">
+            <h3 class="faq-question"><span>🔬</span> Clean-Room Implementation Provenance</h3>
+            <p class="faq-answer">
+              Every line of code in Oxide Studio was independently written in pure Rust. The repository contains <strong>zero decompiled assemblies</strong>, 
+              proprietary SDKs, or binaries from Ableton AG. DSP algorithms are based on published papers by Cytomic (Andrew Simper) and Mystran.
+            </p>
+          </div>
+
+          <div class="faq-card">
+            <h3 class="faq-question"><span>🏷️</span> Nominative Fair Use Trademark Notice</h3>
+            <p class="faq-answer">
+              "Ableton", "Ableton Live", "Live Suite", and "Push" are registered trademarks of Ableton AG. Oxide Studio is an independent project and is 
+              <strong>not affiliated with, sponsored by, or endorsed by Ableton AG</strong>. References are strictly nominative and comparative.
+            </p>
+          </div>
+
+          <div class="faq-card">
+            <h3 class="faq-question"><span>🤝</span> Community Governance &amp; Audio Safety</h3>
+            <p class="faq-answer">
+              Contributions follow strict audio-thread safety rules: <strong>zero heap allocations in process()</strong>, lock-free SPSC channels, 
+              and out-of-process crash supervisor protection for third-party AUv2 and VST3 plugins.
+            </p>
+          </div>
+        </div>
+      </div>
+    </section>
+
+  </main>
+
+  <!-- =========================================================================
+       Studio Footer
+       ========================================================================= -->
+  <footer class="studio-footer">
+    <div class="container footer-inner">
+      <div>
+        <div style="display: flex; align-items: center; gap: 8px; margin-bottom: 8px;">
+          <span class="brand-badge" style="width: 20px; height: 20px; font-size: 11px;">O</span>
+          <span style="font-weight: 700; color: #fff;">OXIDE STUDIO</span>
+          <span class="mono" style="font-size: 10px; color: var(--signal-amber);">v0.1.0</span>
+        </div>
+        <p class="footer-disclaimer">
+          Independent, clean-room native electronic music digital audio workstation in Rust. 
+          Dual-licensed under MIT OR Apache-2.0. Not affiliated with Ableton AG.
+        </p>
+      </div>
+
+      <ul class="footer-links">
+        <li><a href="https://github.com/juancruzmunozalbelo/oxide-studio" target="_blank" rel="noopener noreferrer">GitHub</a></li>
+        <li><a href="https://github.com/juancruzmunozalbelo/oxide-studio/blob/main/LICENSE-MIT" target="_blank" rel="noopener noreferrer">MIT</a></li>
+        <li><a href="https://github.com/juancruzmunozalbelo/oxide-studio/blob/main/LICENSE-APACHE" target="_blank" rel="noopener noreferrer">Apache-2.0</a></li>
+        <li><a href="https://github.com/juancruzmunozalbelo/oxide-studio/blob/main/NOTICE.md" target="_blank" rel="noopener noreferrer">NOTICE</a></li>
+        <li><a href="https://github.com/juancruzmunozalbelo/oxide-studio/blob/main/SECURITY.md" target="_blank" rel="noopener noreferrer">Security</a></li>
+      </ul>
+    </div>
+  </footer>
+
+  <!-- Script Engine -->
+  <script src="app.js"></script>
+</body>
+</html>
