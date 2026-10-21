@@ -1,0 +1,10 @@
+Add a multi-platform GitHub Actions release workflow (`.github/workflows/release.yml`) for Oxide Studio (`juancruzmunozalbelo/oxide-studio`) so non-Rust music producers visiting from Reddit (`r/ableton`, `r/edmproduction`, `r/technoproduction`) and Hacker News can download pre-built binaries directly from GitHub Releases.
+
+Requirements:
+1. Trigger on git tags matching `v*` (e.g. `v0.1.0`, `v0.2.0`) AND `workflow_dispatch`.
+2. Build matrix across:
+   - `macos-latest` (`aarch64-apple-darwin` and `x86_64-apple-darwin` or native Apple Silicon release binary + `.app` bundle / `.tar.gz`)
+   - `ubuntu-22.04` (`x86_64-unknown-linux-gnu` with ALSA/JACK system dependencies `libasound2-dev`, `libjack-jackd2-dev`, `pkg-config`, `libxcb-render0-dev`, `libxcb-shape0-dev`, `libxcb-xfixes0-dev`, `libxkbcommon-dev`, `libssl-dev`)
+   - `windows-latest` (`x86_64-pc-windows-msvc`)
+3. Run `cargo test --workspace` before packaging, then `cargo build --release`, package the binary + `README.md` + `LICENSE-MIT` + `house_intro_demo.json`, and publish artifacts to GitHub Releases using `softprops/action-gh-release@v2`.
+4. Verify `.github/workflows/ci.yml` continues to pass and update the `Installation / Quick Download` section in `README.md` to mention pre-built binaries in GitHub Releases alongside `cargo run --release`.

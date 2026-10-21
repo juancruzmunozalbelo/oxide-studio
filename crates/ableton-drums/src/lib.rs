@@ -28,8 +28,9 @@ mod tests {
         assert_eq!(rack.pads.len(), 16);
         assert_eq!(rack.voices.len(), 32);
         assert_eq!(rack.pads[0].name, "Kick");
-        assert_eq!(rack.pads[6].name, "Closed HH");
-        assert_eq!(rack.pads[6].choke_group, Some(1));
+        assert_eq!(rack.pads[6].name, "Clap");
+        assert_eq!(rack.pads[8].name, "Closed HH");
+        assert_eq!(rack.pads[8].choke_group, Some(1));
         assert_eq!(rack.pads[10].choke_group, Some(1));
     }
 

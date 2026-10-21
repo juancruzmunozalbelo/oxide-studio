@@ -84,27 +84,27 @@ impl DrumStepPattern {
     pub fn new_16_step() -> Self {
         let pad_names = [
             (0, "Kick", 36),
-            (1, "Rim", 37),
-            (2, "Snare", 38),
-            (3, "Clap", 39),
-            (4, "Clave", 40),
-            (5, "Low Tom", 41),
-            (6, "Closed HH", 42),
-            (7, "Mid Tom", 43),
-            (8, "Hi Tom", 44),
-            (9, "Cymbal", 45),
-            (10, "Open HH", 46),
+            (1, "Snare", 37),
+            (2, "Low Tom", 38),
+            (3, "Mid Tom", 39),
+            (4, "Hi Tom", 40),
+            (5, "Rimshot", 41),
+            (6, "Clap", 42),
+            (7, "Cowbell", 43),
+            (8, "Closed HH", 44),
+            (9, "Open HH", 45),
+            (10, "Crash", 46),
             (11, "Ride", 47),
-            (12, "Crash", 48),
-            (13, "Tambourine", 49),
-            (14, "Splash", 50),
-            (15, "Cowbell", 51),
+            (12, "Perc 1", 48),
+            (13, "Perc 2", 49),
+            (14, "Shaker", 50),
+            (15, "Tambourine", 51),
         ];
 
         let mut tracks = Vec::with_capacity(16);
         for (idx, name, pitch) in pad_names {
             let mut trk = DrumStepTrack::new(idx, name, 16, pitch);
-            if idx == 6 || idx == 10 {
+            if idx == 8 || idx == 9 {
                 // Closed & Open Hi-Hats share choke group 1
                 for s in &mut trk.steps {
                     s.choke_group = Some(1);
@@ -303,8 +303,8 @@ mod tests {
         drum.toggle_step(0, 12);
 
         // Toggle snare on step 4 and 12
-        drum.toggle_step(2, 4);
-        drum.toggle_step(2, 12);
+        drum.toggle_step(1, 4);
+        drum.toggle_step(1, 12);
 
         let hits_step_0 = drum.active_steps_at(0);
         assert_eq!(hits_step_0.len(), 1);

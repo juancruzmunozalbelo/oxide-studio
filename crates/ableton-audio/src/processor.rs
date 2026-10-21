@@ -5,10 +5,22 @@ use ableton_dsp::SynthEngine;
 use ableton_drums::DrumRack;
 use ableton_fx::{Mixer, Saturator, TempoDelay, FdnReverb};
 
-use crate::parameters::{AtomicParameters, PARAM_BPM, PARAM_MASTER_VOL};
+use crate::parameters::{
+    AtomicParameters, PARAM_BPM, PARAM_MASTER_VOL, PARAM_TRACK_PAN_BASE, PARAM_TRACK_VOL_BASE,
+};
 use crate::queues::AudioThreadHandles;
 
 pub const MAX_BLOCK_FRAMES: usize = 1024;
+
+// Parameter IDs for AudioCommand::SetParameter
+pub const PARAM_ID_MASTER_VOL: u32 = 1;
+pub const PARAM_ID_TRACK_VOL_BASE: u32 = 1000;
+pub const PARAM_ID_TRACK_PAN_BASE: u32 = 1100;
+pub const PARAM_ID_TRACK_MUTE_BASE: u32 = 1200;
+pub const PARAM_ID_TRACK_SOLO_BASE: u32 = 1300;
+pub const PARAM_ID_TRACK_SEND_A_BASE: u32 = 1400;
+pub const PARAM_ID_TRACK_SEND_B_BASE: u32 = 1500;
+pub const PARAM_ID_CROSSFADER: u32 = 2000;
 
 pub struct AudioEngineProcessor {
     pub sample_rate: f32,
@@ -20,6 +32,9 @@ pub struct AudioEngineProcessor {
     pub delay: TempoDelay,
     pub reverb: FdnReverb,
     pub params: AtomicParameters,
+    pub send_a: [f32; 16],
+    pub send_b: [f32; 16],
+    pub crossfader: f32,
     handles: AudioThreadHandles,
 
     // Pre-allocated zero-allocation planar scratch buffers
@@ -55,6 +70,9 @@ impl AudioEngineProcessor {
             delay: TempoDelay::new(sr, transport.bpm),
             reverb: FdnReverb::new(sr),
             params,
+            send_a: [0.0; 16],
+            send_b: [0.0; 16],
+            crossfader: 0.0,
             handles,
             scratch_l: [0.0; MAX_BLOCK_FRAMES],
             scratch_r: [0.0; MAX_BLOCK_FRAMES],
@@ -74,6 +92,11 @@ impl AudioEngineProcessor {
         let drum_rack = &mut self.drum_rack;
         let transport = &mut self.transport;
         let delay = &mut self.delay;
+        let mixer = &mut self.mixer;
+        let params = &self.params;
+        let send_a = &mut self.send_a;
+        let send_b = &mut self.send_b;
+        let crossfader = &mut self.crossfader;
 
         self.handles.drain_commands(|cmd| match cmd {
             AudioCommand::Play => {
@@ -104,11 +127,102 @@ impl AudioEngineProcessor {
                     synth.note_off(note);
                 }
             }
-            AudioCommand::SetParameter { track_id: _, param_id, value } => {
+            AudioCommand::SetParameter { track_id, param_id, value } => {
                 if param_id == 100 {
                     synth.set_macro_x(value);
                 } else if param_id == 101 {
                     synth.set_macro_y(value);
+                } else if param_id == 0 || param_id == PARAM_ID_MASTER_VOL {
+                    mixer.master_volume_linear = value;
+                    params.set(PARAM_MASTER_VOL, value);
+                } else if (PARAM_ID_TRACK_VOL_BASE..=PARAM_ID_TRACK_VOL_BASE + 15).contains(&param_id)
+                    || (PARAM_TRACK_VOL_BASE as u32..=(PARAM_TRACK_VOL_BASE + 15) as u32).contains(&param_id)
+                {
+                    let tid = if (PARAM_ID_TRACK_VOL_BASE..=PARAM_ID_TRACK_VOL_BASE + 15).contains(&param_id) {
+                        if param_id > PARAM_ID_TRACK_VOL_BASE {
+                            (param_id - PARAM_ID_TRACK_VOL_BASE) as usize
+                        } else {
+                            track_id
+                        }
+                    } else if (PARAM_TRACK_VOL_BASE as u32..=(PARAM_TRACK_VOL_BASE + 15) as u32).contains(&param_id) {
+                        (param_id - PARAM_TRACK_VOL_BASE as u32) as usize
+                    } else {
+                        track_id
+                    };
+                    if tid < 16 {
+                        let lin = if value <= 0.001 { 0.0 } else { value };
+                        mixer.tracks[tid].volume_linear = lin;
+                        if lin <= 0.001 {
+                            mixer.tracks[tid].volume_db = -60.0;
+                            mixer.tracks[tid].peak_l = 0.0;
+                            mixer.tracks[tid].peak_r = 0.0;
+                        } else {
+                            mixer.tracks[tid].volume_db = (20.0 * lin.log10()).clamp(-60.0, 6.0);
+                        }
+                        params.set(PARAM_TRACK_VOL_BASE + tid, lin);
+                    }
+                } else if (PARAM_ID_TRACK_PAN_BASE..=PARAM_ID_TRACK_PAN_BASE + 15).contains(&param_id)
+                    || (PARAM_TRACK_PAN_BASE as u32..=(PARAM_TRACK_PAN_BASE + 15) as u32).contains(&param_id)
+                {
+                    let tid = if (PARAM_ID_TRACK_PAN_BASE..=PARAM_ID_TRACK_PAN_BASE + 15).contains(&param_id) {
+                        if param_id > PARAM_ID_TRACK_PAN_BASE {
+                            (param_id - PARAM_ID_TRACK_PAN_BASE) as usize
+                        } else {
+                            track_id
+                        }
+                    } else if (PARAM_TRACK_PAN_BASE as u32..=(PARAM_TRACK_PAN_BASE + 15) as u32).contains(&param_id) {
+                        (param_id - PARAM_TRACK_PAN_BASE as u32) as usize
+                    } else {
+                        track_id
+                    };
+                    if tid < 16 {
+                        let clamped = value.clamp(-1.0, 1.0);
+                        mixer.tracks[tid].pan = clamped;
+                        params.set(PARAM_TRACK_PAN_BASE + tid, clamped);
+                    }
+                } else if (PARAM_ID_TRACK_MUTE_BASE..=PARAM_ID_TRACK_MUTE_BASE + 15).contains(&param_id) {
+                    let tid = if param_id > PARAM_ID_TRACK_MUTE_BASE {
+                        (param_id - PARAM_ID_TRACK_MUTE_BASE) as usize
+                    } else {
+                        track_id
+                    };
+                    if tid < 16 {
+                        let is_muted = value > 0.5;
+                        mixer.tracks[tid].mute = is_muted;
+                        if is_muted {
+                            mixer.tracks[tid].peak_l = 0.0;
+                            mixer.tracks[tid].peak_r = 0.0;
+                        }
+                    }
+                } else if (PARAM_ID_TRACK_SOLO_BASE..=PARAM_ID_TRACK_SOLO_BASE + 15).contains(&param_id) {
+                    let tid = if param_id > PARAM_ID_TRACK_SOLO_BASE {
+                        (param_id - PARAM_ID_TRACK_SOLO_BASE) as usize
+                    } else {
+                        track_id
+                    };
+                    if tid < 16 {
+                        mixer.tracks[tid].solo = value > 0.5;
+                    }
+                } else if (PARAM_ID_TRACK_SEND_A_BASE..=PARAM_ID_TRACK_SEND_A_BASE + 15).contains(&param_id) {
+                    let tid = if param_id > PARAM_ID_TRACK_SEND_A_BASE {
+                        (param_id - PARAM_ID_TRACK_SEND_A_BASE) as usize
+                    } else {
+                        track_id
+                    };
+                    if tid < 16 {
+                        send_a[tid] = value.clamp(0.0, 1.0);
+                    }
+                } else if (PARAM_ID_TRACK_SEND_B_BASE..=PARAM_ID_TRACK_SEND_B_BASE + 15).contains(&param_id) {
+                    let tid = if param_id > PARAM_ID_TRACK_SEND_B_BASE {
+                        (param_id - PARAM_ID_TRACK_SEND_B_BASE) as usize
+                    } else {
+                        track_id
+                    };
+                    if tid < 16 {
+                        send_b[tid] = value.clamp(0.0, 1.0);
+                    }
+                } else if param_id == PARAM_ID_CROSSFADER {
+                    *crossfader = value.clamp(-1.0, 1.0);
                 }
             }
             _ => {}
@@ -161,41 +275,89 @@ impl AudioEngineProcessor {
             &mut self.drum_buf_r[..frames],
         );
 
+        // Ensure muted or zero-volume tracks render absolute silence and immediate 0.0 peak
+        if !synth_audible || self.mixer.tracks[0].mute || self.mixer.tracks[0].volume_linear <= 0.001 {
+            self.synth_buf_l[..frames].fill(0.0);
+            self.synth_buf_r[..frames].fill(0.0);
+            self.mixer.tracks[0].peak_l = 0.0;
+            self.mixer.tracks[0].peak_r = 0.0;
+            self.mixer.tracks[0].rms_l = 0.0;
+            self.mixer.tracks[0].rms_r = 0.0;
+        }
+        if !drum_audible || self.mixer.tracks[1].mute || self.mixer.tracks[1].volume_linear <= 0.001 {
+            self.drum_buf_l[..frames].fill(0.0);
+            self.drum_buf_r[..frames].fill(0.0);
+            self.mixer.tracks[1].peak_l = 0.0;
+            self.mixer.tracks[1].peak_r = 0.0;
+            self.mixer.tracks[1].rms_l = 0.0;
+            self.mixer.tracks[1].rms_r = 0.0;
+        }
+        for t in 2..16 {
+            if self.mixer.tracks[t].mute || self.mixer.tracks[t].volume_linear <= 0.001 {
+                self.mixer.tracks[t].peak_l = 0.0;
+                self.mixer.tracks[t].peak_r = 0.0;
+                self.mixer.tracks[t].rms_l = 0.0;
+                self.mixer.tracks[t].rms_r = 0.0;
+            }
+        }
+
+        let mut any_track_audible = false;
+
         // 7. Sum audible tracks into Master Planar Scratch
-        if synth_audible {
+        if synth_audible && !self.mixer.tracks[0].mute && self.mixer.tracks[0].volume_linear > 0.001 {
+            any_track_audible = true;
             for i in 0..frames {
                 self.scratch_l[i] += self.synth_buf_l[i];
                 self.scratch_r[i] += self.synth_buf_r[i];
             }
         }
-        if drum_audible {
+        if drum_audible && !self.mixer.tracks[1].mute && self.mixer.tracks[1].volume_linear > 0.001 {
+            any_track_audible = true;
             for i in 0..frames {
                 self.scratch_l[i] += self.drum_buf_l[i];
                 self.scratch_r[i] += self.drum_buf_r[i];
             }
         }
 
-        // 8. Process Master Insert FX (Saturator -> Delay -> Reverb)
-        self.saturator.process_block(
-            &mut self.scratch_l[..frames],
-            &mut self.scratch_r[..frames],
-        );
-        self.delay.process_block(
-            &mut self.scratch_l[..frames],
-            &mut self.scratch_r[..frames],
-        );
-        self.reverb.process_block(
-            &mut self.scratch_l[..frames],
-            &mut self.scratch_r[..frames],
-        );
+        if !any_track_audible {
+            self.scratch_l[..frames].fill(0.0);
+            self.scratch_r[..frames].fill(0.0);
+            self.mixer.master_peak_l = 0.0;
+            self.mixer.master_peak_r = 0.0;
+            self.mixer.master_rms_l = 0.0;
+            self.mixer.master_rms_r = 0.0;
+        } else {
+            // 8. Process Master Insert FX (Saturator -> Delay -> Reverb)
+            self.saturator.process_block(
+                &mut self.scratch_l[..frames],
+                &mut self.scratch_r[..frames],
+            );
+            self.delay.process_block(
+                &mut self.scratch_l[..frames],
+                &mut self.scratch_r[..frames],
+            );
+            self.reverb.process_block(
+                &mut self.scratch_l[..frames],
+                &mut self.scratch_r[..frames],
+            );
 
-        // 9. Master Bus & Brickwall Limiter
-        let master_vol = self.params.get(PARAM_MASTER_VOL);
-        self.mixer.master_volume_linear = master_vol;
-        self.mixer.process_master(
-            &mut self.scratch_l[..frames],
-            &mut self.scratch_r[..frames],
-        );
+            // 9. Master Bus & Brickwall Limiter
+            let master_vol = self.params.get(PARAM_MASTER_VOL);
+            self.mixer.master_volume_linear = master_vol;
+            if master_vol <= 0.001 {
+                self.scratch_l[..frames].fill(0.0);
+                self.scratch_r[..frames].fill(0.0);
+                self.mixer.master_peak_l = 0.0;
+                self.mixer.master_peak_r = 0.0;
+                self.mixer.master_rms_l = 0.0;
+                self.mixer.master_rms_r = 0.0;
+            } else {
+                self.mixer.process_master(
+                    &mut self.scratch_l[..frames],
+                    &mut self.scratch_r[..frames],
+                );
+            }
+        }
 
         // 10. Update Oscilloscope & Spectrum Telemetry
         for i in 0..frames {
@@ -210,10 +372,10 @@ impl AudioEngineProcessor {
         telemetry.master_peak_r = self.mixer.master_peak_r;
         telemetry.master_rms_l = self.mixer.master_rms_l;
         telemetry.master_rms_r = self.mixer.master_rms_r;
-        telemetry.track_peaks_l[0] = self.mixer.tracks[0].peak_l;
-        telemetry.track_peaks_r[0] = self.mixer.tracks[0].peak_r;
-        telemetry.track_peaks_l[1] = self.mixer.tracks[1].peak_l;
-        telemetry.track_peaks_r[1] = self.mixer.tracks[1].peak_r;
+        for t in 0..16 {
+            telemetry.track_peaks_l[t] = self.mixer.tracks[t].peak_l;
+            telemetry.track_peaks_r[t] = self.mixer.tracks[t].peak_r;
+        }
 
         // Copy aligned oscilloscope slice
         for k in 0..256 {
@@ -238,3 +400,189 @@ impl AudioEngineProcessor {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::queues::AudioQueues;
+
+    #[test]
+    fn test_mixer_parameters_command_routing() {
+        let queues = AudioQueues::new();
+        let (mut ui, audio) = queues.split();
+        let params = AtomicParameters::new();
+        let mut proc = AudioEngineProcessor::new(44100.0, audio, params);
+
+        // 1. Master Volume
+        ui.send_command(AudioCommand::SetParameter {
+            track_id: 0,
+            param_id: PARAM_ID_MASTER_VOL,
+            value: 0.75,
+        });
+        // 2. Track 0 Volume
+        ui.send_command(AudioCommand::SetParameter {
+            track_id: 0,
+            param_id: PARAM_ID_TRACK_VOL_BASE,
+            value: 1.5,
+        });
+        // 3. Track 1 Pan
+        ui.send_command(AudioCommand::SetParameter {
+            track_id: 1,
+            param_id: PARAM_ID_TRACK_PAN_BASE + 1,
+            value: -0.6,
+        });
+        // 4. Track 0 Mute
+        ui.send_command(AudioCommand::SetParameter {
+            track_id: 0,
+            param_id: PARAM_ID_TRACK_MUTE_BASE,
+            value: 1.0,
+        });
+        // 5. Track 1 Solo
+        ui.send_command(AudioCommand::SetParameter {
+            track_id: 1,
+            param_id: PARAM_ID_TRACK_SOLO_BASE + 1,
+            value: 1.0,
+        });
+        // 6. Track 0 Send A
+        ui.send_command(AudioCommand::SetParameter {
+            track_id: 0,
+            param_id: PARAM_ID_TRACK_SEND_A_BASE,
+            value: 0.42,
+        });
+        // 7. Track 1 Send B
+        ui.send_command(AudioCommand::SetParameter {
+            track_id: 1,
+            param_id: PARAM_ID_TRACK_SEND_B_BASE + 1,
+            value: 0.85,
+        });
+        // 8. Crossfader
+        ui.send_command(AudioCommand::SetParameter {
+            track_id: 0,
+            param_id: PARAM_ID_CROSSFADER,
+            value: 0.33,
+        });
+
+        proc.process_commands();
+
+        assert!((proc.mixer.master_volume_linear - 0.75).abs() < 1e-4);
+        assert!((proc.params.get(PARAM_MASTER_VOL) - 0.75).abs() < 1e-4);
+        assert!((proc.mixer.tracks[0].volume_linear - 1.5).abs() < 1e-4);
+        assert!((proc.params.get(PARAM_TRACK_VOL_BASE) - 1.5).abs() < 1e-4);
+        assert!((proc.mixer.tracks[1].pan - (-0.6)).abs() < 1e-4);
+        assert!((proc.params.get(PARAM_TRACK_PAN_BASE + 1) - (-0.6)).abs() < 1e-4);
+        assert!(proc.mixer.tracks[0].mute);
+        assert!(proc.mixer.tracks[1].solo);
+        assert!((proc.send_a[0] - 0.42).abs() < 1e-4);
+        assert!((proc.send_b[1] - 0.85).abs() < 1e-4);
+        assert!((proc.crossfader - 0.33).abs() < 1e-4);
+    }
+
+    #[test]
+    fn test_track_silence_when_muted_or_zero_vol() {
+        let queues = AudioQueues::new();
+        let (mut ui, audio) = queues.split();
+        let params = AtomicParameters::new();
+        let mut proc = AudioEngineProcessor::new(44100.0, audio, params);
+
+        // Turn on a synth note and kick drum
+        ui.send_command(AudioCommand::Play);
+        ui.send_command(AudioCommand::NoteOn {
+            track_id: 0,
+            note: 60,
+            velocity: 120,
+        });
+        ui.send_command(AudioCommand::NoteOn {
+            track_id: 1,
+            note: 36,
+            velocity: 127,
+        });
+
+        let mut buf = [0.0f32; 1024];
+        proc.process_interleaved(&mut buf);
+        let energy: f32 = buf.iter().map(|s| s * s).sum();
+        assert!(energy > 1e-4, "Active note/drum must generate sound");
+
+        // Now mute both Track 0 and Track 1
+        ui.send_command(AudioCommand::SetParameter {
+            track_id: 0,
+            param_id: PARAM_ID_TRACK_MUTE_BASE,
+            value: 1.0,
+        });
+        ui.send_command(AudioCommand::SetParameter {
+            track_id: 1,
+            param_id: PARAM_ID_TRACK_MUTE_BASE + 1,
+            value: 1.0,
+        });
+        proc.process_interleaved(&mut buf);
+        let energy_muted: f32 = buf.iter().map(|s| s * s).sum();
+        assert_eq!(energy_muted, 0.0, "Muted tracks must render absolute silence");
+        assert_eq!(proc.mixer.tracks[0].peak_l, 0.0);
+        assert_eq!(proc.mixer.tracks[0].peak_r, 0.0);
+        assert_eq!(proc.mixer.tracks[1].peak_l, 0.0);
+        assert_eq!(proc.mixer.tracks[1].peak_r, 0.0);
+
+        // Unmute tracks, but set their volume to 0.0
+        ui.send_command(AudioCommand::SetParameter {
+            track_id: 0,
+            param_id: PARAM_ID_TRACK_MUTE_BASE,
+            value: 0.0,
+        });
+        ui.send_command(AudioCommand::SetParameter {
+            track_id: 1,
+            param_id: PARAM_ID_TRACK_MUTE_BASE + 1,
+            value: 0.0,
+        });
+        ui.send_command(AudioCommand::SetParameter {
+            track_id: 0,
+            param_id: PARAM_ID_TRACK_VOL_BASE,
+            value: 0.0,
+        });
+        ui.send_command(AudioCommand::SetParameter {
+            track_id: 1,
+            param_id: PARAM_ID_TRACK_VOL_BASE + 1,
+            value: 0.0,
+        });
+        // Retrigger drum
+        ui.send_command(AudioCommand::NoteOn {
+            track_id: 1,
+            note: 36,
+            velocity: 127,
+        });
+        proc.process_interleaved(&mut buf);
+        let energy_zero_vol: f32 = buf.iter().map(|s| s * s).sum();
+        assert_eq!(energy_zero_vol, 0.0, "Zero-volume tracks must render absolute silence");
+        assert_eq!(proc.mixer.tracks[0].peak_l, 0.0);
+        assert_eq!(proc.mixer.tracks[0].peak_r, 0.0);
+        assert_eq!(proc.mixer.tracks[1].peak_l, 0.0);
+        assert_eq!(proc.mixer.tracks[1].peak_r, 0.0);
+    }
+
+    #[test]
+    fn test_master_silence_when_zero_vol() {
+        let queues = AudioQueues::new();
+        let (mut ui, audio) = queues.split();
+        let params = AtomicParameters::new();
+        let mut proc = AudioEngineProcessor::new(44100.0, audio, params);
+
+        // Turn on a synth note on Track 0
+        ui.send_command(AudioCommand::NoteOn {
+            track_id: 0,
+            note: 60,
+            velocity: 120,
+        });
+        // Set master volume to 0.0
+        ui.send_command(AudioCommand::SetParameter {
+            track_id: 0,
+            param_id: PARAM_ID_MASTER_VOL,
+            value: 0.0,
+        });
+
+        let mut buf = [0.0f32; 128];
+        proc.process_interleaved(&mut buf);
+        let energy: f32 = buf.iter().map(|s| s * s).sum();
+        assert_eq!(energy, 0.0, "Master volume at 0 must render absolute silence");
+        assert_eq!(proc.mixer.master_peak_l, 0.0);
+        assert_eq!(proc.mixer.master_peak_r, 0.0);
+    }
+}
+

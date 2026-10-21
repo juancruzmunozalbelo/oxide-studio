@@ -348,16 +348,21 @@ impl<'a> XyPerformPadWidget<'a> {
                     vec2(right_w, ui.available_height()),
                     egui::Layout::top_down(egui::Align::Min),
                     |ui| {
+                        let is_compact_deck = ui.available_height() <= 180.0;
+                        if is_compact_deck {
+                            ui.spacing_mut().item_spacing = vec2(4.0, 1.0);
+                        }
+
                         ui.horizontal(|ui| {
                             ui.label(
                                 RichText::new("STUDIO MACRO SURFACE")
-                                    .size(11.0)
+                                    .size(if is_compact_deck { 9.5 } else { 11.0 })
                                     .color(COLOR_AMBER)
                                     .strong(),
                             );
                             ui.label(
                                 RichText::new("Live 12 Multi-Param Control")
-                                    .size(9.5)
+                                    .size(if is_compact_deck { 8.5 } else { 9.5 })
                                     .color(COLOR_TEXT_MUTED),
                             );
                         });
@@ -366,6 +371,10 @@ impl<'a> XyPerformPadWidget<'a> {
 
                         // 8 Macros in 2-row x 4-column layout
                         let col_w = ((right_w - 3.0 * 6.0) / 4.0).floor().max(68.0);
+                        let row_gap = if is_compact_deck { 2.0 } else { 3.0 };
+                        let grid_avail_h = (ui.available_height() - 2.0).max(80.0);
+                        let card_h = ((grid_avail_h - row_gap) * 0.5).clamp(42.0, 66.0);
+                        let is_compact_card = is_compact_deck || card_h < 56.0;
 
                         for row in 0..2 {
                             ui.horizontal(|ui| {
@@ -374,12 +383,17 @@ impl<'a> XyPerformPadWidget<'a> {
                                     let is_mapped_x = self.state.map_x_to_macro == Some(macro_idx);
                                     let is_mapped_y = self.state.map_y_to_macro == Some(macro_idx);
 
-                                    let card_h = ((ui.available_height() - 4.0) * 0.5).clamp(44.0, 66.0);
                                     let card_size = vec2(col_w, card_h);
                                     ui.allocate_ui_with_layout(
                                         card_size,
                                         egui::Layout::top_down(egui::Align::Min),
                                         |card_ui| {
+                                            if is_compact_card {
+                                                card_ui.spacing_mut().item_spacing = vec2(2.0, 1.0);
+                                                card_ui.spacing_mut().interact_size.y = 11.0;
+                                                card_ui.spacing_mut().button_padding = vec2(2.0, 0.5);
+                                            }
+
                                             let card_rect = card_ui.max_rect();
                                             if card_ui.is_rect_visible(card_rect) {
                                                 let painter = card_ui.painter();
@@ -395,11 +409,13 @@ impl<'a> XyPerformPadWidget<'a> {
 
                                                 // Macro title
                                                 let p = &self.state.macros[macro_idx];
+                                                let title_size = if is_compact_card { 8.5 } else { 9.5 };
+                                                let title_top = if is_compact_card { 3.0 } else { 4.0 };
                                                 painter.text(
-                                                    pos2(card_rect.left() + 5.0, card_rect.top() + 4.0),
+                                                    pos2(card_rect.left() + 5.0, card_rect.top() + title_top),
                                                     Align2::LEFT_TOP,
                                                     p.label,
-                                                    FontId::new(9.5, FontFamily::Proportional),
+                                                    FontId::new(title_size, FontFamily::Proportional),
                                                     if is_mapped_x {
                                                         COLOR_AMBER
                                                     } else if is_mapped_y {
@@ -410,7 +426,7 @@ impl<'a> XyPerformPadWidget<'a> {
                                                 );
                                             }
 
-                                            let top_space = if card_h < 56.0 { 12.0 } else { 16.0 };
+                                            let top_space = if card_h < 48.0 { 10.0 } else if card_h < 56.0 { 12.0 } else { 16.0 };
                                             card_ui.add_space(top_space);
 
                                             // Slider bar
@@ -429,14 +445,18 @@ impl<'a> XyPerformPadWidget<'a> {
                                             // Axis Mapping Chips [X] and [Y] + Readout on right
                                             let p = &self.state.macros[macro_idx];
                                             card_ui.horizontal(|card_ui| {
+                                                let chip_size = if is_compact_card { 7.5 } else { 8.5 };
+                                                let chip_btn_w = if is_compact_card { 14.0 } else { 16.0 };
+                                                let chip_btn_h = if is_compact_card { 11.0 } else { 14.0 };
+
                                                 let x_btn = Button::new(
                                                     RichText::new("X")
-                                                        .size(8.5)
+                                                        .size(chip_size)
                                                         .color(if is_mapped_x { Color32::BLACK } else { COLOR_TEXT_MUTED })
                                                         .strong(),
                                                 )
                                                 .fill(if is_mapped_x { COLOR_AMBER } else { COLOR_BG_PANEL_ALT })
-                                                .min_size(vec2(16.0, 14.0));
+                                                .min_size(vec2(chip_btn_w, chip_btn_h));
                                                 if card_ui.add(x_btn).clicked() {
                                                     if is_mapped_x {
                                                         self.state.map_x_to_macro = None;
@@ -449,12 +469,12 @@ impl<'a> XyPerformPadWidget<'a> {
 
                                                 let y_btn = Button::new(
                                                     RichText::new("Y")
-                                                        .size(8.5)
+                                                        .size(chip_size)
                                                         .color(if is_mapped_y { Color32::BLACK } else { COLOR_TEXT_MUTED })
                                                         .strong(),
                                                 )
                                                 .fill(if is_mapped_y { COLOR_CYAN } else { COLOR_BG_PANEL_ALT })
-                                                .min_size(vec2(16.0, 14.0));
+                                                .min_size(vec2(chip_btn_w, chip_btn_h));
                                                 if card_ui.add(y_btn).clicked() {
                                                     if is_mapped_y {
                                                         self.state.map_y_to_macro = None;
@@ -465,10 +485,11 @@ impl<'a> XyPerformPadWidget<'a> {
                                                     changed = true;
                                                 }
 
+                                                let readout_size = if is_compact_card { 8.0 } else { 8.5 };
                                                 card_ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |card_ui| {
                                                     card_ui.label(
                                                         RichText::new(p.format_display())
-                                                            .size(8.5)
+                                                            .size(readout_size)
                                                             .monospace()
                                                             .color(COLOR_TEXT_MUTED),
                                                     );
@@ -478,7 +499,9 @@ impl<'a> XyPerformPadWidget<'a> {
                                     );
                                 }
                             });
-                            ui.add_space(2.0);
+                            if row == 0 {
+                                ui.add_space(row_gap);
+                            }
                         }
                     },
                 );

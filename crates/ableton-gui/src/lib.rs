@@ -14,6 +14,7 @@ pub mod keyboard;
 pub mod layout;
 pub mod layout_guard;
 pub mod live_rpc;
+pub mod okf_knowledge;
 pub mod panels;
 pub mod shortcuts;
 pub mod theme;

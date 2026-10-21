@@ -1,0 +1,101 @@
+{
+  "project": "Oxide Studio",
+  "repo": "juancruzmunozalbelo/oxide-studio",
+  "repo_url": "https://github.com/juancruzmunozalbelo/oxide-studio",
+  "demo_url": "https://juancruzmunozalbelo.github.io/oxide-studio/",
+  "license": "MIT OR Apache-2.0",
+  "video_script_25s": {
+    "resolution": "1920x1080 @ 60fps",
+    "layout": "70% left Oxide Studio GUI, 30% right MCP client / Terminal + Ableton Live 12 ready for final .als drop",
+    "segments": [
+      {
+        "time": "0:00-0:04",
+        "action": "Send MCP prompt: 'Create a 132 BPM dark techno pattern: 909 rumble kick, Euclidean hi-hats (7/16), and a resonant 303 bassline in F minor'. Clips populate in Session Matrix, notes draw in Piano Roll with Scale-Fold, audio drops immediately.",
+        "caption": "Native Rust DAW (60 FPS egui + lock-free DSP) controlled live via MCP"
+      },
+      {
+        "time": "0:04-0:11",
+        "action": "Grab the mouse and drag the 8-Macro XY Perform Pad with Orbit LFO spinning live while Auto Filter cutoff and Roar multiband saturation open up on the 303.",
+        "caption": "Zero-allocation audio thread: FM Operator, Wavetable, 909, Roar & 8-Macro XY Pad"
+      },
+      {
+        "time": "0:11-0:17",
+        "action": "Trigger 4-band Stem Separation (Kick+Sub, Bass, Synths/Mids, Hats/Air) and twist the Euclidean Generator density knob in real time.",
+        "caption": "Real-time 4-Band Stem Separation & Generative Euclidean MIDI"
+      },
+      {
+        "time": "0:17-0:25",
+        "action": "Click Export .als in Oxide Studio -> drag the generated .als file straight into Ableton Live 12 -> show identical tracks, BPM, and MIDI clips playing back inside Live 12.",
+        "caption": "Bidirectional Ableton Live 12 (.als) interop. 100% Free & MIT Open-Source."
+      }
+    ]
+  },
+  "channels": [
+    {
+      "id": "w1-d1-rust",
+      "week": 1,
+      "day": 1,
+      "channel": "r/rust",
+      "best_time_art": "Martes o Miércoles 11:00 AM ART (10:00 AM EST)",
+      "status": "ready",
+      "title": "I wrote a clean-room electronic music DAW in 100% Rust (cpal + egui, lock-free DSP, Ableton .als interop, and an MCP server)",
+      "url": "https://github.com/juancruzmunozalbelo/oxide-studio",
+      "body_file": "posts/02_r_rust.md"
+    },
+    {
+      "id": "w1-d2-show-hn",
+      "week": 1,
+      "day": 2,
+      "channel": "Hacker News (Show HN)",
+      "best_time_art": "Miércoles o Jueves 10:30 AM ART (09:30 AM EST)",
+      "status": "ready",
+      "title": "Show HN: Oxide Studio – Native Rust DAW with Ableton .als interop and 70 MCP tools",
+      "url": "https://github.com/juancruzmunozalbelo/oxide-studio",
+      "body_file": "posts/01_show_hn.md"
+    },
+    {
+      "id": "w1-d4-localllama",
+      "week": 1,
+      "day": 4,
+      "channel": "r/LocalLLaMA & r/ClaudeAI",
+      "best_time_art": "Viernes 11:30 AM ART",
+      "status": "ready",
+      "title": "Instead of black-box MP3 generators, I built an open-source Rust DAW with a 76-tool MCP server so local LLMs can program real synths, 909 drums, and DSP live",
+      "url": "https://github.com/juancruzmunozalbelo/oxide-studio",
+      "body_file": "posts/04_r_localllama.md"
+    },
+    {
+      "id": "w2-d8-ableton",
+      "week": 2,
+      "day": 8,
+      "channel": "r/ableton & r/edmproduction",
+      "best_time_art": "Martes 12:00 PM ART",
+      "status": "ready",
+      "title": "I built a free, open-source (MIT) lightweight DAW in Rust that natively imports and exports Ableton Live 12 (.als) projects",
+      "url": "https://github.com/juancruzmunozalbelo/oxide-studio",
+      "body_file": "posts/03_r_ableton.md"
+    },
+    {
+      "id": "w2-d10-techno",
+      "week": 2,
+      "day": 10,
+      "channel": "r/technoproduction",
+      "best_time_art": "Jueves 01:00 PM ART",
+      "status": "ready",
+      "title": "Built a free open-source 909/303/FM groovebox in Rust with Euclidean generators, Roar saturation, and native Ableton .als export (MIT license)",
+      "url": "https://github.com/juancruzmunozalbelo/oxide-studio",
+      "body_file": "posts/05_r_technoproduction.md"
+    },
+    {
+      "id": "w3-d15-kvr-elektronauts",
+      "week": 3,
+      "day": 15,
+      "channel": "KVR Audio & Elektronauts",
+      "best_time_art": "Martes 02:00 PM ART",
+      "status": "ready",
+      "title": "Oxide Studio: Open-source (MIT) native Rust DAW with 4-op FM, 909, Euclidean sequencer & Ableton .als interop",
+      "url": "https://github.com/juancruzmunozalbelo/oxide-studio",
+      "body_file": "posts/06_kvr_elektronauts.md"
+    }
+  ]
+}

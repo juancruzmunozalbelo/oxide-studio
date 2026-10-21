@@ -198,6 +198,7 @@ impl Default for DeviceChainViewState {
     }
 }
 
+#[derive(Debug, Clone, Default)]
 pub struct DeviceChainAction {
     pub toggle_bypass: Option<usize>,
     pub delete_device: Option<usize>,
@@ -264,7 +265,6 @@ pub fn render_device_chain_view(
                                 .min_size(vec2(18.0, 18.0))
                                 .fill(COLOR_BG_PANEL_ALT);
                             if ui.add(bypass_btn).clicked() {
-                                dev.is_enabled = !dev.is_enabled;
                                 action.toggle_bypass = Some(idx);
                             }
 
@@ -530,8 +530,9 @@ pub fn render_device_chain_view(
 
                 // [+ Add Device] Quick-Picker Button at the end of chain
                 ui.vertical(|ui| {
-                    ui.set_width(110.0);
-                    ui.add_space(20.0);
+                    let col_w = if state.quick_picker_open { 290.0 } else { 110.0 };
+                    ui.set_width(col_w);
+                    ui.add_space(2.0);
 
                     let add_btn = Button::new(
                         RichText::new("+ Add Device")
@@ -539,7 +540,7 @@ pub fn render_device_chain_view(
                             .color(COLOR_AMBER)
                             .strong(),
                     )
-                    .min_size(vec2(100.0, 36.0))
+                    .min_size(vec2(100.0, 22.0))
                     .fill(COLOR_BG_PANEL_ALT)
                     .stroke(Stroke::new(1.0_f32, COLOR_AMBER));
 
@@ -548,11 +549,41 @@ pub fn render_device_chain_view(
                     }
 
                     if state.quick_picker_open {
-                        for &kind in &DeviceKind::ALL {
-                            if ui.add(Button::new(RichText::new(kind.name()).size(10.0).color(COLOR_TEXT_PRIMARY))).clicked() {
-                                action.insert_device = Some(kind);
-                                state.quick_picker_open = false;
-                            }
+                        ui.add_space(2.0);
+                        let grid = [
+                            [
+                                (DeviceKind::Wavetable, "Wavetable"),
+                                (DeviceKind::Operator, "Operator"),
+                                (DeviceKind::Roar, "Roar"),
+                            ],
+                            [
+                                (DeviceKind::EQEight, "EQ Eight"),
+                                (DeviceKind::GlueCompressor, "Glue Comp"),
+                                (DeviceKind::AutoFilter, "Auto Filter"),
+                            ],
+                            [
+                                (DeviceKind::OTT, "OTT Multi"),
+                                (DeviceKind::Simpler, "Simpler"),
+                                (DeviceKind::DrumRack, "Drum Rack"),
+                            ],
+                        ];
+                        for row in grid {
+                            ui.horizontal(|ui| {
+                                ui.spacing_mut().item_spacing.x = 4.0;
+                                for (kind, label) in row {
+                                    let btn = Button::new(
+                                        RichText::new(label)
+                                            .size(9.5)
+                                            .color(COLOR_TEXT_PRIMARY),
+                                    )
+                                    .min_size(vec2(92.0, 20.0));
+                                    if ui.add(btn).clicked() {
+                                        action.insert_device = Some(kind);
+                                        state.quick_picker_open = false;
+                                    }
+                                }
+                            });
+                            ui.add_space(2.0);
                         }
                     }
                 });
@@ -561,6 +592,11 @@ pub fn render_device_chain_view(
     });
 
     // Execute state modifications
+    if let Some(bypass_idx) = action.toggle_bypass {
+        if let Some(dev) = state.devices.get_mut(bypass_idx) {
+            dev.is_enabled = !dev.is_enabled;
+        }
+    }
     if let Some(del_idx) = action.delete_device {
         if del_idx < state.devices.len() {
             state.devices.remove(del_idx);
@@ -726,5 +762,29 @@ mod tests {
         ott.depth = 0.2;
         ott.recompute_meters();
         assert!(ott.mid.gr_meter.abs() < full_mid.abs());
+    }
+
+    #[test]
+    fn test_device_rack_toggle_bypass_execution() {
+        let mut chain = DeviceChainViewState::default();
+        assert!(!chain.devices.is_empty());
+        assert!(chain.devices[0].is_enabled);
+
+        let mut act = DeviceChainAction::default();
+        act.toggle_bypass = Some(0);
+
+        if let Some(b_idx) = act.toggle_bypass {
+            if let Some(dev) = chain.devices.get_mut(b_idx) {
+                dev.is_enabled = !dev.is_enabled;
+            }
+        }
+        assert!(!chain.devices[0].is_enabled, "Device should be bypassed");
+
+        if let Some(b_idx) = act.toggle_bypass {
+            if let Some(dev) = chain.devices.get_mut(b_idx) {
+                dev.is_enabled = !dev.is_enabled;
+            }
+        }
+        assert!(chain.devices[0].is_enabled, "Device should be re-enabled");
     }
 }

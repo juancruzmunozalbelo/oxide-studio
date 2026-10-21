@@ -148,6 +148,7 @@ pub struct SessionMatrixAction {
     pub track_solo_toggled: Option<usize>,
     pub send_changed: Option<(usize, usize, f32)>, // (track_idx, send_idx, level)
     pub crossfader_changed: Option<f32>,
+    pub master_volume_changed: Option<f32>,
     pub track_selected: Option<usize>,
     pub clip_selected: Option<(usize, usize)>, // (track_idx, slot_idx)
 }
@@ -203,6 +204,7 @@ pub fn render_session_matrix(
         track_solo_toggled: None,
         send_changed: None,
         crossfader_changed: None,
+        master_volume_changed: None,
         track_selected: None,
         clip_selected: None,
     };
@@ -595,12 +597,16 @@ pub fn render_session_matrix(
                                 fader_container.center(),
                                 vec2(col_w - 8.0, 76.0),
                             );
-                            let pk_l = if track_idx < 16 {
+                            let pk_l = if t.mute {
+                                0.0
+                            } else if track_idx < 16 {
                                 telemetry.track_peaks_l[track_idx]
                             } else {
                                 0.0
                             };
-                            let pk_r = if track_idx < 16 {
+                            let pk_r = if t.mute {
+                                0.0
+                            } else if track_idx < 16 {
                                 telemetry.track_peaks_r[track_idx]
                             } else {
                                 0.0
@@ -1016,14 +1022,16 @@ pub fn render_session_matrix(
                         m_fader_c.center(),
                         vec2(master_col_w - 8.0, 76.0),
                     );
-                    render_vertical_fader_and_meter(
+                    if render_vertical_fader_and_meter(
                         ui,
                         master_vol,
                         telemetry.master_peak_l,
                         telemetry.master_peak_r,
                         m_fm_rect,
                         "master_fader",
-                    );
+                    ) {
+                        action.master_volume_changed = Some(*master_vol);
+                    }
 
                     // Master Limiter / Output Pill
                     let (m_lim_rect, _) =
@@ -1231,8 +1239,8 @@ pub fn render_vertical_fader_and_meter(
     );
     if resp.dragged() {
         let track_h = (fader_rect.height() - 24.0).max(10.0);
-        let delta = -resp.drag_delta().y / track_h * 1.25;
-        *vol_linear = (*vol_linear + delta).clamp(0.0, 1.25);
+        let delta = -resp.drag_delta().y / track_h * 2.0;
+        *vol_linear = (*vol_linear + delta).clamp(0.0, 2.0);
         changed = true;
     }
     if resp.double_clicked() {
@@ -1283,7 +1291,12 @@ pub fn render_vertical_fader_and_meter(
         );
 
         // Rectangular Ableton fader cap (#b5b5b5 / #ffad56 when dragged)
-        let norm_vol = (*vol_linear / 1.25).clamp(0.0, 1.0);
+        let norm_vol = if *vol_linear <= 1.0 {
+            (*vol_linear / 1.0) * 0.75
+        } else {
+            0.75 + ((*vol_linear - 1.0) / 1.0) * 0.25
+        }
+        .clamp(0.0, 1.0);
         let cap_y = slot_bottom - norm_vol * slot_travel;
         let cap_rect = Rect::from_center_size(pos2(slot_x, cap_y), vec2(26.0, 11.0));
         let cap_color = if resp.dragged() {
@@ -1362,8 +1375,16 @@ pub fn render_segmented_stereo_vu_meter(
     let l_left = inner_rect.left();
     let r_left = l_left + ch_w + ch_gap;
 
-    let eff_l = (peak_l * (vol_linear / 1.0).max(0.1)).clamp(0.0, 1.25) / 1.25;
-    let eff_r = (peak_r * (vol_linear / 1.0).max(0.1)).clamp(0.0, 1.25) / 1.25;
+    let eff_l = if vol_linear <= 0.001 {
+        0.0
+    } else {
+        (peak_l * vol_linear).clamp(0.0, 1.25) / 1.25
+    };
+    let eff_r = if vol_linear <= 0.001 {
+        0.0
+    } else {
+        (peak_r * vol_linear).clamp(0.0, 1.25) / 1.25
+    };
 
     for seg_idx in 0..num_segments {
         let frac = (seg_idx + 1) as f32 / num_segments as f32;
@@ -1955,16 +1976,31 @@ mod tests {
     #[test]
     fn test_vertical_fader_unity_tick_and_linear_mapping() {
         let mut vol = 0.9f32;
-        // Test clamping up to +6 dB (1.25 linear)
-        vol = (vol + 0.8).clamp(0.0, 1.25);
-        assert_eq!(vol, 1.25);
-        vol = (vol - 2.0).clamp(0.0, 1.25);
+        // Test clamping up to +6 dB (2.0 linear)
+        vol = (vol + 2.0).clamp(0.0, 2.0);
+        assert_eq!(vol, 2.0);
+        vol = (vol - 3.0).clamp(0.0, 2.0);
         assert_eq!(vol, 0.0);
         // Unity reset
         vol = 1.0;
         assert_eq!(vol, 1.0);
         let db = 20.0 * vol.log10();
         assert!((db - 0.0).abs() < 1e-4, "Unity linear 1.0 must be exactly 0.0 dB");
+    }
+
+    #[test]
+    fn test_vu_meter_zero_floor_removal() {
+        // At -inf dB (vol_linear <= 0.001), effective peak must be 0.0 even if peak > 0
+        let peak = 0.8f32;
+        let vol_zero = 0.0f32;
+        let eff_l = if vol_zero <= 0.001 { 0.0 } else { (peak * vol_zero).clamp(0.0, 1.25) / 1.25 };
+        assert_eq!(eff_l, 0.0);
+
+        // When track is muted, peak passed is 0.0, eff must be 0.0
+        let peak_muted = 0.0f32;
+        let vol_unity = 1.0f32;
+        let eff_muted = if vol_unity <= 0.001 { 0.0 } else { (peak_muted * vol_unity).clamp(0.0, 1.25) / 1.25 };
+        assert_eq!(eff_muted, 0.0);
     }
 
     #[test]

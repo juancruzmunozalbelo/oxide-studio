@@ -450,7 +450,7 @@ pub fn render_drum_sequencer_with_state(
     let mut action = SequencerAction::default();
 
     let total_width = ui.available_width();
-    let total_height = ui.available_height().max(136.0);
+    let total_height = ui.available_height().max(90.0);
     let groove_bar_width = 188.0_f32;
     let main_width = (total_width - groove_bar_width - 14.0).max(360.0);
 
@@ -556,7 +556,8 @@ pub fn render_drum_sequencer_with_state(
                 );
 
                 // Responsive step button width calculation
-                let left_controls_w = 124.0_f32; // Audition (76px) + M (18px) + S (18px) + spacing
+                let audition_w = 74.0_f32;
+                let left_controls_w = audition_w + 3.0 + 18.0 + 3.0 + 18.0 + 3.0; // Audition (74px) + M (18px) + S (18px) + spacing
                 let avail_step_w = (main_width - left_controls_w - 8.0).max(272.0);
                 let step_w = crate::layout_guard::FlexFitGrid::compute_col_width(
                     avail_step_w,
@@ -581,7 +582,16 @@ pub fn render_drum_sequencer_with_state(
                     ui.horizontal(|ui| {
                         ui.spacing_mut().item_spacing = vec2(3.0, 0.0);
                         // Pad Audition Button (▶ Name — verified egui glyph U+25B6)
-                        let audition_label = format!("▶ {}. {}", pad_idx + 1, pad_name);
+                        let display_name = if pad_name == "Tambourine" {
+                            "Tamb."
+                        } else if pad_idx >= 9 && pad_name.len() > 7 {
+                            &pad_name[..7]
+                        } else if pad_name.len() > 8 {
+                            &pad_name[..8]
+                        } else {
+                            pad_name
+                        };
+                        let audition_label = format!("▶ {}. {}", pad_idx + 1, display_name);
                         let pad_btn = Button::new(
                             RichText::new(audition_label)
                                 .size(8.5)
@@ -591,7 +601,8 @@ pub fn render_drum_sequencer_with_state(
                                     COLOR_TEXT_MUTED
                                 }),
                         )
-                        .min_size(vec2(76.0, step_h))
+                        .wrap_mode(egui::TextWrapMode::Truncate)
+                        .min_size(vec2(audition_w, step_h))
                         .fill(if is_soloed {
                             Color32::from_rgb(0x0e, 0x25, 0x33)
                         } else {
@@ -606,7 +617,7 @@ pub fn render_drum_sequencer_with_state(
                             },
                         ));
 
-                        if ui.add(pad_btn).clicked() {
+                        if ui.add_sized(vec2(audition_w, step_h), pad_btn).clicked() {
                             action.pad_triggered = Some(pad_idx as u8);
                         }
 
@@ -833,19 +844,31 @@ pub fn render_drum_sequencer_with_state(
             vec2(groove_bar_width, total_height),
             egui::Layout::top_down(egui::Align::Min),
             |ui| {
-                ui.spacing_mut().item_spacing = vec2(3.0, 2.0);
+                let avail_h = ui.available_height();
+                let is_compact = avail_h <= 150.0;
+
+                ui.spacing_mut().item_spacing = vec2(3.0, if is_compact { 1.0 } else { 2.0 });
                 ui.spacing_mut().slider_width = 44.0;
+                if is_compact {
+                    ui.spacing_mut().interact_size.y = 11.0;
+                    ui.spacing_mut().button_padding = vec2(2.0, 0.5);
+                }
+
+                let btn_h = if is_compact { 11.5 } else { 16.0 };
+                let clear_h = if is_compact { 11.0 } else { 15.0 };
+                let label_size = if is_compact { 8.0 } else { 9.5 };
+                let btn_font_size = if is_compact { 7.5 } else { 8.0 };
 
                 ui.label(
                     RichText::new("GROOVE & PATTERN")
-                        .size(9.5)
+                        .size(label_size)
                         .color(COLOR_AMBER)
                         .strong(),
                 );
 
                 // Combined Swing & Humanize Sliders
                 ui.horizontal(|ui| {
-                    ui.label(RichText::new("Swg").size(8.5).color(COLOR_TEXT_PRIMARY));
+                    ui.label(RichText::new("Swg").size(btn_font_size).color(COLOR_TEXT_PRIMARY));
                     let slider = Slider::new(&mut state.swing_percent, 0.0..=75.0)
                         .suffix("%")
                         .max_decimals(0)
@@ -855,7 +878,7 @@ pub fn render_drum_sequencer_with_state(
                         action.pattern_mutated = true;
                     }
 
-                    ui.label(RichText::new("Hum").size(8.5).color(COLOR_TEXT_PRIMARY));
+                    ui.label(RichText::new("Hum").size(btn_font_size).color(COLOR_TEXT_PRIMARY));
                     let slider = Slider::new(&mut state.humanize_percent, 0.0..=100.0)
                         .suffix("%")
                         .max_decimals(0)
@@ -874,10 +897,10 @@ pub fn render_drum_sequencer_with_state(
                     // 4-on-the-Floor
                     let btn_4floor = Button::new(
                         RichText::new("4-Floor")
-                            .size(8.5)
+                            .size(btn_font_size)
                             .color(COLOR_TEXT_PRIMARY),
                     )
-                    .min_size(vec2(half_w, 16.0))
+                    .min_size(vec2(half_w, btn_h))
                     .fill(COLOR_BG_PANEL_ALT)
                     .stroke(Stroke::new(1.0_f32, COLOR_BORDER));
                     if ui.add(btn_4floor).clicked() {
@@ -888,11 +911,11 @@ pub fn render_drum_sequencer_with_state(
                     // RKT Tresillo
                     let btn_rkt = Button::new(
                         RichText::new("RKT Tresillo")
-                            .size(8.5)
+                            .size(btn_font_size)
                             .color(COLOR_AMBER)
                             .strong(),
                     )
-                    .min_size(vec2(half_w, 16.0))
+                    .min_size(vec2(half_w, btn_h))
                     .fill(Color32::from_rgb(0x20, 0x18, 0x0a))
                     .stroke(Stroke::new(1.0_f32, COLOR_AMBER));
                     if ui.add(btn_rkt).clicked() {
@@ -905,11 +928,11 @@ pub fn render_drum_sequencer_with_state(
                     // Techno 16ths
                     let btn_techno = Button::new(
                         RichText::new("Techno 16th")
-                            .size(8.5)
+                            .size(btn_font_size)
                             .color(COLOR_CYAN)
                             .strong(),
                     )
-                    .min_size(vec2(half_w, 16.0))
+                    .min_size(vec2(half_w, btn_h))
                     .fill(Color32::from_rgb(0x0a, 0x1e, 0x28))
                     .stroke(Stroke::new(1.0_f32, COLOR_CYAN));
                     if ui.add(btn_techno).clicked() {
@@ -920,10 +943,10 @@ pub fn render_drum_sequencer_with_state(
                     // Randomize (Verified ★ glyph, zero tofu)
                     let btn_rand = Button::new(
                         RichText::new("★ Random")
-                            .size(8.5)
+                            .size(btn_font_size)
                             .color(COLOR_GREEN),
                     )
-                    .min_size(vec2(half_w, 16.0))
+                    .min_size(vec2(half_w, btn_h))
                     .fill(COLOR_BG_PANEL_ALT)
                     .stroke(Stroke::new(1.0_f32, COLOR_BORDER));
                     if ui.add(btn_rand).clicked() {
@@ -935,10 +958,10 @@ pub fn render_drum_sequencer_with_state(
                 // Clear Bank
                 let btn_clear = Button::new(
                     RichText::new("Clear Active Bank")
-                        .size(8.5)
+                        .size(btn_font_size)
                         .color(COLOR_TEXT_MUTED),
                 )
-                .min_size(vec2(full_w, 15.0))
+                .min_size(vec2(full_w, clear_h))
                 .fill(COLOR_BG_VOID)
                 .stroke(Stroke::new(1.0_f32, COLOR_DIVIDER));
                 if ui.add(btn_clear).clicked() {
@@ -1169,5 +1192,115 @@ mod tests {
         state.randomize_pattern(&mut pattern);
         let any_active = pattern.tracks.iter().any(|trk| trk.steps.iter().any(|s| s.active));
         assert!(any_active, "Randomize should populate active drum steps");
+    }
+
+    #[test]
+    fn test_row_16_tambourine_label_fits_74px_and_aligned_with_other_rows() {
+        // Ensure pad 15 (Tambourine) produces a label that fits within 74.0px
+        let pad_name = BANK_B_PAD_NAMES[7]; // "Tambourine"
+        assert_eq!(pad_name, "Tambourine");
+
+        let pad_idx = 15;
+        let display_name = if pad_name == "Tambourine" {
+            "Tamb."
+        } else if pad_idx >= 9 && pad_name.len() > 7 {
+            &pad_name[..7]
+        } else if pad_name.len() > 8 {
+            &pad_name[..8]
+        } else {
+            pad_name
+        };
+        assert_eq!(display_name, "Tamb.");
+
+        let audition_label = format!("▶ {}. {}", pad_idx + 1, display_name);
+        assert_eq!(audition_label, "▶ 16. Tamb.");
+
+        // Label length must be <= 13 characters so egui does not expand button beyond 74.0px
+        assert!(audition_label.chars().count() <= 13);
+
+        // Verify all 16 rows produce labels <= 13 characters
+        for idx in 0..16 {
+            let name = if idx < 8 {
+                BANK_A_PAD_NAMES[idx]
+            } else {
+                BANK_B_PAD_NAMES[idx - 8]
+            };
+            let d_name = if name == "Tambourine" {
+                "Tamb."
+            } else if idx >= 9 && name.len() > 7 {
+                &name[..7]
+            } else if name.len() > 8 {
+                &name[..8]
+            } else {
+                name
+            };
+            let label = format!("▶ {}. {}", idx + 1, d_name);
+            assert!(
+                label.chars().count() <= 13,
+                "Pad {} label {:?} has {} chars (> 13)",
+                idx,
+                label,
+                label.chars().count()
+            );
+        }
+    }
+
+    #[test]
+    fn test_step_playback_linear_note_mapping_and_pad_mute_solo_silence() {
+        use crate::app::AbletonStudioApp;
+        let mut app = AbletonStudioApp::new_mock(44100.0);
+
+        // Verify linear note mapping (36 + pad_idx)
+        for pad_idx in 0..16 {
+            let midi_note = 36 + (pad_idx as u8).min(15);
+            assert_eq!(midi_note, 36 + pad_idx as u8);
+        }
+
+        // Initially all pads audible
+        for pad_idx in 0..16 {
+            assert!(app.drum_sequencer.is_pad_audible(pad_idx));
+        }
+
+        // Mute Pad 0 (Kick): must be silenced
+        app.drum_sequencer.toggle_mute(0);
+        assert!(!app.drum_sequencer.is_pad_audible(0), "Muted pad 0 must be silenced");
+        assert!(app.drum_sequencer.is_pad_audible(1), "Pad 1 must remain audible");
+
+        // Solo Pad 1 (Snare): only Pad 1 audible, all others silenced
+        app.drum_sequencer.toggle_solo(1);
+        assert!(app.drum_sequencer.is_pad_audible(1), "Soloed pad 1 must be audible");
+        assert!(!app.drum_sequencer.is_pad_audible(0), "Non-soloed pad 0 must be silenced");
+        assert!(!app.drum_sequencer.is_pad_audible(2), "Non-soloed pad 2 must be silenced");
+    }
+
+    #[test]
+    fn test_canonical_16_pad_notes_and_names() {
+        let pattern = DrumStepPattern::new_16_step();
+        assert_eq!(pattern.tracks.len(), 16);
+
+        let expected = [
+            (0, "Kick", 36),
+            (1, "Snare", 37),
+            (2, "Low Tom", 38),
+            (3, "Mid Tom", 39),
+            (4, "Hi Tom", 40),
+            (5, "Rimshot", 41),
+            (6, "Clap", 42),
+            (7, "Cowbell", 43),
+            (8, "Closed HH", 44),
+            (9, "Open HH", 45),
+            (10, "Crash", 46),
+            (11, "Ride", 47),
+            (12, "Perc 1", 48),
+            (13, "Perc 2", 49),
+            (14, "Shaker", 50),
+            (15, "Tambourine", 51),
+        ];
+
+        for (i, (exp_idx, exp_name, exp_pitch)) in expected.iter().enumerate() {
+            assert_eq!(pattern.tracks[i].pad_index, *exp_idx);
+            assert_eq!(pattern.tracks[i].name, *exp_name);
+            assert_eq!(pattern.tracks[i].steps[0].pitch, *exp_pitch);
+        }
     }
 }

@@ -62,41 +62,50 @@ pub struct DrumRack {
 }
 
 impl DrumRack {
+    pub fn default_pad_voice(idx: usize) -> (SynthDrumType, f32) {
+        match idx % 16 {
+            0 => (SynthDrumType::Kick909, 0.30),
+            1 => (SynthDrumType::Snare909, 0.22),
+            2 => (SynthDrumType::LowTom909, 0.28),
+            3 => (SynthDrumType::MidTom909, 0.24),
+            4 => (SynthDrumType::HiTom909, 0.20),
+            5 => (SynthDrumType::Rim909, 0.09),
+            6 => (SynthDrumType::Clap909, 0.22),
+            7 => (SynthDrumType::Cowbell909, 0.16),
+            8 => (SynthDrumType::HihatClosed909, 0.05),
+            9 => (SynthDrumType::HihatOpen909, 0.38),
+            10 => (SynthDrumType::Crash909, 0.65),
+            11 => (SynthDrumType::Ride909, 0.48),
+            12 => (SynthDrumType::PercLow, 0.14),
+            13 => (SynthDrumType::PercHigh, 0.11),
+            14 => (SynthDrumType::Shaker, 0.08),
+            15 => (SynthDrumType::Tambourine, 0.18),
+            _ => unreachable!(),
+        }
+    }
+
     pub fn new(sample_rate: f32) -> Self {
         let sr = if sample_rate <= 0.0 { 44100.0 } else { sample_rate };
         let pad_names = [
-            "Kick", "Rim", "Snare", "Clap", "Elec Snare", "Low Floor Tom",
-            "Closed HH", "High Floor Tom", "Pedal HH", "Low Tom", "Open HH",
-            "Mid Tom", "High Tom", "Crash", "Ride", "Perc",
+            "Kick", "Snare", "Low Tom", "Mid Tom", "Hi Tom", "Rimshot", "Clap", "Cowbell",
+            "Closed HH", "Open HH", "Crash", "Ride", "Perc 1", "Perc 2", "Shaker", "Tambourine",
         ];
 
         // 1. Initialize Bank A (visible default 16 pads, MIDI notes 36..51)
         let default_bank_a: [DrumPad; NUM_DRUM_PADS] = std::array::from_fn(|i| {
             let choke = match i {
-                6 | 8 | 10 => Some(1), // Choke Group 1: Closed HH, Pedal HH, Open HH
+                6 | 8 | 9 | 10 => Some(1), // Choke Group 1: Hi-Hats
                 _ => None,
             };
+            let (synth_type, decay) = Self::default_pad_voice(i);
             DrumPad {
                 name: pad_names[i].to_string(),
                 midi_note: (36 + i) as u8,
-                source: DrumPadSource::Synth(match i {
-                    0 => SynthDrumType::Kick909,
-                    1 => SynthDrumType::Rim909,
-                    2 => SynthDrumType::Snare909,
-                    3 => SynthDrumType::Clap909,
-                    6 => SynthDrumType::HihatClosed909,
-                    8 => SynthDrumType::HihatClosed909,
-                    10 => SynthDrumType::HihatOpen909,
-                    _ => SynthDrumType::Kick909,
-                }),
+                source: DrumPadSource::Synth(synth_type),
                 volume: 1.0,
                 pan: 0.0,
                 pitch_semitones: 0.0,
-                decay_seconds: match i {
-                    6 | 8 => 0.05,
-                    10 => 0.35,
-                    _ => 0.25,
-                },
+                decay_seconds: decay,
                 choke_group: choke,
                 use_cubic_interpolation: false,
                 solo: false,
@@ -120,16 +129,21 @@ impl DrumRack {
             } else {
                 i as u8        // Notes 52..127
             };
+            let choke = match i % 16 {
+                6 | 8 | 10 => Some(1),
+                _ => None,
+            };
+            let (synth_type, decay) = Self::default_pad_voice(i);
 
             all_pads.push(DrumPad {
                 name: format!("Pad {}", i + 1),
                 midi_note,
-                source: DrumPadSource::Synth(SynthDrumType::Kick909),
+                source: DrumPadSource::Synth(synth_type),
                 volume: 1.0,
                 pan: 0.0,
                 pitch_semitones: 0.0,
-                decay_seconds: 0.25,
-                choke_group: None,
+                decay_seconds: decay,
+                choke_group: choke,
                 use_cubic_interpolation: false,
                 solo: false,
                 mute: false,
@@ -189,16 +203,19 @@ impl DrumRack {
         }
     }
 
-    /// Load standard 909 sample assets into pads (Kick: pad 0, Snare: pad 2, Hihat: pad 6 & 10).
+    /// Load standard 909 sample assets into pads (Kick: pad 0, Snare: pad 1 & 2, Hihat: pad 6, 8, 9, 10).
     pub fn load_default_909_samples(&mut self, assets_dir: &str) {
         let dir = Path::new(assets_dir);
         let kick_path = dir.join("kick.wav");
         let snare_path = dir.join("snare.wav");
         let hihat_path = dir.join("hihat.wav");
 
-        let _ = self.load_sample_pad(0, kick_path);
-        let _ = self.load_sample_pad(2, snare_path);
+        let _ = self.load_sample_pad(0, &kick_path);
+        let _ = self.load_sample_pad(1, &snare_path);
+        let _ = self.load_sample_pad(2, &snare_path);
         let _ = self.load_sample_pad(6, &hihat_path);
+        let _ = self.load_sample_pad(8, &hihat_path);
+        let _ = self.load_sample_pad(9, &hihat_path);
         let _ = self.load_sample_pad(10, &hihat_path);
     }
 
@@ -623,5 +640,71 @@ mod tests {
             energy_l > 0.0001 && energy_r > 0.0001,
             "Return chains A and B should produce audible wet audio even with zero dry gain"
         );
+    }
+
+    #[test]
+    fn test_all_16_drum_pads_distinct_synthesis() {
+        let mut rack = DrumRack::new(44100.0);
+        let mut pad_outputs: Vec<Vec<f32>> = Vec::new();
+        let mut zero_crossings: Vec<usize> = Vec::new();
+
+        for pad in 0..16 {
+            rack.reset();
+            rack.trigger_pad(pad as u8, 127);
+            let mut left = [0.0; 512];
+            let mut right = [0.0; 512];
+            rack.process_block(&mut left, &mut right);
+
+            let energy: f32 = left.iter().map(|s| s * s).sum();
+            assert!(
+                energy > 0.001,
+                "Pad {} must produce audible non-zero energy, got {}",
+                pad,
+                energy
+            );
+
+            let mut zc = 0;
+            for w in left.windows(2) {
+                if (w[0] >= 0.0 && w[1] < 0.0) || (w[0] < 0.0 && w[1] >= 0.0) {
+                    zc += 1;
+                }
+            }
+            zero_crossings.push(zc);
+            pad_outputs.push(left.to_vec());
+        }
+
+        // Verify Kick (Pad 0) has low-frequency character (low zero-crossings)
+        let kick_zc = zero_crossings[0];
+        assert!(kick_zc <= 20, "Kick should have few zero-crossings, got {}", kick_zc);
+
+        // Verify high-frequency / metallic percussion (Closed HH 8, Open HH 9, Crash 10, Ride 11, Shaker 14, Tambourine 15)
+        // have significantly higher zero-crossings and do NOT sound like Kick!
+        for &hi_pad in &[8, 9, 10, 11, 14, 15] {
+            assert!(
+                zero_crossings[hi_pad] >= 25,
+                "Pad {} (zc: {}) must have high frequency content distinct from Kick (zc: {})",
+                hi_pad,
+                zero_crossings[hi_pad],
+                kick_zc
+            );
+        }
+
+        // Verify all 16 pads have unique waveforms (pairwise comparison)
+        for i in 0..16 {
+            for j in (i + 1)..16 {
+                let diff: f32 = pad_outputs[i]
+                    .iter()
+                    .zip(pad_outputs[j].iter())
+                    .map(|(a, b)| (a - b).abs())
+                    .sum();
+                assert!(
+                    diff > 0.05,
+                    "Pads {} and {} must have distinct audio output, diff was {}",
+                    i,
+                    j,
+                    diff
+                );
+            }
+        }
     }
 }

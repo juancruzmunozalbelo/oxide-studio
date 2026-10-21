@@ -18,7 +18,8 @@ use egui::{
 };
 use ableton_audio::{
     AudioEngine, AudioEngineProcessor, AudioStreamHandle, PARAM_BPM,
-    PARAM_SYNTH_MACRO_X, PARAM_SYNTH_MACRO_Y,
+    PARAM_MASTER_VOL, PARAM_SYNTH_MACRO_X, PARAM_SYNTH_MACRO_Y,
+    PARAM_TRACK_PAN_BASE, PARAM_TRACK_VOL_BASE,
 };
 use ableton_bounce::{DemoArrangementRenderer, WavWriter};
 use ableton_core::{AudioCommand, AudioTelemetry, GlobalScale, ScaleMode, TuningSystem};
@@ -31,7 +32,7 @@ use ableton_timeline::{
 use crate::keyboard::{ComputerKeyboardController, KeyboardMode};
 use crate::panels::{
     render_arrangement_timeline, render_browser_panel, render_clip_view, render_device_chain_view,
-    render_drum_sequencer, render_session_matrix, render_top_control_bar,
+    render_session_matrix, render_top_control_bar,
     BrowserState, ClipViewState, CrossfaderAssign,
     DeviceChainViewState, DeviceKind, GuiDeviceModule, GuiReturnTrack,
     GuiTrackState, LaunchQuantization, SessionMixerSections,
@@ -104,6 +105,7 @@ pub struct AbletonStudioApp {
     pub keyboard: ComputerKeyboardController,
     pub synth_state: SynthControlsState,
     pub drum_pattern: DrumStepPattern,
+    pub drum_sequencer: crate::panels::sequencer::DrumSequencerState,
     pub midi_pattern: MidiPattern,
     pub xy_state: XyPerformPadState,
     pub tracks_gui: Vec<GuiTrackState>,
@@ -344,6 +346,7 @@ impl AbletonStudioApp {
             keyboard: ComputerKeyboardController::new(),
             synth_state: SynthControlsState::default(),
             drum_pattern,
+            drum_sequencer: crate::panels::sequencer::DrumSequencerState::default(),
             midi_pattern,
             xy_state: XyPerformPadState::default(),
             tracks_gui,
@@ -559,15 +562,12 @@ impl AbletonStudioApp {
                 // Trigger active 909 drum pads on this 16th step
                 let mut drum_hits = Vec::new();
                 for (pad_idx, track) in self.drum_pattern.tracks.iter().enumerate() {
+                    if !self.drum_sequencer.is_pad_audible(pad_idx) {
+                        continue;
+                    }
                     if let Some(step) = track.steps.get(step_16) {
                         if step.active {
-                            let midi_note = match pad_idx {
-                                0 => 36,
-                                1 => 39,
-                                2 => 38,
-                                3 => 42,
-                                _ => 36 + (pad_idx as u8).min(15),
-                            };
+                            let midi_note = 36 + (pad_idx as u8).min(15);
                             drum_hits.push((midi_note, step.velocity.max(95)));
                         }
                     }
@@ -1288,6 +1288,13 @@ impl AbletonStudioApp {
                             }
                             if let Some(kind) = dev_act.insert_device {
                                 self.status_message = format!("Inserted Device: {}", kind.name());
+                            } else if let Some(idx) = dev_act.toggle_bypass {
+                                let st = if let Some(d) = self.device_chain.devices.get(idx) {
+                                    if d.is_enabled { "Enabled" } else { "Bypassed" }
+                                } else {
+                                    "Toggled"
+                                };
+                                self.status_message = format!("Device #{} {}", idx + 1, st);
                             } else if let Some(idx) = dev_act.device_parameter_changed {
                                 self.status_message =
                                     format!("Device #{} Parameter Modulated", idx + 1);
@@ -1295,11 +1302,15 @@ impl AbletonStudioApp {
                         }
                         DeckTab::DrumSequencer => {
                             let current_16th_step = ((self.current_beat * 4.0).floor() as usize) % 16;
-                            let seq_action = render_drum_sequencer(
+                            let seq_action = crate::panels::sequencer::render_drum_sequencer_with_state(
                                 ui,
                                 &mut self.drum_pattern,
                                 current_16th_step,
+                                &mut self.drum_sequencer,
                             );
+                            ui.data_mut(|d| {
+                                d.insert_temp(egui::Id::new("aruston_909_sequencer_state"), self.drum_sequencer.clone())
+                            });
 
                             if let Some(pad_idx) = seq_action.pad_triggered {
                                 self.send_command(AudioCommand::NoteOn {
@@ -1427,6 +1438,7 @@ impl AbletonStudioApp {
 
             match self.workspace_view {
                 WorkspaceView::SessionMatrix => {
+                    let prev_master_vol = self.master_volume;
                     let action = render_session_matrix(
                         ui,
                         &mut self.matrix,
@@ -1439,6 +1451,109 @@ impl AbletonStudioApp {
                         &self.telemetry,
                         self.current_time_seconds,
                     );
+
+                    if let Some(mv) = action.master_volume_changed {
+                        self.master_volume = mv;
+                    }
+                    if (self.master_volume - prev_master_vol).abs() > 1e-5 {
+                        if let Some(ref handle) = self.audio_handle {
+                            handle.params.set(PARAM_MASTER_VOL, self.master_volume);
+                        }
+                        if let Some(ref proc) = self.mock_processor {
+                            proc.params.set(PARAM_MASTER_VOL, self.master_volume);
+                        }
+                        self.send_command(AudioCommand::SetParameter {
+                            track_id: 0,
+                            param_id: 1,
+                            value: self.master_volume,
+                        });
+                    }
+
+                    if let Some((trk, vol)) = action.track_volume_changed {
+                        if trk < self.tracks_gui.len() {
+                            self.tracks_gui[trk].volume_linear = vol;
+                        }
+                        if trk < 16 {
+                            if let Some(ref handle) = self.audio_handle {
+                                handle.params.set(PARAM_TRACK_VOL_BASE + trk, vol);
+                            }
+                            if let Some(ref proc) = self.mock_processor {
+                                proc.params.set(PARAM_TRACK_VOL_BASE + trk, vol);
+                            }
+                        }
+                        self.send_command(AudioCommand::SetParameter {
+                            track_id: trk,
+                            param_id: 1000 + trk as u32,
+                            value: vol,
+                        });
+                    }
+
+                    if let Some((trk, pan)) = action.track_pan_changed {
+                        if trk < self.tracks_gui.len() {
+                            self.tracks_gui[trk].pan = pan;
+                        }
+                        if trk < 16 {
+                            if let Some(ref handle) = self.audio_handle {
+                                handle.params.set(PARAM_TRACK_PAN_BASE + trk, pan);
+                            }
+                            if let Some(ref proc) = self.mock_processor {
+                                proc.params.set(PARAM_TRACK_PAN_BASE + trk, pan);
+                            }
+                        }
+                        self.send_command(AudioCommand::SetParameter {
+                            track_id: trk,
+                            param_id: 1100 + trk as u32,
+                            value: pan,
+                        });
+                    }
+
+                    if let Some(trk) = action.track_mute_toggled {
+                        let is_muted = if trk < self.tracks_gui.len() {
+                            self.tracks_gui[trk].mute
+                        } else {
+                            false
+                        };
+                        self.send_command(AudioCommand::SetParameter {
+                            track_id: trk,
+                            param_id: 1200 + trk as u32,
+                            value: if is_muted { 1.0 } else { 0.0 },
+                        });
+                    }
+
+                    if let Some(trk) = action.track_solo_toggled {
+                        let is_solo = if trk < self.tracks_gui.len() {
+                            self.tracks_gui[trk].solo
+                        } else {
+                            false
+                        };
+                        self.send_command(AudioCommand::SetParameter {
+                            track_id: trk,
+                            param_id: 1300 + trk as u32,
+                            value: if is_solo { 1.0 } else { 0.0 },
+                        });
+                    }
+
+                    if let Some((trk, send_idx, val)) = action.send_changed {
+                        let param_id = if send_idx == 0 {
+                            1400 + trk as u32
+                        } else {
+                            1500 + trk as u32
+                        };
+                        self.send_command(AudioCommand::SetParameter {
+                            track_id: trk,
+                            param_id,
+                            value: val,
+                        });
+                    }
+
+                    if let Some(pos) = action.crossfader_changed {
+                        self.crossfader_pos = pos;
+                        self.send_command(AudioCommand::SetParameter {
+                            track_id: 0,
+                            param_id: 2000,
+                            value: pos,
+                        });
+                    }
 
                     if let Some((trk, slot)) = action.trigger_clip {
                         self.send_command(AudioCommand::TriggerClip {
@@ -1687,5 +1802,80 @@ mod tests {
         app.ensure_track_device_chain(5);
         assert!(app.track_device_chains.len() >= 6);
         assert_eq!(app.track_device_chains[5].devices[0].kind, DeviceKind::Wavetable);
+    }
+
+    #[test]
+    fn test_mixer_gui_to_dsp_wiring_and_parameters() {
+        let mut app = AbletonStudioApp::new_mock(44100.0);
+
+        // 1. Verify initial parameters
+        let params = app.audio_handle.as_ref().unwrap().params.clone();
+        assert_eq!(params.get(PARAM_MASTER_VOL), 1.0);
+        assert_eq!(params.get(PARAM_TRACK_VOL_BASE), 1.0);
+        assert_eq!(params.get(PARAM_TRACK_PAN_BASE), 0.0);
+
+        // 2. Adjust master volume
+        app.master_volume = 0.65;
+        if let Some(ref handle) = app.audio_handle {
+            handle.params.set(PARAM_MASTER_VOL, app.master_volume);
+        }
+        app.send_command(AudioCommand::SetParameter {
+            track_id: 0,
+            param_id: 1,
+            value: app.master_volume,
+        });
+        assert!((params.get(PARAM_MASTER_VOL) - 0.65).abs() < 1e-4);
+
+        // 3. Adjust track 0 volume
+        app.tracks_gui[0].volume_linear = 1.75;
+        if let Some(ref handle) = app.audio_handle {
+            handle.params.set(PARAM_TRACK_VOL_BASE, 1.75);
+        }
+        app.send_command(AudioCommand::SetParameter {
+            track_id: 0,
+            param_id: 1000,
+            value: 1.75,
+        });
+        assert!((params.get(PARAM_TRACK_VOL_BASE) - 1.75).abs() < 1e-4);
+
+        // 4. Adjust track 1 pan
+        app.tracks_gui[1].pan = -0.5;
+        if let Some(ref handle) = app.audio_handle {
+            handle.params.set(PARAM_TRACK_PAN_BASE + 1, -0.5);
+        }
+        app.send_command(AudioCommand::SetParameter {
+            track_id: 1,
+            param_id: 1101,
+            value: -0.5,
+        });
+        assert!((params.get(PARAM_TRACK_PAN_BASE + 1) - (-0.5)).abs() < 1e-4);
+
+        // 5. Toggle track 0 mute
+        app.tracks_gui[0].mute = true;
+        app.send_command(AudioCommand::SetParameter {
+            track_id: 0,
+            param_id: 1200,
+            value: 1.0,
+        });
+
+        // 6. Crossfader
+        app.crossfader_pos = 0.5;
+        app.send_command(AudioCommand::SetParameter {
+            track_id: 0,
+            param_id: 2000,
+            value: 0.5,
+        });
+        assert_eq!(app.crossfader_pos, 0.5);
+
+        // Poll audio to execute commands in mock processor
+        app.poll_audio();
+
+        if let Some(ref proc) = app.mock_processor {
+            assert!((proc.mixer.master_volume_linear - 0.65).abs() < 1e-4);
+            assert!((proc.mixer.tracks[0].volume_linear - 1.75).abs() < 1e-4);
+            assert!((proc.mixer.tracks[1].pan - (-0.5)).abs() < 1e-4);
+            assert!(proc.mixer.tracks[0].mute);
+            assert!((proc.crossfader - 0.5).abs() < 1e-4);
+        }
     }
 }

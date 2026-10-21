@@ -1,0 +1,12 @@
+Create a standalone `examples/mcp-quickstart/` directory in `juancruzmunozalbelo/oxide-studio` tailored for `r/LocalLLaMA` and `r/ClaudeAI` developers who want to test the 76-tool MCP server and the `127.0.0.1:19384` Live RPC Bridge in under 60 seconds.
+
+Requirements:
+1. Add `examples/mcp-quickstart/README.md` with exact copy-paste configurations for:
+   - Claude Desktop (`claude_desktop_config.json`)
+   - Cursor / Antigravity / Claude Code (`.mcp.json`)
+   - Local Ollama / OpenAI-compatible tool-calling agents (`Qwen2.5-Coder`, `Llama-3.3`) hitting the Oxide Studio MCP stdio server or TCP RPC port `127.0.0.1:19384`.
+2. Add 3 ready-to-run demo scripts or JSON-RPC payload examples in `examples/mcp-quickstart/`:
+   - `01_dark_techno_132bpm.sh`: Builds a 132 BPM dark techno session (TR-909 rumble kick, 7/16 Euclidean hats, F minor 303 acid line, Roar multiband saturation, and exports `.als`).
+   - `02_acid_house_303_automation.sh`: Programs a resonant 303 pattern, modulates filter cutoff + Orbit LFO macros, and triggers 4-band stem separation.
+   - `03_als_roundtrip_demo.sh`: Demonstrates exporting the live session to an Ableton Live 12 `.als` file and verifying the XML/gzip structure.
+3. Ensure `cargo test --workspace` passes with zero warnings.

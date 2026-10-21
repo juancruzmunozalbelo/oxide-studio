@@ -223,9 +223,12 @@ pub fn render_clip_inspector(
     global_scale: &GlobalScale,
     action: &mut ClipViewAction,
 ) {
-    let is_compact_h = ui.available_height() < 160.0;
+    let is_compact_h = ui.available_height() <= 160.0;
     ui.spacing_mut().item_spacing = vec2(3.0, if is_compact_h { 1.0 } else { 2.0 });
-    ui.spacing_mut().button_padding = vec2(4.0, if is_compact_h { 1.0 } else { 2.0 });
+    ui.spacing_mut().button_padding = vec2(if is_compact_h { 3.0 } else { 4.0 }, if is_compact_h { 0.5 } else { 2.0 });
+    if is_compact_h {
+        ui.spacing_mut().interact_size.y = 11.5;
+    }
 
     // Inspector Tab Selector Bar (4 compact buttons)
     ui.horizontal(|ui| {
@@ -341,13 +344,15 @@ pub fn render_clip_inspector(
         }
 
         ClipViewSubTab::Transform => {
-            ui.label(RichText::new("LIVE 12 TRANSFORM").size(9.5).color(COLOR_CYAN).strong());
+            let title_size = if is_compact_h { 9.0 } else { 9.5 };
+            let row_font_size = if is_compact_h { 8.5 } else { 9.0 };
+            ui.label(RichText::new("LIVE 12 TRANSFORM").size(title_size).color(COLOR_CYAN).strong());
 
             // 1. Quantize
             ui.horizontal(|ui| {
-                ui.label(RichText::new("Quant:").size(9.0).color(COLOR_TEXT_MUTED));
+                ui.label(RichText::new("Quant:").size(row_font_size).color(COLOR_TEXT_MUTED));
                 ui.add(Slider::new(&mut state.quantize_amount, 0.0..=1.0).show_value(false));
-                if ui.add(Button::new(RichText::new("Apply").size(9.0).color(COLOR_CYAN))).clicked() {
+                if ui.add(Button::new(RichText::new("Apply").size(row_font_size).color(COLOR_CYAN))).clicked() {
                     transform_quantize(midi_pattern, state.quantize_grid, state.quantize_amount, 0.0);
                     action.pattern_mutated = true;
                 }
@@ -355,13 +360,13 @@ pub fn render_clip_inspector(
 
             // 2. Strum
             ui.horizontal(|ui| {
-                ui.label(RichText::new("Strum:").size(9.0).color(COLOR_TEXT_MUTED));
+                ui.label(RichText::new("Strum:").size(row_font_size).color(COLOR_TEXT_MUTED));
                 ui.add(Slider::new(&mut state.strum_spread_ms, 5.0..=100.0).show_value(false));
                 let dir_lbl = if state.strum_direction_up { "Up" } else { "Down" };
-                if ui.add(Button::new(RichText::new(dir_lbl).size(9.0).color(COLOR_CYAN))).clicked() {
+                if ui.add(Button::new(RichText::new(dir_lbl).size(row_font_size).color(COLOR_CYAN))).clicked() {
                     state.strum_direction_up = !state.strum_direction_up;
                 }
-                if ui.add(Button::new(RichText::new("Apply").size(9.0).color(COLOR_CYAN))).clicked() {
+                if ui.add(Button::new(RichText::new("Apply").size(row_font_size).color(COLOR_CYAN))).clicked() {
                     let spread_beats = (state.strum_spread_ms / 1000.0) * (124.0 / 60.0);
                     let dir = if state.strum_direction_up {
                         StrumDirection::Up
@@ -375,33 +380,41 @@ pub fn render_clip_inspector(
 
             // 3. Connect & Ornament & Recombine
             ui.horizontal(|ui| {
-                if ui.add(Button::new(RichText::new("Connect").size(9.0).color(COLOR_CYAN))).clicked() {
+                if ui.add(Button::new(RichText::new("Connect").size(row_font_size).color(COLOR_CYAN))).clicked() {
                     let sl = ableton_timeline::generate::ScaleLock::dorian(global_scale.root);
                     transform_connect(midi_pattern, sl, 0.5);
                     action.pattern_mutated = true;
                 }
-                if ui.add(Button::new(RichText::new("Ornament").size(9.0).color(COLOR_CYAN))).clicked() {
+                if ui.add(Button::new(RichText::new("Ornament").size(row_font_size).color(COLOR_CYAN))).clicked() {
                     transform_ornament(midi_pattern, 0.0625, 2, state.ornament_velocity);
                     action.pattern_mutated = true;
                 }
-                if ui.add(Button::new(RichText::new("Recombine").size(9.0).color(COLOR_CYAN))).clicked() {
+                if ui.add(Button::new(RichText::new("Recombine").size(row_font_size).color(COLOR_CYAN))).clicked() {
                     transform_recombine(midi_pattern, 1, 1, 1);
                     action.pattern_mutated = true;
                 }
             });
 
-            ui.separator();
-            ui.label(RichText::new("Mutations update Piano Roll instantly side-by-side.").size(8.5).color(COLOR_TEXT_DIM));
+            if ui.available_height() >= 16.0 {
+                ui.separator();
+                let hint_size = if is_compact_h { 7.5 } else { 8.5 };
+                ui.label(RichText::new("Mutations update Piano Roll instantly side-by-side.").size(hint_size).color(COLOR_TEXT_DIM));
+            } else if ui.available_height() >= 9.0 {
+                let hint_size = if is_compact_h { 7.5 } else { 8.5 };
+                ui.label(RichText::new("Mutations update Piano Roll instantly side-by-side.").size(hint_size).color(COLOR_TEXT_DIM));
+            }
         }
 
         ClipViewSubTab::Generate => {
-            ui.label(RichText::new("LIVE 12 GENERATE").size(9.5).color(COLOR_GREEN).strong());
+            let title_size = if is_compact_h { 9.0 } else { 9.5 };
+            let row_font_size = if is_compact_h { 8.5 } else { 9.0 };
+            ui.label(RichText::new("LIVE 12 GENERATE").size(title_size).color(COLOR_GREEN).strong());
 
             // 1. Seed Generator
             ui.horizontal(|ui| {
-                ui.label(RichText::new("Density:").size(9.0).color(COLOR_TEXT_MUTED));
+                ui.label(RichText::new("Density:").size(row_font_size).color(COLOR_TEXT_MUTED));
                 ui.add(Slider::new(&mut state.seed_density, 0.1..=1.0).show_value(false));
-                if ui.add(Button::new(RichText::new("Seed").size(9.0).color(COLOR_GREEN))).clicked() {
+                if ui.add(Button::new(RichText::new("Seed").size(row_font_size).color(COLOR_GREEN))).clicked() {
                     let sl = ableton_timeline::generate::ScaleLock::dorian(global_scale.root);
                     let span_beats = (state.loop_length_bars * 4) as f64;
                     *midi_pattern = generate_seed(span_beats, 0.25, state.seed_density, state.seed_min_pitch, state.seed_max_pitch, 80, 115, 0.2, 0.2, Some(sl), 42);
@@ -411,17 +424,18 @@ pub fn render_clip_inspector(
 
             // 2. Stacks Generator
             ui.horizontal(|ui| {
-                ui.label(RichText::new("Stacks:").size(9.0).color(COLOR_TEXT_MUTED));
+                ui.label(RichText::new("Stacks:").size(row_font_size).color(COLOR_TEXT_MUTED));
                 let chord_labels = ["Maj", "Min7", "9th"];
+                let chord_btn_size = if is_compact_h { 8.0 } else { 8.5 };
                 for (idx, &lbl) in chord_labels.iter().enumerate() {
                     let is_sel = state.stacks_chord_type == idx;
-                    let btn = Button::new(RichText::new(lbl).size(8.5).color(if is_sel { COLOR_GREEN } else { COLOR_TEXT_MUTED }))
+                    let btn = Button::new(RichText::new(lbl).size(chord_btn_size).color(if is_sel { COLOR_GREEN } else { COLOR_TEXT_MUTED }))
                         .fill(if is_sel { COLOR_BG_PANEL_ALT } else { COLOR_BG_SURFACE });
                     if ui.add(btn).clicked() {
                         state.stacks_chord_type = idx;
                     }
                 }
-                if ui.add(Button::new(RichText::new("Apply").size(9.0).color(COLOR_GREEN))).clicked() {
+                if ui.add(Button::new(RichText::new("Apply").size(row_font_size).color(COLOR_GREEN))).clicked() {
                     let chord_type = match state.stacks_chord_type {
                         0 => StacksChordType::MajorTriad,
                         1 => StacksChordType::Min7,
@@ -435,16 +449,22 @@ pub fn render_clip_inspector(
 
             // 3. Euclidean Generator
             ui.horizontal(|ui| {
-                ui.label(RichText::new("Euclid:").size(9.0).color(COLOR_TEXT_MUTED));
+                ui.label(RichText::new("Euclid:").size(row_font_size).color(COLOR_TEXT_MUTED));
                 ui.add(Slider::new(&mut state.euclidean_hits, 1..=16).show_value(false));
-                if ui.add(Button::new(RichText::new("Generate").size(9.0).color(COLOR_GREEN))).clicked() {
+                if ui.add(Button::new(RichText::new("Generate").size(row_font_size).color(COLOR_GREEN))).clicked() {
                     *midi_pattern = generate_euclidean(state.euclidean_hits as usize, state.euclidean_steps as usize, 0, 41, 0.25, 110);
                     action.pattern_mutated = true;
                 }
             });
 
-            ui.separator();
-            ui.label(RichText::new("Generated patterns replace notes with real-time feedback.").size(8.5).color(COLOR_TEXT_DIM));
+            if ui.available_height() >= 16.0 {
+                ui.separator();
+                let hint_size = if is_compact_h { 7.5 } else { 8.5 };
+                ui.label(RichText::new("Generated patterns replace notes with real-time feedback.").size(hint_size).color(COLOR_TEXT_DIM));
+            } else if ui.available_height() >= 9.0 {
+                let hint_size = if is_compact_h { 7.5 } else { 8.5 };
+                ui.label(RichText::new("Generated patterns replace notes with real-time feedback.").size(hint_size).color(COLOR_TEXT_DIM));
+            }
         }
 
         ClipViewSubTab::Warping => {

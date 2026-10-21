@@ -421,6 +421,12 @@ impl AiCopilotState {
             }
         }
     }
+
+    /// Generates the complete OKF system prompt containing operational guidelines,
+    /// manual excerpts, and MCP tool registries for the active studio locale.
+    pub fn system_prompt(&self) -> String {
+        crate::okf_knowledge::build_copilot_okf_system_prompt(self.locale)
+    }
 }
 
 /// Fast deterministic Studio Intent & MCP Tool Router.
@@ -733,6 +739,13 @@ pub fn execute_studio_intent(prompt: &str, app: &mut AbletonStudioApp) -> (Strin
             "High-pass filter opened to 4800 Hz with 1.2 resonance. Low-mid masking attenuated around 300 Hz and upward/downward OTT multiband processing applied for high-frequency clarity.".to_string()
         };
         return (reply, badges);
+    }
+
+    // 6. Operational Knowledge Framework (OKF) Manual & Architecture Query
+    if let Some((manual_reply, mcp_badges)) =
+        crate::okf_knowledge::query_okf_manual(prompt, app.ai_copilot.locale)
+    {
+        return (manual_reply, mcp_badges);
     }
 
     // Fallback Studio Assistant Response
@@ -1541,5 +1554,181 @@ mod tests {
         app.handle_ai_prompt("136 BPM Techno Drop");
         let last_drop = app.ai_copilot.messages.last().unwrap();
         assert!(last_drop.text.contains("Tempo locked at 136.0 BPM"));
+    }
+
+    #[test]
+    fn test_copilot_system_prompt_bilingual_okf() {
+        let mut state = AiCopilotState::new();
+
+        // English system prompt verification
+        state.set_locale(StudioLocale::En);
+        let prompt_en = state.system_prompt();
+        assert!(prompt_en.contains("Oxide Studio Producer Copilot"));
+        assert!(prompt_en.contains("OPERATIONAL KNOWLEDGE FRAMEWORK (OKF)"));
+        assert!(prompt_en.contains("OKF-01"));
+        assert!(prompt_en.contains("OKF-06"));
+        assert!(prompt_en.contains("OKF-08"));
+        assert!(prompt_en.contains("Glue Compressor"));
+        assert!(prompt_en.contains("Wavetable"));
+        assert!(prompt_en.contains("Operator"));
+        assert!(prompt_en.contains("Simpler"));
+        assert!(prompt_en.contains("mixer_set_channel"));
+
+        // Spanish system prompt verification (Rioplatense voseo)
+        state.set_locale(StudioLocale::Es);
+        let prompt_es = state.system_prompt();
+        assert!(prompt_es.contains("Copiloto de Producción de Oxide Studio"));
+        assert!(prompt_es.contains("MARCO DE CONOCIMIENTO OPERATIVO (OKF)"));
+        assert!(prompt_es.contains("OKF-01"));
+        assert!(prompt_es.contains("OKF-06"));
+        assert!(prompt_es.contains("OKF-08"));
+        assert!(prompt_es.contains("rioplatense"));
+        assert!(prompt_es.contains("voseo natural"));
+        assert!(prompt_es.contains("Glue Compressor"));
+        assert!(prompt_es.contains("Simpler"));
+        assert!(prompt_es.contains("mixer_set_channel"));
+    }
+
+    #[test]
+    fn test_execute_studio_intent_english_okf_queries() {
+        let mut app = AbletonStudioApp::new_mock(44100.0);
+        app.ai_copilot.set_locale(StudioLocale::En);
+
+        // 1. Device query: Glue Compressor
+        let (reply, badges) = execute_studio_intent("how do I use glue compressor", &mut app);
+        assert!(reply.contains("OKF-06"), "Must match OKF-06 section");
+        assert!(reply.contains("Glue Compressor"), "Must describe Glue Compressor");
+        assert!(reply.contains("SSL G-Bus"), "Must contain SSL G-Bus reference");
+        assert!(badges.contains(&"device_add_to_track".to_string()));
+        assert!(badges.contains(&"device_set_param".to_string()));
+
+        // 2. Shortcuts query
+        let (reply_sc, badges_sc) = execute_studio_intent("shortcuts", &mut app);
+        assert!(reply_sc.contains("Tab"), "Must list Tab key");
+        assert!(reply_sc.contains("Shift+Tab"), "Must list Shift+Tab key");
+        assert!(badges_sc.contains(&"live12_get_song_info".to_string()));
+        assert!(badges_sc.contains(&"transport_play".to_string()));
+
+        // 3. Device query: Simpler
+        let (reply_simpler, badges_simpler) = execute_studio_intent("what is simpler", &mut app);
+        assert!(reply_simpler.contains("OKF-06"), "Must match OKF-06 section");
+        assert!(reply_simpler.contains("Simpler"), "Must describe Simpler");
+        assert!(reply_simpler.contains("Classic ADSR"), "Must describe Simpler modes");
+        assert!(badges_simpler.contains(&"simpler_slice_to_drum_rack".to_string()));
+
+        // 4. Audio Warping modes query
+        let (reply_warp, badges_warp) = execute_studio_intent("what are the audio warp modes?", &mut app);
+        assert!(reply_warp.contains("OKF-05"), "Must match OKF-05 section");
+        assert!(reply_warp.contains("Beats"), "Must describe Beats warping");
+        assert!(reply_warp.contains("Complex Pro"), "Must describe Complex Pro warping");
+        assert!(badges_warp.contains(&"audio_clip_set_warp_mode".to_string()));
+
+        // 5. TR-909 step sequencer query
+        let (reply_909, badges_909) = execute_studio_intent("tr-909 step sequencer groove", &mut app);
+        assert!(reply_909.contains("OKF-07"), "Must match OKF-07 section");
+        assert!(reply_909.contains("Bank A"), "Must describe Bank A");
+        assert!(reply_909.contains("Bank B"), "Must describe Bank B");
+        assert!(badges_909.contains(&"drums_configure_pad".to_string()));
+
+        // 6. Export stems and ALS query
+        let (reply_export, badges_export) = execute_studio_intent("how to export stems and als", &mut app);
+        assert!(reply_export.contains("OKF-08"), "Must match OKF-08 section");
+        assert!(reply_export.contains(".als"), "Must mention .als export");
+        assert!(reply_export.contains("4-Stem"), "Must mention 4-Stem separation");
+        assert!(badges_export.contains(&"stems_separate_remix".to_string()));
+
+        // 7. General OKF manual query
+        let (reply_help, badges_help) = execute_studio_intent("manual okf", &mut app);
+        assert!(reply_help.contains("OKF-01"));
+        assert!(reply_help.contains("OKF-08"));
+        assert!(badges_help.contains(&"live12_get_song_info".to_string()));
+    }
+
+    #[test]
+    fn test_execute_studio_intent_spanish_okf_queries() {
+        let mut app = AbletonStudioApp::new_mock(44100.0);
+        app.ai_copilot.set_locale(StudioLocale::Es);
+
+        // 1. Consulta de dispositivo: Glue Compressor
+        let (reply, badges) = execute_studio_intent("cómo usar glue compressor", &mut app);
+        assert!(reply.contains("OKF-06"), "Debe coincidir con la sección OKF-06");
+        assert!(reply.contains("Glue Compressor"), "Debe describir Glue Compressor");
+        assert!(reply.contains("SSL G-Bus"), "Debe referenciar la consola SSL G-Bus");
+        assert!(badges.contains(&"device_add_to_track".to_string()));
+        assert!(badges.contains(&"device_set_param".to_string()));
+
+        // 2. Consulta de atajos de teclado
+        let (reply_sc, badges_sc) = execute_studio_intent("atajos de teclado", &mut app);
+        assert!(reply_sc.contains("Tab"), "Debe listar la tecla Tab");
+        assert!(reply_sc.contains("Shift+Tab"), "Debe listar Shift+Tab");
+        assert!(badges_sc.contains(&"live12_get_song_info".to_string()));
+
+        // 3. Consulta de dispositivo: Simpler
+        let (reply_simpler, badges_simpler) = execute_studio_intent("qué es simpler", &mut app);
+        assert!(reply_simpler.contains("OKF-06"), "Debe coincidir con la sección OKF-06");
+        assert!(reply_simpler.contains("Simpler"), "Debe describir Simpler");
+        assert!(reply_simpler.contains("One-Shot"), "Debe mencionar el modo One-Shot");
+        assert!(badges_simpler.contains(&"simpler_slice_to_drum_rack".to_string()));
+
+        // 4. Modos de warping en español
+        let (reply_warp, badges_warp) = execute_studio_intent("modos de warp de audio", &mut app);
+        assert!(reply_warp.contains("OKF-05"), "Debe coincidir con la sección OKF-05");
+        assert!(reply_warp.contains("Beats"), "Debe describir Beats");
+        assert!(reply_warp.contains("Complex y Complex Pro"), "Debe describir Complex Pro");
+        assert!(badges_warp.contains(&"audio_clip_set_warp_mode".to_string()));
+
+        // 5. Secuenciador TR-909 en español
+        let (reply_909, badges_909) = execute_studio_intent("secuenciador tr-909 y groove", &mut app);
+        assert!(reply_909.contains("OKF-07"), "Debe coincidir con la sección OKF-07");
+        assert!(reply_909.contains("Banco A"), "Debe describir el Banco A");
+        assert!(reply_909.contains("Banco B"), "Debe describir el Banco B");
+        assert!(badges_909.contains(&"drums_configure_pad".to_string()));
+
+        // 6. Exportación de stems y als en español
+        let (reply_export, badges_export) = execute_studio_intent("exportar stems y proyecto als", &mut app);
+        assert!(reply_export.contains("OKF-08"), "Debe coincidir con la sección OKF-08");
+        assert!(reply_export.contains(".als"), "Debe mencionar exportación .als");
+        assert!(reply_export.contains("4 pistas independientes"), "Debe mencionar 4 stems");
+        assert!(badges_export.contains(&"stems_separate_remix".to_string()));
+
+        // 7. Manual general en español
+        let (reply_help, badges_help) = execute_studio_intent("manual okf", &mut app);
+        assert!(reply_help.contains("OKF-01"));
+        assert!(reply_help.contains("OKF-08"));
+        assert!(badges_help.contains(&"live12_get_song_info".to_string()));
+    }
+
+    #[test]
+    fn test_app_handle_ai_prompt_okf_bilingual_roundtrip() {
+        let mut app = AbletonStudioApp::new_mock(44100.0);
+
+        // English roundtrip
+        app.ai_copilot.set_locale(StudioLocale::En);
+        app.handle_ai_prompt("how do I use glue compressor");
+
+        assert!(app.ai_copilot.messages.len() >= 2);
+        let user_msg = &app.ai_copilot.messages[app.ai_copilot.messages.len() - 2];
+        assert_eq!(user_msg.role, MessageRole::User);
+        assert_eq!(user_msg.text, "how do I use glue compressor");
+
+        let asst_msg = app.ai_copilot.messages.last().unwrap();
+        assert_eq!(asst_msg.role, MessageRole::Assistant);
+        assert!(asst_msg.text.contains("OKF-06"));
+        assert!(asst_msg.text.contains("Glue Compressor"));
+        assert!(asst_msg.mcp_badges.contains(&"device_add_to_track".to_string()));
+
+        // Spanish roundtrip
+        app.ai_copilot.set_locale(StudioLocale::Es);
+        app.handle_ai_prompt("qué es simpler");
+
+        let user_msg_es = &app.ai_copilot.messages[app.ai_copilot.messages.len() - 2];
+        assert_eq!(user_msg_es.role, MessageRole::User);
+        assert_eq!(user_msg_es.text, "qué es simpler");
+
+        let asst_msg_es = app.ai_copilot.messages.last().unwrap();
+        assert_eq!(asst_msg_es.role, MessageRole::Assistant);
+        assert!(asst_msg_es.text.contains("OKF-06"));
+        assert!(asst_msg_es.text.contains("Simpler"));
+        assert!(asst_msg_es.mcp_badges.contains(&"simpler_slice_to_drum_rack".to_string()));
     }
 }
