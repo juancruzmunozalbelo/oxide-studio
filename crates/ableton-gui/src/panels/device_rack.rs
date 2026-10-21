@@ -118,6 +118,69 @@ pub struct DeviceChainViewState {
     pub quick_picker_open: bool,
 }
 
+impl DeviceChainViewState {
+    /// Track 1: "F Dorian Chords" (Polyphonic Wavetable Synth)
+    /// Wavetable -> Auto Filter -> EQ Eight -> Glue Compressor
+    pub fn for_track_1() -> Self {
+        Self {
+            devices: vec![
+                GuiDeviceModule::new(1, DeviceKind::Wavetable),
+                GuiDeviceModule::new(2, DeviceKind::AutoFilter),
+                GuiDeviceModule::new(3, DeviceKind::EQEight),
+                GuiDeviceModule::new(4, DeviceKind::GlueCompressor),
+            ],
+            selected_device_idx: 0,
+            quick_picker_open: false,
+        }
+    }
+
+    /// Track 2: "909 House Kit" (Drum Machine & Dynamics)
+    /// Drum Rack -> Roar -> OTT -> Glue Compressor
+    pub fn for_track_2() -> Self {
+        Self {
+            devices: vec![
+                GuiDeviceModule::new(10, DeviceKind::DrumRack),
+                GuiDeviceModule::new(11, DeviceKind::Roar),
+                GuiDeviceModule::new(12, DeviceKind::OTT),
+                GuiDeviceModule::new(13, DeviceKind::GlueCompressor),
+            ],
+            selected_device_idx: 0,
+            quick_picker_open: false,
+        }
+    }
+
+    /// Track 3: "Offbeat Sub Bass" (FM 4-Op Operator Bass)
+    /// Operator -> Auto Filter -> Roar -> EQ Eight
+    pub fn for_track_3() -> Self {
+        Self {
+            devices: vec![
+                GuiDeviceModule::new(20, DeviceKind::Operator),
+                GuiDeviceModule::new(21, DeviceKind::AutoFilter),
+                GuiDeviceModule::new(22, DeviceKind::Roar),
+                GuiDeviceModule::new(23, DeviceKind::EQEight),
+            ],
+            selected_device_idx: 0,
+            quick_picker_open: false,
+        }
+    }
+
+    /// Default device chain configured for a specific track index.
+    pub fn default_for_track(track_idx: usize, is_drum: bool) -> Self {
+        match track_idx {
+            0 => Self::for_track_1(),
+            1 => Self::for_track_2(),
+            2 => Self::for_track_3(),
+            _ => {
+                if is_drum {
+                    Self::for_track_2()
+                } else {
+                    Self::for_track_1()
+                }
+            }
+        }
+    }
+}
+
 impl Default for DeviceChainViewState {
     fn default() -> Self {
         Self {
@@ -579,5 +642,47 @@ mod tests {
         chain.devices[0].wavetable.table_pos = 0.99;
         chain.devices[0].wavetable = WavetableVisualizerState::default();
         assert_eq!(chain.devices[0].wavetable.table_pos, 0.35);
+    }
+
+    #[test]
+    fn test_per_track_device_chains_isolated() {
+        let t1 = DeviceChainViewState::for_track_1();
+        let t2 = DeviceChainViewState::for_track_2();
+        let t3 = DeviceChainViewState::for_track_3();
+
+        // Track 1: Wavetable -> AutoFilter -> EQEight -> GlueCompressor
+        assert_eq!(t1.devices.len(), 4);
+        assert_eq!(t1.devices[0].kind, DeviceKind::Wavetable);
+        assert_eq!(t1.devices[1].kind, DeviceKind::AutoFilter);
+        assert_eq!(t1.devices[2].kind, DeviceKind::EQEight);
+        assert_eq!(t1.devices[3].kind, DeviceKind::GlueCompressor);
+
+        // Track 2: DrumRack -> Roar -> OTT -> GlueCompressor
+        assert_eq!(t2.devices.len(), 4);
+        assert_eq!(t2.devices[0].kind, DeviceKind::DrumRack);
+        assert_eq!(t2.devices[1].kind, DeviceKind::Roar);
+        assert_eq!(t2.devices[2].kind, DeviceKind::OTT);
+        assert_eq!(t2.devices[3].kind, DeviceKind::GlueCompressor);
+
+        // Track 3: Operator -> AutoFilter -> Roar -> EQEight
+        assert_eq!(t3.devices.len(), 4);
+        assert_eq!(t3.devices[0].kind, DeviceKind::Operator);
+        assert_eq!(t3.devices[1].kind, DeviceKind::AutoFilter);
+        assert_eq!(t3.devices[2].kind, DeviceKind::Roar);
+        assert_eq!(t3.devices[3].kind, DeviceKind::EQEight);
+
+        // Verify default_for_track mapping
+        assert_eq!(DeviceChainViewState::default_for_track(0, false).devices[0].kind, DeviceKind::Wavetable);
+        assert_eq!(DeviceChainViewState::default_for_track(1, true).devices[0].kind, DeviceKind::DrumRack);
+        assert_eq!(DeviceChainViewState::default_for_track(2, false).devices[0].kind, DeviceKind::Operator);
+        assert_eq!(DeviceChainViewState::default_for_track(99, true).devices[0].kind, DeviceKind::DrumRack);
+        assert_eq!(DeviceChainViewState::default_for_track(99, false).devices[0].kind, DeviceKind::Wavetable);
+
+        // Verify independent mutation
+        let mut chains = vec![t1, t2, t3];
+        chains[0].devices[0].is_enabled = false;
+        assert!(!chains[0].devices[0].is_enabled);
+        assert!(chains[1].devices[0].is_enabled);
+        assert!(chains[2].devices[0].is_enabled);
     }
 }

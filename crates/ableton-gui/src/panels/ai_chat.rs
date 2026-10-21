@@ -41,6 +41,38 @@ pub struct AiChatMessage {
     pub timestamp: String,
 }
 
+/// Supported LLM provider backends for the In-App AI Producer Copilot.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AiProvider {
+    Gemini,
+    Anthropic,
+    OpenAi,
+}
+
+impl AiProvider {
+    pub const ALL: [AiProvider; 3] = [
+        AiProvider::Gemini,
+        AiProvider::Anthropic,
+        AiProvider::OpenAi,
+    ];
+
+    pub fn name(&self) -> &'static str {
+        match self {
+            AiProvider::Gemini => "Gemini",
+            AiProvider::Anthropic => "Claude",
+            AiProvider::OpenAi => "OpenAI",
+        }
+    }
+
+    pub fn env_var_name(&self) -> &'static str {
+        match self {
+            AiProvider::Gemini => "GEMINI_API_KEY",
+            AiProvider::Anthropic => "ANTHROPIC_API_KEY",
+            AiProvider::OpenAi => "OPENAI_API_KEY",
+        }
+    }
+}
+
 /// State container for the In-App AI Producer Chat Copilot.
 #[derive(Debug, Clone)]
 pub struct AiCopilotState {
@@ -51,6 +83,10 @@ pub struct AiCopilotState {
     pub kick_decay_ms: f32,
     pub synth_env_mod: f32,
     pub synth_drive: f32,
+    pub provider: AiProvider,
+    pub api_key: String,
+    pub show_key_settings: bool,
+    pub key_status_msg: Option<String>,
 }
 
 impl Default for AiCopilotState {
@@ -60,11 +96,100 @@ impl Default for AiCopilotState {
 }
 
 impl AiCopilotState {
+    /// Returns the local user-only config path (`~/.config/oxide-studio/copilot_keys.env`),
+    /// completely outside the git repository so user keys are NEVER committed to GitHub.
+    pub fn local_key_file_path() -> std::path::PathBuf {
+        let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_string());
+        std::path::PathBuf::from(home)
+            .join(".config")
+            .join("oxide-studio")
+            .join("copilot_keys.env")
+    }
+
+    /// Load API key from environment variables or `~/.config/oxide-studio/copilot_keys.env`.
+    pub fn load_local_api_key(provider: AiProvider) -> Option<String> {
+        if let Ok(val) = std::env::var(provider.env_var_name()) {
+            let trimmed = val.trim().to_string();
+            if !trimmed.is_empty() {
+                return Some(trimmed);
+            }
+        }
+        let path = Self::local_key_file_path();
+        if let Ok(contents) = std::fs::read_to_string(path) {
+            let prefix = format!("{}=", provider.env_var_name());
+            for line in contents.lines() {
+                let line = line.trim();
+                if let Some(rest) = line.strip_prefix(&prefix) {
+                    let val = rest.trim().trim_matches('"').trim_matches('\'').to_string();
+                    if !val.is_empty() {
+                        return Some(val);
+                    }
+                }
+            }
+        }
+        None
+    }
+
+    /// Save the current provider's API key to `~/.config/oxide-studio/copilot_keys.env` (chmod 600 on Unix).
+    pub fn save_local_api_key(&mut self) -> std::io::Result<()> {
+        let path = Self::local_key_file_path();
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        let mut lines: Vec<String> = if path.exists() {
+            std::fs::read_to_string(&path)
+                .unwrap_or_default()
+                .lines()
+                .map(|s| s.to_string())
+                .collect()
+        } else {
+            Vec::new()
+        };
+
+        let key_name = self.provider.env_var_name();
+        let prefix = format!("{}=", key_name);
+        lines.retain(|l| !l.trim().starts_with(&prefix));
+        let clean_key = self.api_key.trim().to_string();
+        if !clean_key.is_empty() {
+            lines.push(format!("{}={}", key_name, clean_key));
+        }
+
+        let body = lines.join("\n") + "\n";
+        std::fs::write(&path, body)?;
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600));
+        }
+
+        self.key_status_msg = Some(if clean_key.is_empty() {
+            "Key local borrada (~/.config/oxide-studio)".to_string()
+        } else {
+            format!("Key {} guardada local (fuera de Git)", self.provider.name())
+        });
+        Ok(())
+    }
+
+    /// Returns a masked representation (e.g. `sk-...9a2f`) safe for UI display.
+    pub fn masked_key_preview(&self) -> String {
+        let k = self.api_key.trim();
+        if k.is_empty() {
+            "No Key".to_string()
+        } else if k.len() <= 8 {
+            "••••••••".to_string()
+        } else {
+            format!("{}•••{}", &k[..4], &k[k.len() - 4..])
+        }
+    }
+
     /// Initialize with welcome greeting in natural Rioplatense Spanish for electronic music producers.
     pub fn new() -> Self {
+        let default_provider = AiProvider::Gemini;
+        let loaded_key = Self::load_local_api_key(default_provider).unwrap_or_default();
         let welcome = AiChatMessage {
             role: MessageRole::Assistant,
-            text: "¡Buenas! Soy tu Copilot productor en Oxide Studio, conectado vía MCP. Puedo afinar el kick en sub, armar drops de techno, meter secuencias de RKT / Turreo o hacer chillar el 303 en vivo. ¿Qué armamos hoy?".into(),
+            text: "¡Buenas! Soy tu Copilot productor en Oxide Studio, conectado vía MCP. Puedo afinar el kick en sub, armar drops de techno, meter secuencias de RKT / Turreo o hacer chillar el 303 en vivo. Tocá [⚙ API Key] arriba si querés cargar tu propia key local (nunca se sube a GitHub). ¿Qué armamos hoy?".into(),
             mcp_badges: vec![
                 "studio_telemetry_live".into(),
                 "lom_bridge_active".into(),
@@ -80,6 +205,10 @@ impl AiCopilotState {
             kick_decay_ms: 350.0,
             synth_env_mod: 0.50,
             synth_drive: 0.20,
+            provider: default_provider,
+            api_key: loaded_key,
+            show_key_settings: false,
+            key_status_msg: None,
         }
     }
 }
@@ -397,8 +526,14 @@ pub fn render_ai_copilot_panel(ui: &mut Ui, app: &mut AbletonStudioApp) {
                     .color(COLOR_CYAN)
                     .strong(),
             );
+            let has_key = !app.ai_copilot.api_key.trim().is_empty();
+            let status_label = if has_key {
+                format!("• {} KEY OK", app.ai_copilot.provider.name().to_uppercase())
+            } else {
+                "• MCP READY".to_string()
+            };
             ui.label(
-                RichText::new("• MCP CONNECTED")
+                RichText::new(status_label)
                     .size(9.5)
                     .color(COLOR_GREEN),
             );
@@ -407,8 +542,98 @@ pub fn render_ai_copilot_panel(ui: &mut Ui, app: &mut AbletonStudioApp) {
                 if ui.small_button("×").on_hover_text("Close AI Copilot").clicked() {
                     app.copilot_open = false;
                 }
+
+                let key_btn_col = if app.ai_copilot.show_key_settings || has_key {
+                    COLOR_AMBER
+                } else {
+                    COLOR_TEXT_MUTED
+                };
+                let key_btn = Button::new(RichText::new("⚙ Key").size(9.5).color(key_btn_col).strong())
+                    .fill(if app.ai_copilot.show_key_settings { COLOR_BG_PANEL_ALT } else { Color32::TRANSPARENT })
+                    .stroke(Stroke::new(1.0_f32, if app.ai_copilot.show_key_settings { COLOR_AMBER } else { COLOR_BORDER }));
+                if ui.add(key_btn).on_hover_text("Configurar tu API Key local (~/.config/oxide-studio/copilot_keys.env — nunca se sube a GitHub)").clicked() {
+                    app.ai_copilot.show_key_settings = !app.ai_copilot.show_key_settings;
+                }
             });
         });
+
+        // 1b. Collapsible Local API Key Drawer (Stored in ~/.config/oxide-studio/copilot_keys.env, never in Git)
+        if app.ai_copilot.show_key_settings {
+            Frame::none()
+                .fill(Color32::from_rgb(0x10, 0x15, 0x20))
+                .stroke(Stroke::new(1.0_f32, COLOR_AMBER))
+                .rounding(4.0)
+                .inner_margin(Margin::same(6.0))
+                .show(ui, |ui| {
+                    ui.vertical(|ui| {
+                        ui.spacing_mut().item_spacing = vec2(4.0, 4.0);
+                        ui.horizontal(|ui| {
+                            ui.label(RichText::new("Proveedor:").size(9.5).color(COLOR_TEXT_MUTED));
+                            for &prov in &AiProvider::ALL {
+                                let is_sel = app.ai_copilot.provider == prov;
+                                let btn = Button::new(
+                                    RichText::new(prov.name())
+                                        .size(9.5)
+                                        .color(if is_sel { COLOR_AMBER } else { COLOR_TEXT_PRIMARY })
+                                        .strong(),
+                                )
+                                .fill(if is_sel { COLOR_BG_PANEL_ALT } else { Color32::TRANSPARENT })
+                                .stroke(Stroke::new(1.0_f32, if is_sel { COLOR_AMBER } else { COLOR_BORDER }));
+                                if ui.add(btn).clicked() && !is_sel {
+                                    app.ai_copilot.provider = prov;
+                                    app.ai_copilot.api_key =
+                                        AiCopilotState::load_local_api_key(prov).unwrap_or_default();
+                                    app.ai_copilot.key_status_msg = None;
+                                }
+                            }
+                        });
+
+                        ui.horizontal(|ui| {
+                            let key_w = (ui.available_width() - 108.0).max(80.0);
+                            ui.add(
+                                TextEdit::singleline(&mut app.ai_copilot.api_key)
+                                    .password(true)
+                                    .hint_text(format!("Pegá tu {}...", app.ai_copilot.provider.env_var_name()))
+                                    .desired_width(key_w),
+                            );
+                            if ui
+                                .add(
+                                    Button::new(RichText::new("Guardar").size(9.5).color(COLOR_GREEN).strong())
+                                        .fill(COLOR_BG_PANEL_ALT)
+                                        .stroke(Stroke::new(1.0_f32, COLOR_GREEN)),
+                                )
+                                .on_hover_text("Guarda en ~/.config/oxide-studio/copilot_keys.env (chmod 600, ignorado por Git)")
+                                .clicked()
+                            {
+                                let _ = app.ai_copilot.save_local_api_key();
+                            }
+                            if ui
+                                .add(
+                                    Button::new(RichText::new("Borrar").size(9.5).color(COLOR_TEXT_MUTED))
+                                        .fill(COLOR_BG_PANEL_ALT)
+                                        .stroke(Stroke::new(1.0_f32, COLOR_BORDER)),
+                                )
+                                .clicked()
+                            {
+                                app.ai_copilot.api_key.clear();
+                                let _ = app.ai_copilot.save_local_api_key();
+                            }
+                        });
+
+                        let footer_note = app
+                            .ai_copilot
+                            .key_status_msg
+                            .clone()
+                            .unwrap_or_else(|| {
+                                format!(
+                                    "Local only ({}): ~/.config/oxide-studio/copilot_keys.env",
+                                    app.ai_copilot.masked_key_preview()
+                                )
+                            });
+                        ui.label(RichText::new(footer_note).size(8.5).color(COLOR_TEXT_MUTED));
+                    });
+                });
+        }
 
         ui.separator();
 
@@ -479,147 +704,160 @@ pub fn render_ai_copilot_panel(ui: &mut Ui, app: &mut AbletonStudioApp) {
 
         ui.add_space(2.0);
 
-        // 3. Scrollable Chat Message History
-        let chat_avail_height = (ui.available_height() - 142.0).max(100.0);
-        ScrollArea::vertical()
-            .max_height(chat_avail_height)
-            .auto_shrink([false, false])
-            .stick_to_bottom(true)
-            .show(ui, |ui| {
-                ui.spacing_mut().item_spacing = vec2(0.0, 6.0);
+        // 3. Bottom-Up Docking: Allocates footer controls at bottom first, then gives 100% of remaining space to Chat History
+        ui.with_layout(Layout::bottom_up(Align::Min), |ui| {
+            ui.spacing_mut().item_spacing = vec2(0.0, 4.0);
+            ui.add_space(4.0);
 
-                for msg in &app.ai_copilot.messages {
-                    match msg.role {
-                        MessageRole::User => {
-                            ui.with_layout(Layout::right_to_left(Align::Min), |ui| {
-                                Frame::none()
-                                    .fill(Color32::from_rgb(0x13, 0x25, 0x3a))
-                                    .stroke(Stroke::new(1.0_f32, Color32::from_rgb(0x1f, 0x42, 0x66)))
-                                    .rounding(5.0)
-                                    .inner_margin(Margin::same(6.0))
-                                    .show(ui, |ui| {
-                                        ui.vertical(|ui| {
-                                            ui.label(
-                                                RichText::new(&msg.text)
-                                                    .size(11.0)
-                                                    .color(Color32::WHITE),
-                                            );
-                                            ui.label(
-                                                RichText::new(&msg.timestamp)
-                                                    .size(8.5)
-                                                    .color(COLOR_TEXT_MUTED),
-                                            );
-                                        });
-                                    });
-                            });
-                        }
-                        MessageRole::Assistant | MessageRole::System => {
-                            ui.with_layout(Layout::left_to_right(Align::Min), |ui| {
-                                Frame::none()
-                                    .fill(COLOR_BG_PANEL_ALT)
-                                    .stroke(Stroke::new(1.0_f32, COLOR_BORDER))
-                                    .rounding(5.0)
-                                    .inner_margin(Margin::same(6.0))
-                                    .show(ui, |ui| {
-                                        ui.vertical(|ui| {
-                                            ui.horizontal(|ui| {
-                                                ui.label(
-                                                    RichText::new("⚡ Copilot")
-                                                        .size(10.5)
-                                                        .color(COLOR_CYAN)
-                                                        .strong(),
-                                                );
-                                                ui.label(
-                                                    RichText::new(&msg.timestamp)
-                                                        .size(8.5)
-                                                        .color(COLOR_TEXT_MUTED),
-                                                );
-                                            });
+            // A. Bottom-most item: Prompt Input & Send Button (explicit height allocation in bottom_up)
+            ui.allocate_ui_with_layout(
+                vec2(ui.available_width(), 26.0),
+                Layout::left_to_right(Align::Center),
+                |ui| {
+                    ui.spacing_mut().item_spacing = vec2(4.0, 0.0);
+                    let input_width = (ui.available_width() - 54.0).max(110.0);
+                    let text_edit = TextEdit::singleline(&mut app.ai_copilot.prompt_input)
+                        .hint_text("Pedí al Copilot (ej: kick mas gordo)...")
+                        .desired_width(input_width);
 
-                                            ui.label(
-                                                RichText::new(&msg.text)
-                                                    .size(10.5)
-                                                    .color(COLOR_TEXT_PRIMARY),
-                                            );
+                    let response = ui.add(text_edit);
+                    let enter_pressed = response.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter));
 
-                                            if !msg.mcp_badges.is_empty() {
-                                                ui.add_space(2.0);
-                                                ui.horizontal_wrapped(|ui| {
-                                                    ui.spacing_mut().item_spacing = vec2(4.0, 2.0);
-                                                    for badge in &msg.mcp_badges {
-                                                        let badge_text = format!("[{}]", badge);
-                                                        let badge_btn = Button::new(
-                                                            RichText::new(badge_text)
-                                                                .size(9.0)
-                                                                .monospace()
-                                                                .color(COLOR_AMBER),
-                                                        )
-                                                        .fill(Color32::from_rgb(0x18, 0x22, 0x18))
-                                                        .stroke(Stroke::new(1.0_f32, Color32::from_rgb(0x28, 0x48, 0x28)));
+                    let send_btn = Button::new(RichText::new("▶").size(11.0).color(COLOR_CYAN).strong())
+                        .min_size(vec2(44.0, 22.0))
+                        .fill(COLOR_BG_PANEL_ALT)
+                        .stroke(Stroke::new(1.0_f32, COLOR_CYAN));
 
-                                                        if ui.add(badge_btn).on_hover_text("MCP Tool Executed").clicked() {
-                                                            ui.output_mut(|o| o.copied_text = badge.clone());
-                                                        }
-                                                    }
-                                                });
-                                            }
-                                        });
-                                    });
-                            });
+                    if (ui.add(send_btn).clicked() || enter_pressed) && !app.ai_copilot.prompt_input.trim().is_empty() {
+                        prompt_to_send = Some(app.ai_copilot.prompt_input.clone());
+                    }
+                },
+            );
+
+            // B. Quick-Prompt Producer Chips (explicit 46px height allocation in bottom_up)
+            ui.allocate_ui_with_layout(
+                vec2(ui.available_width(), 46.0),
+                Layout::left_to_right(Align::Min).with_main_wrap(true),
+                |ui| {
+                    ui.spacing_mut().item_spacing = vec2(3.0, 3.0);
+
+                    let chips = [
+                        ("■ Kick +Gordo", "hace este kick mas gordo"),
+                        ("⚡ Bajo Acid 303", "dale mas acido al bajo"),
+                        ("▶ Drop Techno 136", "arma un drop de techno a 136 bpm"),
+                        ("★ Groove RKT", "mete un patron de rkt / cachengue"),
+                        ("⚙ Abrir filtro + OTT", "limpia el barro y abre el filtro"),
+                    ];
+
+                    for (label, intent) in chips {
+                        let chip_btn = Button::new(
+                            RichText::new(label)
+                                .size(9.5)
+                                .color(COLOR_TEXT_PRIMARY),
+                        )
+                        .fill(COLOR_BG_PANEL_ALT)
+                        .stroke(Stroke::new(1.0_f32, COLOR_BORDER));
+
+                        if ui.add(chip_btn).clicked() {
+                            prompt_to_send = Some(intent.to_string());
                         }
                     }
-                }
+                },
+            );
+
+            ui.separator();
+
+            // C. Scrollable Chat Message History (Flex-fills 100% of available vertical space above footer)
+            ui.with_layout(Layout::top_down(Align::Min), |ui| {
+                ScrollArea::vertical()
+                    .auto_shrink([false, false])
+                    .stick_to_bottom(true)
+                    .show(ui, |ui| {
+                        ui.spacing_mut().item_spacing = vec2(0.0, 6.0);
+
+                        for msg in &app.ai_copilot.messages {
+                            match msg.role {
+                                MessageRole::User => {
+                                    ui.with_layout(Layout::right_to_left(Align::Min), |ui| {
+                                        Frame::none()
+                                            .fill(Color32::from_rgb(0x13, 0x25, 0x3a))
+                                            .stroke(Stroke::new(1.0_f32, Color32::from_rgb(0x1f, 0x42, 0x66)))
+                                            .rounding(5.0)
+                                            .inner_margin(Margin::same(6.0))
+                                            .show(ui, |ui| {
+                                                ui.vertical(|ui| {
+                                                    ui.label(
+                                                        RichText::new(&msg.text)
+                                                            .size(11.0)
+                                                            .color(Color32::WHITE),
+                                                    );
+                                                    ui.label(
+                                                        RichText::new(&msg.timestamp)
+                                                            .size(8.5)
+                                                            .color(COLOR_TEXT_MUTED),
+                                                    );
+                                                });
+                                            });
+                                    });
+                                }
+                                MessageRole::Assistant | MessageRole::System => {
+                                    ui.with_layout(Layout::left_to_right(Align::Min), |ui| {
+                                        Frame::none()
+                                            .fill(COLOR_BG_PANEL_ALT)
+                                            .stroke(Stroke::new(1.0_f32, COLOR_BORDER))
+                                            .rounding(5.0)
+                                            .inner_margin(Margin::same(6.0))
+                                            .show(ui, |ui| {
+                                                ui.vertical(|ui| {
+                                                    ui.horizontal(|ui| {
+                                                        ui.label(
+                                                            RichText::new("⚡ Copilot")
+                                                                .size(10.5)
+                                                                .color(COLOR_CYAN)
+                                                                .strong(),
+                                                        );
+                                                        ui.label(
+                                                            RichText::new(&msg.timestamp)
+                                                                .size(8.5)
+                                                                .color(COLOR_TEXT_MUTED),
+                                                        );
+                                                    });
+
+                                                    ui.label(
+                                                        RichText::new(&msg.text)
+                                                            .size(10.5)
+                                                            .color(COLOR_TEXT_PRIMARY),
+                                                    );
+
+                                                    if !msg.mcp_badges.is_empty() {
+                                                        ui.add_space(2.0);
+                                                        ui.horizontal_wrapped(|ui| {
+                                                            ui.spacing_mut().item_spacing = vec2(4.0, 2.0);
+                                                            for badge in &msg.mcp_badges {
+                                                                let badge_text = format!("[{}]", badge);
+                                                                let badge_btn = Button::new(
+                                                                    RichText::new(badge_text)
+                                                                        .size(9.0)
+                                                                        .monospace()
+                                                                        .color(COLOR_AMBER),
+                                                                )
+                                                                .fill(Color32::from_rgb(0x18, 0x22, 0x18))
+                                                                .stroke(Stroke::new(1.0_f32, Color32::from_rgb(0x28, 0x48, 0x28)));
+
+                                                                if ui.add(badge_btn).on_hover_text("MCP Tool Executed").clicked() {
+                                                                    ui.output_mut(|o| o.copied_text = badge.clone());
+                                                                }
+                                                            }
+                                                        });
+                                                    }
+                                                });
+                                            });
+                                    });
+                                }
+                            }
+                        }
+                    });
             });
-
-        ui.separator();
-
-        // 4. Quick-Prompt Producer Chips
-        ui.horizontal_wrapped(|ui| {
-            ui.spacing_mut().item_spacing = vec2(3.0, 3.0);
-
-            let chips = [
-                ("■ Hacer este Kick más gordo", "hace este kick mas gordo"),
-                ("⚡ Bajo Acid 303 picante", "dale mas acido al bajo"),
-                ("▶ Drop Techno 136 BPM", "arma un drop de techno a 136 bpm"),
-                ("★ Grooves RKT / Turreo", "mete un patron de rkt / cachengue"),
-                ("⚙ Abrir filtro + OTT", "limpia el barro y abre el filtro"),
-            ];
-
-            for (label, intent) in chips {
-                let chip_btn = Button::new(
-                    RichText::new(label)
-                        .size(10.0)
-                        .color(COLOR_TEXT_PRIMARY),
-                )
-                .fill(COLOR_BG_PANEL_ALT)
-                .stroke(Stroke::new(1.0_f32, COLOR_BORDER));
-
-                if ui.add(chip_btn).clicked() {
-                    prompt_to_send = Some(intent.to_string());
-                }
-            }
-        });
-
-        ui.add_space(3.0);
-
-        // 5. Prompt Input & Send Button
-        ui.horizontal(|ui| {
-            let input_width = (ui.available_width() - 56.0).max(120.0);
-            let text_edit = TextEdit::singleline(&mut app.ai_copilot.prompt_input)
-                .hint_text("Pedí al Copilot (ej: kick mas gordo)...")
-                .desired_width(input_width);
-
-            let response = ui.add(text_edit);
-            let enter_pressed = response.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter));
-
-            let send_btn = Button::new(RichText::new("▶").size(11.0).color(COLOR_CYAN).strong())
-                .min_size(vec2(48.0, 24.0))
-                .fill(COLOR_BG_PANEL_ALT)
-                .stroke(Stroke::new(1.0_f32, COLOR_CYAN));
-
-            if (ui.add(send_btn).clicked() || enter_pressed) && !app.ai_copilot.prompt_input.trim().is_empty() {
-                prompt_to_send = Some(app.ai_copilot.prompt_input.clone());
-            }
         });
     });
 
@@ -788,5 +1026,45 @@ mod tests {
         } else {
             panic!("Expected Drum pattern in slot 0");
         }
+    }
+
+    #[test]
+    fn test_render_ai_copilot_panel_headless_bottom_up() {
+        let ctx = egui::Context::default();
+        let raw_input = egui::RawInput::default();
+        let mut app = AbletonStudioApp::new_mock(44100.0);
+        app.copilot_open = true;
+
+        // Render at different panel heights to verify bottom-up flex-fill
+        for &height in &[600.0_f32, 800.0, 900.0, 1080.0] {
+            let full_output = ctx.run(raw_input.clone(), |ctx| {
+                egui::SidePanel::right("aruston_ai_copilot_panel")
+                    .exact_width(280.0)
+                    .show(ctx, |ui| {
+                        ui.set_height(height);
+                        render_ai_copilot_panel(ui, &mut app);
+                    });
+            });
+            assert!(!full_output.shapes.is_empty());
+        }
+    }
+
+    #[test]
+    fn test_ai_copilot_local_key_masking_and_provider_env() {
+        let mut state = AiCopilotState::new();
+        assert_eq!(state.provider, AiProvider::Gemini);
+        assert_eq!(state.provider.env_var_name(), "GEMINI_API_KEY");
+        assert_eq!(AiProvider::Anthropic.env_var_name(), "ANTHROPIC_API_KEY");
+        assert_eq!(AiProvider::OpenAi.env_var_name(), "OPENAI_API_KEY");
+
+        state.api_key = String::new();
+        assert_eq!(state.masked_key_preview(), "No Key");
+
+        state.api_key = "AIzaSyTest1234567890abcd".to_string();
+        assert_eq!(state.masked_key_preview(), "AIza•••abcd");
+
+        // Ensure key file path is in ~/.config/oxide-studio outside the repository
+        let p = AiCopilotState::local_key_file_path();
+        assert!(p.to_string_lossy().contains(".config/oxide-studio/copilot_keys.env"));
     }
 }

@@ -95,6 +95,10 @@ pub struct AbletonStudioApp {
     pub timeline_gui: TimelineGuiState,
 
     pub clip_view: ClipViewState,
+    pub selected_track: usize,
+    pub selected_clip_slot: Option<(usize, usize)>, // (track_idx, slot_idx)
+    pub selected_arrangement_clip: Option<(usize, usize)>, // (track_idx, clip_idx)
+    pub track_device_chains: Vec<DeviceChainViewState>,
     pub device_chain: DeviceChainViewState,
 
     pub keyboard: ComputerKeyboardController,
@@ -299,6 +303,13 @@ impl AbletonStudioApp {
             },
         ];
 
+        let track_device_chains = vec![
+            DeviceChainViewState::for_track_1(),
+            DeviceChainViewState::for_track_2(),
+            DeviceChainViewState::for_track_3(),
+        ];
+        let device_chain = track_device_chains[0].clone();
+
         Self {
             audio_handle: None,
             mock_processor: None,
@@ -325,7 +336,11 @@ impl AbletonStudioApp {
             timeline,
             timeline_gui: TimelineGuiState::default(),
             clip_view: ClipViewState::default(),
-            device_chain: DeviceChainViewState::default(),
+            selected_track: 0,
+            selected_clip_slot: Some((0, 0)),
+            selected_arrangement_clip: None,
+            track_device_chains,
+            device_chain,
             keyboard: ComputerKeyboardController::new(),
             synth_state: SynthControlsState::default(),
             drum_pattern,
@@ -343,6 +358,129 @@ impl AbletonStudioApp {
             shortcuts: crate::shortcuts::StudioShortcutManager::new(),
             rpc_server: crate::live_rpc::ArustonGuiRpcServer::new_disabled(),
             export_status: None,
+        }
+    }
+
+    /// Ensures `track_device_chains` has an entry for `track_idx`, dynamically allocating one if needed.
+    pub fn ensure_track_device_chain(&mut self, track_idx: usize) {
+        while self.track_device_chains.len() <= track_idx {
+            let idx = self.track_device_chains.len();
+            let is_drum = idx == 1
+                || (idx < self.tracks_gui.len()
+                    && self.tracks_gui[idx].name.to_lowercase().contains("drum"));
+            self.track_device_chains
+                .push(DeviceChainViewState::default_for_track(idx, is_drum));
+        }
+    }
+
+    /// Selects an active track by index, synchronizing device chains and deck view tab.
+    pub fn select_track(&mut self, track_idx: usize) {
+        let max_tracks = self
+            .tracks_gui
+            .len()
+            .max(self.matrix.tracks.len())
+            .max(self.track_device_chains.len());
+        if track_idx < max_tracks {
+            // Persist current active device chain into previous track slot
+            if self.selected_track < self.track_device_chains.len() {
+                self.track_device_chains[self.selected_track] = self.device_chain.clone();
+            }
+
+            self.selected_track = track_idx;
+            self.ensure_track_device_chain(track_idx);
+
+            // Load the selected track's independent chain
+            self.device_chain = self.track_device_chains[track_idx].clone();
+
+            // Auto-switch bottom tab when selecting Drum vs Synth track
+            if track_idx == 1 {
+                if self.deck_tab == DeckTab::ClipView {
+                    self.deck_tab = DeckTab::DrumSequencer;
+                }
+            } else if self.deck_tab == DeckTab::DrumSequencer {
+                self.deck_tab = DeckTab::ClipView;
+            }
+
+            self.sync_active_clip_to_deck();
+        }
+    }
+
+    /// Selects an active clip slot in the Session Matrix, loading its pattern into the bottom deck.
+    pub fn select_session_clip(&mut self, track_idx: usize, slot_idx: usize) {
+        self.selected_clip_slot = Some((track_idx, slot_idx));
+        self.select_track(track_idx);
+        self.sync_active_clip_to_deck();
+    }
+
+    /// Selects an active clip in the Arrangement Timeline, loading its pattern into the bottom deck.
+    pub fn select_arrangement_clip(&mut self, track_idx: usize, clip_idx: usize) {
+        self.selected_arrangement_clip = Some((track_idx, clip_idx));
+        self.timeline_gui.selected_clip = Some((track_idx, clip_idx));
+        self.select_track(track_idx);
+        if let Some(track) = self.timeline.tracks.get(track_idx) {
+            if let Some(clip) = track.clips.get(clip_idx) {
+                match &clip.pattern {
+                    ClipPattern::Midi(pat) => {
+                        self.midi_pattern = pat.clone();
+                    }
+                    ClipPattern::Drum(pat) => {
+                        self.drum_pattern = pat.clone();
+                    }
+                    ClipPattern::Audio(_) => {}
+                }
+            }
+        }
+    }
+
+    /// Synchronizes the selected clip's pattern from the Session Matrix into the bottom deck.
+    pub fn sync_active_clip_to_deck(&mut self) {
+        let trk = self.selected_track;
+        let slot = self.selected_clip_slot.map(|(_, s)| s).unwrap_or(0);
+        if let Some(track) = self.matrix.tracks.get(trk) {
+            if let Some(s) = track.slots.get(slot) {
+                if let Some(ref clip) = s.clip {
+                    match &clip.pattern {
+                        ClipPattern::Midi(pat) => {
+                            self.midi_pattern = pat.clone();
+                        }
+                        ClipPattern::Drum(pat) => {
+                            self.drum_pattern = pat.clone();
+                        }
+                        ClipPattern::Audio(_) => {}
+                    }
+                }
+            }
+        }
+    }
+
+    /// Bidirectional write-back: writes active Piano Roll or Drum Sequencer pattern edits back to the active Session & Arrangement clip.
+    pub fn write_back_active_clip(&mut self) {
+        let trk = self.selected_track;
+        let slot = self.selected_clip_slot.map(|(_, s)| s).unwrap_or(0);
+        if let Some(track) = self.matrix.tracks.get_mut(trk) {
+            if let Some(s) = track.slots.get_mut(slot) {
+                if let Some(ref mut clip) = s.clip {
+                    if trk == 1 {
+                        clip.pattern = ClipPattern::Drum(self.drum_pattern.clone());
+                    } else {
+                        clip.pattern = ClipPattern::Midi(self.midi_pattern.clone());
+                    }
+                }
+            }
+        }
+
+        if let Some((arr_trk, arr_clip)) = self.selected_arrangement_clip {
+            if arr_trk == trk {
+                if let Some(track) = self.timeline.tracks.get_mut(arr_trk) {
+                    if let Some(clip) = track.clips.get_mut(arr_clip) {
+                        if trk == 1 {
+                            clip.pattern = ClipPattern::Drum(self.drum_pattern.clone());
+                        } else {
+                            clip.pattern = ClipPattern::Midi(self.midi_pattern.clone());
+                        }
+                    }
+                }
+            }
         }
     }
 
@@ -564,6 +702,9 @@ impl AbletonStudioApp {
                     self.device_chain
                         .devices
                         .push(GuiDeviceModule::new(new_id, kind));
+                    if self.selected_track < self.track_device_chains.len() {
+                        self.track_device_chains[self.selected_track] = self.device_chain.clone();
+                    }
                     self.status_message = format!("Loaded: {}", item.name);
                 } else {
                     self.status_message = format!("Selected: {}", item.name);
@@ -699,6 +840,11 @@ impl AbletonStudioApp {
     ) {
         self.current_time_seconds = ctx.input(|i| i.time);
 
+        ctx.data_mut(|d| {
+            d.insert_temp(egui::Id::new("aruston_selected_track"), self.selected_track);
+            d.insert_temp(egui::Id::new("aruston_selected_slot"), self.selected_clip_slot);
+        });
+
         // 1. Poll real-time audio telemetry & live GUI RPC
         self.poll_audio();
         let rpc_handled = self.poll_rpc();
@@ -756,6 +902,7 @@ impl AbletonStudioApp {
                         monitor_mode: "Auto".into(),
                         crossfader_assign: CrossfaderAssign::Off,
                     });
+                    self.track_device_chains.push(DeviceChainViewState::default_for_track(track_id, false));
                     self.status_message = format!("Inserted {}", name);
                 }
                 crate::shortcuts::StudioShortcutAction::NewMidiTrack => {
@@ -775,6 +922,7 @@ impl AbletonStudioApp {
                         monitor_mode: "Auto".into(),
                         crossfader_assign: CrossfaderAssign::Off,
                     });
+                    self.track_device_chains.push(DeviceChainViewState::default_for_track(track_id, false));
                     self.status_message = format!("Inserted {}", name);
                 }
                 crate::shortcuts::StudioShortcutAction::NewReturnTrack => {
@@ -793,7 +941,7 @@ impl AbletonStudioApp {
                     self.status_message = format!("Inserted {}", ret_name);
                 }
                 crate::shortcuts::StudioShortcutAction::NewMidiClip => {
-                    let sel_track = ctx.data(|d| d.get_temp::<usize>(egui::Id::new("aruston_selected_track"))).unwrap_or(0);
+                    let sel_track = self.selected_track;
                     if let Some(track) = self.matrix.tracks.get_mut(sel_track) {
                         let clip_id = (track.slots.len() as u32) + 1;
                         if let Some(slot) = track.slots.get_mut(0) {
@@ -808,7 +956,7 @@ impl AbletonStudioApp {
                     }
                 }
                 crate::shortcuts::StudioShortcutAction::DuplicateSelected => {
-                    let sel_track = ctx.data(|d| d.get_temp::<usize>(egui::Id::new("aruston_selected_track"))).unwrap_or(0);
+                    let sel_track = self.selected_track;
                     if sel_track < self.matrix.tracks.len() {
                         let orig_track = self.matrix.tracks[sel_track].clone();
                         let orig_gui = self.tracks_gui[sel_track].clone();
@@ -820,6 +968,8 @@ impl AbletonStudioApp {
                         dup_gui.name = dup_track.name.clone();
                         self.matrix.tracks.push(dup_track);
                         self.tracks_gui.push(dup_gui);
+                        let dup_chain = self.track_device_chains.get(sel_track).cloned().unwrap_or_else(|| DeviceChainViewState::default_for_track(new_id, false));
+                        self.track_device_chains.push(dup_chain);
                         self.status_message = format!("Duplicated Track {}", sel_track + 1);
                     }
                 }
@@ -846,14 +996,14 @@ impl AbletonStudioApp {
                     self.status_message = "Stems exported to /tmp/oxide_stems/".into();
                 }
                 crate::shortcuts::StudioShortcutAction::ToggleMuteSelected => {
-                    let sel_track = ctx.data(|d| d.get_temp::<usize>(egui::Id::new("aruston_selected_track"))).unwrap_or(0);
+                    let sel_track = self.selected_track;
                     if let Some(trk) = self.tracks_gui.get_mut(sel_track) {
                         trk.mute = !trk.mute;
                         self.status_message = format!("Track {} Mute: {}", sel_track + 1, trk.mute);
                     }
                 }
                 crate::shortcuts::StudioShortcutAction::ToggleSoloSelected => {
-                    let sel_track = ctx.data(|d| d.get_temp::<usize>(egui::Id::new("aruston_selected_track"))).unwrap_or(0);
+                    let sel_track = self.selected_track;
                     if let Some(trk) = self.tracks_gui.get_mut(sel_track) {
                         trk.solo = !trk.solo;
                         self.status_message = format!("Track {} Solo: {}", sel_track + 1, trk.solo);
@@ -1095,8 +1245,20 @@ impl AbletonStudioApp {
                             &self.global_scale,
                             self.current_beat,
                         );
-                        if clip_act.pattern_mutated {
+                        if let Some((note, vel)) = clip_act.audition_note {
+                            let sel_track = self.selected_track;
+                            self.send_command(AudioCommand::NoteOn {
+                                track_id: sel_track,
+                                note,
+                                velocity: vel,
+                            });
+                        }
+                        if let Some(new_len) = clip_act.loop_length_changed {
+                            self.status_message = format!("Clip Loop Length: {:.0} Beats", new_len);
+                            self.write_back_active_clip();
+                        } else if clip_act.pattern_mutated {
                             self.status_message = "MIDI Pattern Updated via Live 12 Tool".into();
+                            self.write_back_active_clip();
                         } else if clip_act.warp_marker_moved {
                             self.status_message = "Audio Warp Marker Adjusted".into();
                         }
@@ -1107,6 +1269,9 @@ impl AbletonStudioApp {
                             &mut self.device_chain,
                             &self.telemetry.spectrum_bins,
                         );
+                        if self.selected_track < self.track_device_chains.len() {
+                            self.track_device_chains[self.selected_track] = self.device_chain.clone();
+                        }
                         if let Some(kind) = dev_act.insert_device {
                             self.status_message = format!("Inserted Device: {}", kind.name());
                         } else if let Some(idx) = dev_act.device_parameter_changed {
@@ -1128,6 +1293,10 @@ impl AbletonStudioApp {
                                 note: 36 + pad_idx,
                                 velocity: 110,
                             });
+                        }
+
+                        if seq_action.pattern_mutated || seq_action.step_toggled.is_some() {
+                            self.write_back_active_clip();
                         }
 
                         ui.add_space(6.0);
@@ -1245,6 +1414,11 @@ impl AbletonStudioApp {
                         self.send_command(AudioCommand::TriggerScene(scene));
                         self.has_session_override = true;
                     }
+                    if let Some((trk, slot)) = action.clip_selected {
+                        self.select_session_clip(trk, slot);
+                    } else if let Some(trk) = action.track_selected {
+                        self.select_track(trk);
+                    }
                     if let Some(sel) = ui.data_mut(|d| {
                         d.get_temp::<usize>(egui::Id::new("aruston_selected_track"))
                     }) {
@@ -1265,6 +1439,11 @@ impl AbletonStudioApp {
                         self.has_session_override,
                     );
 
+                    if let Some((trk, clip_idx)) = action.clip_selected {
+                        self.select_arrangement_clip(trk, clip_idx);
+                    } else if let Some(trk) = action.track_selected {
+                        self.select_track(trk);
+                    }
                     if action.back_to_arrangement {
                         self.has_session_override = false;
                         for track in &mut self.matrix.tracks {
@@ -1370,5 +1549,86 @@ mod tests {
     #[test]
     fn test_workspace_view_arrangement_alias() {
         assert_eq!(WorkspaceView::Arrangement, WorkspaceView::ArrangementTimeline);
+    }
+
+    #[test]
+    fn test_per_track_device_chains_switching_and_isolation() {
+        let mut app = AbletonStudioApp::new_mock(44100.0);
+        assert_eq!(app.track_device_chains.len(), 3);
+        assert_eq!(app.selected_track, 0);
+        assert_eq!(app.device_chain.devices[0].kind, DeviceKind::Wavetable);
+        assert_eq!(app.deck_tab, DeckTab::ClipView);
+
+        // Select Track 1 (909 House Kit)
+        app.select_track(1);
+        assert_eq!(app.selected_track, 1);
+        assert_eq!(app.deck_tab, DeckTab::DrumSequencer);
+        assert_eq!(app.device_chain.devices[0].kind, DeviceKind::DrumRack);
+
+        // Select Track 2 (Offbeat Sub Bass)
+        app.select_track(2);
+        assert_eq!(app.selected_track, 2);
+        assert_eq!(app.deck_tab, DeckTab::ClipView);
+        assert_eq!(app.device_chain.devices[0].kind, DeviceKind::Operator);
+
+        // Modify device chain on Track 2, switch back to Track 0, verify isolation
+        app.device_chain.devices[0].is_enabled = false;
+        app.select_track(0);
+        assert_eq!(app.selected_track, 0);
+        assert!(app.device_chain.devices[0].is_enabled); // Track 0 Wavetable is enabled
+        assert!(!app.track_device_chains[2].devices[0].is_enabled); // Track 2 Operator was saved as disabled
+    }
+
+    #[test]
+    fn test_track_and_clip_synchronization_and_write_back() {
+        let mut app = AbletonStudioApp::new_mock(44100.0);
+
+        // Select session clip on track 0
+        app.select_session_clip(0, 0);
+        assert_eq!(app.selected_track, 0);
+        assert_eq!(app.selected_clip_slot, Some((0, 0)));
+        assert!(!app.midi_pattern.notes.is_empty());
+
+        // Mutate midi_pattern in piano roll
+        let initial_count = app.midi_pattern.notes.len();
+        app.midi_pattern.notes.push(MidiNote::new(60, 100, 4.0, 1.0));
+        app.write_back_active_clip();
+
+        // Verify write back to SessionMatrix
+        let session_clip = app.matrix.tracks[0].slots[0].clip.as_ref().unwrap();
+        if let ClipPattern::Midi(ref pat) = session_clip.pattern {
+            assert_eq!(pat.notes.len(), initial_count + 1);
+        } else {
+            panic!("Expected Midi clip pattern");
+        }
+
+        // Select Drum clip on track 1
+        app.select_session_clip(1, 0);
+        assert_eq!(app.selected_track, 1);
+        assert_eq!(app.deck_tab, DeckTab::DrumSequencer);
+
+        // Mutate drum_pattern in sequencer
+        app.drum_pattern.tracks[0].steps[1].active = true;
+        app.drum_pattern.tracks[0].steps[1].velocity = 127;
+        app.write_back_active_clip();
+
+        // Verify write back to SessionMatrix
+        let drum_clip = app.matrix.tracks[1].slots[0].clip.as_ref().unwrap();
+        if let ClipPattern::Drum(ref pat) = drum_clip.pattern {
+            assert!(pat.tracks[0].steps[1].active);
+            assert_eq!(pat.tracks[0].steps[1].velocity, 127);
+        } else {
+            panic!("Expected Drum clip pattern");
+        }
+    }
+
+    #[test]
+    fn test_dynamic_track_chain_allocation() {
+        let mut app = AbletonStudioApp::new_mock(44100.0);
+        assert_eq!(app.track_device_chains.len(), 3);
+
+        app.ensure_track_device_chain(5);
+        assert!(app.track_device_chains.len() >= 6);
+        assert_eq!(app.track_device_chains[5].devices[0].kind, DeviceKind::Wavetable);
     }
 }

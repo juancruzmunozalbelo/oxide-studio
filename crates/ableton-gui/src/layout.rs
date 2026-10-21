@@ -10,9 +10,43 @@
 //!   strictly enforcing `clips_scroll_height >= 110.0` px regardless of how
 //!   many mixer sections are toggled on.
 
-use egui::{pos2, Id, InnerResponse, Rect, Ui, UiBuilder, Vec2};
+use egui::{pos2, vec2, CursorIcon, Id, InnerResponse, Rect, Sense, Stroke, Ui, UiBuilder, Vec2};
 
 use crate::panels::SessionMixerSections;
+use crate::theme::{COLOR_AMBER, COLOR_BORDER, COLOR_DIVIDER};
+
+/// State tracking interactive dragging and override of the horizontal studio splitter.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct StudioSplitterState {
+    pub bottom_deck_height: f32,
+    pub is_dragging: bool,
+    pub is_overridden: bool,
+}
+
+impl StudioSplitterState {
+    pub fn new(default_height: f32) -> Self {
+        Self {
+            bottom_deck_height: default_height,
+            is_dragging: false,
+            is_overridden: false,
+        }
+    }
+
+    /// Senses drag delta (in screen coordinates) and clamps height to safe bounds.
+    /// Dragging upwards (negative delta_y in screen coordinates) increases bottom deck height.
+    pub fn drag(&mut self, delta_y: f32, min_h: f32, max_h: f32) {
+        self.bottom_deck_height = (self.bottom_deck_height - delta_y).clamp(min_h, max_h);
+        self.is_overridden = true;
+        self.is_dragging = true;
+    }
+
+    /// Reset height to default calculated budget.
+    pub fn reset(&mut self, default_height: f32) {
+        self.bottom_deck_height = default_height;
+        self.is_overridden = false;
+        self.is_dragging = false;
+    }
+}
 
 /// Deterministic, non-overlapping viewport budget computed from root window Rect.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -27,8 +61,23 @@ pub struct ViewportBudget {
 }
 
 impl ViewportBudget {
-    /// Compute deterministic pixel budgets for all studio panels from the root window rect.
-    pub fn compute(screen_rect: Rect, browser_open: bool, copilot_open: bool) -> Self {
+    /// Safe budget bounds for bottom detail deck height:
+    /// - Center workspace height guaranteed >= 55% of window height: deck_h <= 0.45 * total_h - 44.0
+    /// - Bottom deck height strictly <= 34% of window height: deck_h <= 0.34 * total_h
+    /// - Usability floor: 180.0 px
+    pub fn safe_deck_bounds(total_h: f32) -> (f32, f32) {
+        let max_allowed = (total_h * 0.34).min(total_h * 0.45 - 44.0);
+        let min_allowed = 180.0_f32.min(max_allowed);
+        (min_allowed, max_allowed)
+    }
+
+    /// Compute deterministic pixel budgets for all studio panels with an optional deck height override.
+    pub fn compute_with_deck_height(
+        screen_rect: Rect,
+        browser_open: bool,
+        copilot_open: bool,
+        deck_height_override: Option<f32>,
+    ) -> Self {
         let total_w = screen_rect.width();
         let total_h = screen_rect.height();
 
@@ -52,9 +101,14 @@ impl ViewportBudget {
         // 4. Center workspace width receives all remaining horizontal space
         let center_width = (total_w - left_browser_width - right_copilot_width).max(0.0);
 
-        // 5. Bottom deck: 210.0..=270.0 px, strictly <= 34% of window height
-        let max_deck_h = total_h * 0.34;
-        let bottom_deck_height = (total_h * 0.33).clamp(210.0, 270.0).min(max_deck_h);
+        // 5. Bottom deck: safe clamped bounds
+        let (min_deck_h, max_deck_h) = Self::safe_deck_bounds(total_h);
+        let default_deck_height = (total_h * 0.33).clamp(210.0, 270.0).min(total_h * 0.34).clamp(min_deck_h, max_deck_h);
+
+        let bottom_deck_height = match deck_height_override {
+            Some(user_h) => user_h.clamp(min_deck_h, max_deck_h),
+            None => default_deck_height,
+        };
 
         // 6. Center workspace height receives >= 55% of window height
         let center_height = (total_h - top_bar_height - bottom_deck_height).max(0.0);
@@ -68,6 +122,11 @@ impl ViewportBudget {
             center_width,
             center_height,
         }
+    }
+
+    /// Compute deterministic pixel budgets for all studio panels from the root window rect.
+    pub fn compute(screen_rect: Rect, browser_open: bool, copilot_open: bool) -> Self {
+        Self::compute_with_deck_height(screen_rect, browser_open, copilot_open, None)
     }
 
     /// Split center workspace for the Session Matrix using the budget's center height.
@@ -214,6 +273,105 @@ impl SplitRegion {
     }
 }
 
+/// Interactive horizontal splitter separating Center Workspace from Bottom Detail Deck.
+/// - Senses vertical dragging and updates `bottom_deck_height`
+/// - Clamped strictly to safe bounds: `[180.0, (total_h * 0.34).min(total_h * 0.45 - 44.0)]`
+/// - Guarantees `center_height >= 55%` and `bottom_deck <= 34%`
+/// - Double-clicking resets height to default budget height
+/// - Hovering or dragging displays `CursorIcon::ResizeVertical`
+pub struct StudioHorizontalSplitter;
+
+impl StudioHorizontalSplitter {
+    pub const SPLITTER_HEIGHT: f32 = 6.0;
+
+    /// Show the horizontal splitter given mutable height and default reset height.
+    /// Senses drag and double-click interactions.
+    pub fn show(
+        ui: &mut Ui,
+        current_height: &mut f32,
+        default_height: f32,
+        min_h: f32,
+        max_h: f32,
+        is_overridden: &mut bool,
+    ) -> egui::Response {
+        let (rect, response) = ui.allocate_exact_size(
+            vec2(ui.available_width(), Self::SPLITTER_HEIGHT),
+            Sense::click_and_drag(),
+        );
+
+        if response.hovered() || response.dragged() {
+            ui.output_mut(|o| o.cursor_icon = CursorIcon::ResizeVertical);
+        }
+
+        // Dragging upwards (negative delta_y in screen space) increases bottom deck height
+        if response.dragged() {
+            let delta_y = response.drag_delta().y;
+            *current_height = (*current_height - delta_y).clamp(min_h, max_h);
+            *is_overridden = true;
+        }
+
+        // Double-click resets to default calculated budget
+        if response.double_clicked() {
+            *current_height = default_height;
+            *is_overridden = false;
+        }
+
+        if ui.is_rect_visible(rect) {
+            let painter = ui.painter();
+            // Subtle carbon hairline
+            painter.line_segment(
+                [pos2(rect.left(), rect.center().y), pos2(rect.right(), rect.center().y)],
+                Stroke::new(1.0_f32, COLOR_BORDER),
+            );
+            // Center grab pill
+            let pill_color = if response.dragged() || response.hovered() {
+                COLOR_AMBER
+            } else {
+                COLOR_DIVIDER
+            };
+            let pill_rect = Rect::from_center_size(rect.center(), vec2(36.0, 3.0));
+            painter.rect_filled(pill_rect, 1.5, pill_color);
+        }
+
+        response
+    }
+
+    /// Convenience display method with state stored under `egui::Id`.
+    pub fn show_with_state(
+        ui: &mut Ui,
+        id: Id,
+        screen_height: f32,
+    ) -> (f32, egui::Response) {
+        let (min_h, max_h) = ViewportBudget::safe_deck_bounds(screen_height);
+        let default_h = (screen_height * 0.33)
+            .clamp(210.0, 270.0)
+            .min(screen_height * 0.34)
+            .clamp(min_h, max_h);
+
+        let mut state = ui.data_mut(|d| {
+            d.get_temp::<StudioSplitterState>(id)
+                .unwrap_or_else(|| StudioSplitterState::new(default_h))
+        });
+
+        let mut current_h = if state.is_overridden {
+            state.bottom_deck_height.clamp(min_h, max_h)
+        } else {
+            default_h
+        };
+        let mut overridden = state.is_overridden;
+
+        let response = Self::show(ui, &mut current_h, default_h, min_h, max_h, &mut overridden);
+
+        state.bottom_deck_height = current_h;
+        state.is_dragging = response.dragged();
+        state.is_overridden = overridden;
+
+        ui.data_mut(|d| d.insert_temp(id, state));
+
+        (current_h, response)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -225,6 +383,7 @@ mod tests {
         let resolutions = [
             ("Compact Laptop 960x600", vec2(960.0, 600.0)),
             ("Standard MacBook 1280x800", vec2(1280.0, 800.0)),
+            ("Default Retina MacBook 1440x900", vec2(1440.0, 900.0)),
             ("Studio Display 1920x1080", vec2(1920.0, 1080.0)),
         ];
 
@@ -333,5 +492,87 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn test_studio_horizontal_splitter_state_drag_and_reset() {
+        let (min_h, max_h) = ViewportBudget::safe_deck_bounds(900.0);
+        let default_h = 240.0;
+        let mut state = StudioSplitterState::new(default_h);
+        assert_eq!(state.bottom_deck_height, default_h);
+        assert!(!state.is_dragging);
+        assert!(!state.is_overridden);
+
+        // Drag upwards by 30px (delta_y = -30.0) -> height becomes 270.0
+        state.drag(-30.0, min_h, max_h);
+        assert_eq!(state.bottom_deck_height, 270.0);
+        assert!(state.is_overridden);
+        assert!(state.is_dragging);
+
+        // Drag downwards excessively (delta_y = 500.0) -> clamps to floor min_h (180.0)
+        state.drag(500.0, min_h, max_h);
+        assert_eq!(state.bottom_deck_height, min_h);
+
+        // Drag upwards excessively (delta_y = -1000.0) -> clamps to ceiling max_h
+        state.drag(-1000.0, min_h, max_h);
+        assert_eq!(state.bottom_deck_height, max_h);
+
+        // Reset restores default height
+        state.reset(default_h);
+        assert_eq!(state.bottom_deck_height, default_h);
+        assert!(!state.is_overridden);
+        assert!(!state.is_dragging);
+    }
+
+    #[test]
+    fn test_safe_deck_bounds_across_all_standard_screens() {
+        let screens = [600.0_f32, 800.0, 900.0, 1080.0, 1440.0];
+        for total_h in screens {
+            let (min_h, max_h) = ViewportBudget::safe_deck_bounds(total_h);
+
+            // Min height floor is 180.0 (or max_h if smaller, but for standard screens >= 180)
+            assert!(min_h >= 180.0 || (min_h == max_h));
+            assert!(min_h <= max_h);
+
+            // Max deck height guarantees bottom_deck <= 34% of screen height
+            assert!(max_h <= total_h * 0.34 + 0.01);
+
+            // Max deck height guarantees center_height >= 55% of screen height
+            let remaining_center = total_h - 44.0 - max_h;
+            assert!(
+                remaining_center >= total_h * 0.55 - 0.01,
+                "Center height {:.2} < 55% of total {:.2}",
+                remaining_center,
+                total_h
+            );
+        }
+    }
+
+    #[test]
+    fn test_studio_horizontal_splitter_headless_ui() {
+        let ctx = egui::Context::default();
+        let raw_input = egui::RawInput::default();
+
+        let mut current_h = 240.0_f32;
+        let default_h = 240.0_f32;
+        let (min_h, max_h) = (180.0, 300.0);
+        let mut overridden = false;
+
+        let _ = ctx.run(raw_input, |ctx| {
+            egui::CentralPanel::default().show(ctx, |ui| {
+                let response = StudioHorizontalSplitter::show(
+                    ui,
+                    &mut current_h,
+                    default_h,
+                    min_h,
+                    max_h,
+                    &mut overridden,
+                );
+                assert_eq!(response.rect.height(), StudioHorizontalSplitter::SPLITTER_HEIGHT);
+            });
+        });
+
+        assert_eq!(current_h, 240.0);
+        assert!(!overridden);
     }
 }

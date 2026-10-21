@@ -142,6 +142,7 @@ pub struct SessionMatrixAction {
     pub send_changed: Option<(usize, usize, f32)>, // (track_idx, send_idx, level)
     pub crossfader_changed: Option<f32>,
     pub track_selected: Option<usize>,
+    pub clip_selected: Option<(usize, usize)>, // (track_idx, slot_idx)
 }
 
 fn track_category_color(name: &str) -> Color32 {
@@ -184,14 +185,17 @@ pub fn render_session_matrix(
         send_changed: None,
         crossfader_changed: None,
         track_selected: None,
+        clip_selected: None,
     };
 
     let track_count = matrix.tracks.len();
     let scene_count = matrix.scenes.len().max(8);
 
-    // Track selection state from persistent ui.data
+    // Track and clip selection state from persistent ui.data
     let selected_track_id = egui::Id::new("aruston_selected_track");
     let mut selected_track: usize = ui.data(|d| d.get_temp(selected_track_id)).unwrap_or(0);
+    let selected_slot_id = egui::Id::new("aruston_selected_slot");
+    let selected_slot: Option<(usize, usize)> = ui.data(|d| d.get_temp(selected_slot_id));
 
     // Top Session Toolbar: Mixer Sections Toggles, Launch Quantize, & Helpful Studio Hint
     ui.horizontal(|ui| {
@@ -354,6 +358,7 @@ pub fn render_session_matrix(
                                     "—"
                                 };
 
+                                let is_slot_selected = selected_slot == Some((track_idx, slot_idx));
                                 let (rect, response) = ui.allocate_exact_size(vec2(142.0, slot_h), Sense::click());
 
                                 if ui.is_rect_visible(rect) {
@@ -364,11 +369,20 @@ pub fn render_session_matrix(
                                         slot_state,
                                         clip_name,
                                         response.hovered(),
+                                        is_slot_selected,
                                         current_time,
                                     );
                                 }
 
                                 if response.clicked() {
+                                    selected_track = track_idx;
+                                    ui.data_mut(|d| {
+                                        d.insert_temp(selected_track_id, track_idx);
+                                        d.insert_temp(selected_slot_id, Some((track_idx, slot_idx)));
+                                    });
+                                    action.track_selected = Some(track_idx);
+                                    action.clip_selected = Some((track_idx, slot_idx));
+
                                     match slot_state {
                                         SlotState::Empty => {}
                                         SlotState::Playing { .. } | SlotState::QueuedLaunch(_) => {
@@ -727,6 +741,7 @@ pub fn render_clip_slot(
     state: SlotState,
     clip_name: &str,
     hovered: bool,
+    is_selected: bool,
     current_time: f64,
 ) {
     let base_bg = if hovered {
@@ -740,10 +755,16 @@ pub fn render_clip_slot(
         SlotState::Empty => {
             if hovered {
                 painter.rect_stroke(rect, 3.0, Stroke::new(1.0_f32, Color32::from_rgb(0x28, 0x38, 0x4f)));
+                let box_size = 7.0_f32;
+                let box_rect = Rect::from_center_size(
+                    pos2(rect.center().x - 18.0, rect.center().y),
+                    vec2(box_size, box_size),
+                );
+                painter.rect_stroke(box_rect, 1.0, Stroke::new(1.0_f32, COLOR_TEXT_MUTED));
                 painter.text(
-                    rect.center(),
-                    egui::Align2::CENTER_CENTER,
-                    "□ + Clip",
+                    pos2(rect.center().x - 11.0, rect.center().y),
+                    egui::Align2::LEFT_CENTER,
+                    "+ Clip",
                     FontId::monospace(9.0),
                     COLOR_TEXT_MUTED,
                 );
@@ -861,5 +882,75 @@ pub fn render_clip_slot(
                 COLOR_RUBY,
             );
         }
+    }
+
+    if is_selected {
+        painter.rect_stroke(rect, 3.0, Stroke::new(2.0_f32, COLOR_CYAN));
+        painter.circle_filled(pos2(rect.right() - 5.0, rect.top() + 5.0), 2.5, COLOR_CYAN);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ableton_timeline::{MidiPattern, SessionClip};
+
+    #[test]
+    fn test_session_matrix_render_and_slot_selection() {
+        let ctx = egui::Context::default();
+        let mut matrix = SessionMatrix::new(3, 8);
+        matrix.tracks[0].slots[0].clip = Some(SessionClip::new(1, "Test Clip", ableton_timeline::ClipPattern::Midi(MidiPattern::new(4.0))));
+        matrix.tracks[0].slots[0].state = SlotState::Stopped;
+
+        let mut tracks_gui = vec![
+            GuiTrackState {
+                name: "Track 1".into(),
+                volume_linear: 0.9,
+                pan: 0.0,
+                mute: false,
+                solo: false,
+                sends: vec![0.0, 0.0],
+                input_routing: "All Ins".into(),
+                output_routing: "Master".into(),
+                monitor_mode: "Auto".into(),
+                crossfader_assign: CrossfaderAssign::Off,
+            },
+        ];
+        let mut return_tracks = Vec::new();
+        let mut mixer_sections = SessionMixerSections::default();
+        let mut quantization = LaunchQuantization::Bar1;
+        let mut crossfader_pos = 0.0f32;
+        let mut master_vol = 0.9f32;
+        let telemetry = AudioTelemetry::new();
+
+        let _ = ctx.run(egui::RawInput::default(), |ctx| {
+            egui::CentralPanel::default().show(ctx, |ui| {
+                ui.data_mut(|d| {
+                    d.insert_temp(egui::Id::new("aruston_selected_track"), 0usize);
+                    d.insert_temp(egui::Id::new("aruston_selected_slot"), Some((0usize, 0usize)));
+                });
+
+                let action = render_session_matrix(
+                    ui,
+                    &mut matrix,
+                    &mut tracks_gui,
+                    &mut return_tracks,
+                    &mut mixer_sections,
+                    &mut quantization,
+                    &mut crossfader_pos,
+                    &mut master_vol,
+                    &telemetry,
+                    0.0,
+                );
+
+                assert!(action.stop_clip.is_none());
+            });
+        });
+    }
+
+    #[test]
+    fn test_zero_tofu_glyph_in_session_matrix_source() {
+        let source = include_str!("session_matrix.rs");
+        assert!(!source.contains('\u{25A1}'), "session_matrix.rs must not contain literal tofu box U+25A1");
     }
 }

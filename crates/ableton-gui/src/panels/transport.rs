@@ -69,12 +69,16 @@ pub fn render_top_control_bar(
         toggle_copilot: false,
     };
 
-    ui.horizontal(|ui| {
-        ui.spacing_mut().item_spacing = vec2(5.0, 0.0);
+    let avail_w = ui.available_width();
+    let is_compact = avail_w < 1100.0;
 
-        // 1. Brand Badge: "⚡ OXIDE STUDIO" in ACCENT_AMBER bold (13px)
+    ui.horizontal(|ui| {
+        ui.spacing_mut().item_spacing = vec2(if is_compact { 4.0 } else { 5.0 }, 0.0);
+
+        // 1. Brand Badge: "⚡ OXIDE STUDIO" (or "⚡ OXIDE" when compact) in ACCENT_AMBER bold (13px)
+        let brand_label = if is_compact { "⚡ OXIDE" } else { "⚡ OXIDE STUDIO" };
         ui.label(
-            RichText::new("⚡ OXIDE STUDIO")
+            RichText::new(brand_label)
                 .size(13.0)
                 .color(COLOR_AMBER)
                 .strong(),
@@ -85,8 +89,10 @@ pub fn render_top_control_bar(
         // 2. Transport Group: Prominent "▶ PLAY" / "■ STOP" button, "124.00 BPM" drag value, and "Key: Piano" toggle
         let play_color = if is_playing { COLOR_GREEN } else { COLOR_TEXT_PRIMARY };
         let play_fill = if is_playing { Color32::from_rgb(0x10, 0x36, 0x18) } else { COLOR_BG_PANEL_ALT };
-        let play_btn = Button::new(RichText::new("▶ PLAY").size(11.0).color(play_color).strong())
-            .min_size(vec2(54.0, 26.0))
+        let play_label = if is_compact { "▶" } else { "▶ PLAY" };
+        let play_min_w = if is_compact { 32.0 } else { 54.0 };
+        let play_btn = Button::new(RichText::new(play_label).size(11.0).color(play_color).strong())
+            .min_size(vec2(play_min_w, 26.0))
             .fill(play_fill)
             .stroke(Stroke::new(1.0_f32, if is_playing { COLOR_GREEN } else { COLOR_BORDER }));
         if ui.add(play_btn).clicked() {
@@ -94,8 +100,10 @@ pub fn render_top_control_bar(
         }
 
         // Stop Button
-        let stop_btn = Button::new(RichText::new("■ STOP").size(11.0).color(COLOR_TEXT_PRIMARY).strong())
-            .min_size(vec2(52.0, 26.0))
+        let stop_label = if is_compact { "■" } else { "■ STOP" };
+        let stop_min_w = if is_compact { 32.0 } else { 52.0 };
+        let stop_btn = Button::new(RichText::new(stop_label).size(11.0).color(COLOR_TEXT_PRIMARY).strong())
+            .min_size(vec2(stop_min_w, 26.0))
             .fill(COLOR_BG_PANEL_ALT)
             .stroke(Stroke::new(1.0_f32, COLOR_BORDER));
         if ui.add(stop_btn).clicked() {
@@ -197,7 +205,11 @@ pub fn render_top_control_bar(
             });
 
         let lock_color = if scale.scale_lock { COLOR_AMBER } else { COLOR_TEXT_MUTED };
-        let lock_text = if scale.scale_lock { "★ Lock" } else { "☆ Lock" };
+        let lock_text = if is_compact {
+            if scale.scale_lock { "★" } else { "☆" }
+        } else {
+            if scale.scale_lock { "★ Lock" } else { "☆ Lock" }
+        };
         let lock_btn = Button::new(RichText::new(lock_text).size(10.0).color(lock_color))
             .fill(if scale.scale_lock { COLOR_BG_PANEL_ALT } else { COLOR_BG_SURFACE })
             .stroke(Stroke::new(1.0_f32, if scale.scale_lock { COLOR_AMBER } else { COLOR_BORDER }));
@@ -286,57 +298,78 @@ pub fn render_top_control_bar(
                 action.toggle_copilot = true;
             }
 
-            // One-click WAV export
-            let bounce_btn = Button::new(
-                RichText::new("WAV")
-                    .size(10.0)
-                    .color(COLOR_AMBER)
-                    .strong(),
-            )
-            .fill(COLOR_BG_PANEL_ALT)
-            .stroke(Stroke::new(1.0_f32, COLOR_AMBER));
+            if is_compact {
+                // Responsive overflow: fold export, stems, and ALS buttons into compact "Export ▾" dropdown
+                ComboBox::from_id_salt("transport_export_overflow_menu")
+                    .selected_text(RichText::new("Export ▾").size(10.0).color(COLOR_AMBER).strong())
+                    .width(64.0)
+                    .show_ui(ui, |ui| {
+                        if ui.selectable_label(false, "WAV (Master Bounce)").clicked() {
+                            action.export_wav = true;
+                        }
+                        if ui.selectable_label(false, "Save .ALS").clicked() {
+                            action.export_als = true;
+                        }
+                        if ui.selectable_label(false, "Open .ALS").clicked() {
+                            action.import_als = true;
+                        }
+                        if ui.selectable_label(false, "Split Stems").clicked() {
+                            action.split_stems = true;
+                        }
+                    });
+            } else {
+                // One-click WAV export
+                let bounce_btn = Button::new(
+                    RichText::new("WAV")
+                        .size(10.0)
+                        .color(COLOR_AMBER)
+                        .strong(),
+                )
+                .fill(COLOR_BG_PANEL_ALT)
+                .stroke(Stroke::new(1.0_f32, COLOR_AMBER));
 
-            if ui.add(bounce_btn).on_hover_text("Export Master Bounce WAV (/tmp/ableton_studio_export.wav)").clicked() {
-                action.export_wav = true;
-            }
+                if ui.add(bounce_btn).on_hover_text("Export Master Bounce WAV (/tmp/ableton_studio_export.wav)").clicked() {
+                    action.export_wav = true;
+                }
 
-            // Export .ALS
-            let export_als_btn = Button::new(
-                RichText::new("Save .ALS")
-                    .size(10.0)
-                    .color(COLOR_AMBER)
-                    .strong(),
-            )
-            .fill(COLOR_BG_PANEL_ALT)
-            .stroke(Stroke::new(1.0_f32, COLOR_BORDER));
-            if ui.add(export_als_btn).on_hover_text("Export Ableton Live .als Project (/tmp/oxide_studio_session.als)").clicked() {
-                action.export_als = true;
-            }
+                // Export .ALS
+                let export_als_btn = Button::new(
+                    RichText::new("Save .ALS")
+                        .size(10.0)
+                        .color(COLOR_AMBER)
+                        .strong(),
+                )
+                .fill(COLOR_BG_PANEL_ALT)
+                .stroke(Stroke::new(1.0_f32, COLOR_BORDER));
+                if ui.add(export_als_btn).on_hover_text("Export Ableton Live .als Project (/tmp/oxide_studio_session.als)").clicked() {
+                    action.export_als = true;
+                }
 
-            // Import .ALS
-            let import_als_btn = Button::new(
-                RichText::new("Open .ALS")
-                    .size(10.0)
-                    .color(COLOR_CYAN)
-                    .strong(),
-            )
-            .fill(COLOR_BG_PANEL_ALT)
-            .stroke(Stroke::new(1.0_f32, COLOR_BORDER));
-            if ui.add(import_als_btn).on_hover_text("Import Ableton Live .als Project (/tmp/oxide_studio_session.als)").clicked() {
-                action.import_als = true;
-            }
+                // Import .ALS
+                let import_als_btn = Button::new(
+                    RichText::new("Open .ALS")
+                        .size(10.0)
+                        .color(COLOR_CYAN)
+                        .strong(),
+                )
+                .fill(COLOR_BG_PANEL_ALT)
+                .stroke(Stroke::new(1.0_f32, COLOR_BORDER));
+                if ui.add(import_als_btn).on_hover_text("Import Ableton Live .als Project (/tmp/oxide_studio_session.als)").clicked() {
+                    action.import_als = true;
+                }
 
-            // Split Stems
-            let stems_btn = Button::new(
-                RichText::new("✂ Stems")
-                    .size(10.0)
-                    .color(COLOR_AMBER)
-                    .strong(),
-            )
-            .fill(COLOR_BG_PANEL_ALT)
-            .stroke(Stroke::new(1.0_f32, COLOR_BORDER));
-            if ui.add(stems_btn).on_hover_text("Export & Split Remix Stems (/tmp/oxide_stems/)").clicked() {
-                action.split_stems = true;
+                // Split Stems
+                let stems_btn = Button::new(
+                    RichText::new("Stems")
+                        .size(10.0)
+                        .color(COLOR_AMBER)
+                        .strong(),
+                )
+                .fill(COLOR_BG_PANEL_ALT)
+                .stroke(Stroke::new(1.0_f32, COLOR_BORDER));
+                if ui.add(stems_btn).on_hover_text("Export & Split Remix Stems (/tmp/oxide_stems/)").clicked() {
+                    action.split_stems = true;
+                }
             }
 
             // Compact CPU badge
@@ -353,20 +386,23 @@ pub fn render_top_control_bar(
                     .color(cpu_color),
             );
 
-            // Mini Spectrum (44x22)
-            let spec_size = vec2(44.0, 22.0);
-            let (spec_rect, _) = ui.allocate_exact_size(spec_size, Sense::hover());
-            if ui.is_rect_visible(spec_rect) {
-                let painter = ui.painter_at(spec_rect);
-                render_spectrum(&painter, spec_rect, &telemetry.spectrum_bins);
-            }
+            // Mini visualizers only when width >= 1100px
+            if !is_compact {
+                // Mini Spectrum (44x22)
+                let spec_size = vec2(44.0, 22.0);
+                let (spec_rect, _) = ui.allocate_exact_size(spec_size, Sense::hover());
+                if ui.is_rect_visible(spec_rect) {
+                    let painter = ui.painter_at(spec_rect);
+                    render_spectrum(&painter, spec_rect, &telemetry.spectrum_bins);
+                }
 
-            // Mini Oscilloscope (44x22)
-            let osc_size = vec2(44.0, 22.0);
-            let (osc_rect, _) = ui.allocate_exact_size(osc_size, Sense::hover());
-            if ui.is_rect_visible(osc_rect) {
-                let painter = ui.painter_at(osc_rect);
-                render_oscilloscope(&painter, osc_rect, &telemetry.oscilloscope_slice);
+                // Mini Oscilloscope (44x22)
+                let osc_size = vec2(44.0, 22.0);
+                let (osc_rect, _) = ui.allocate_exact_size(osc_size, Sense::hover());
+                if ui.is_rect_visible(osc_rect) {
+                    let painter = ui.painter_at(osc_rect);
+                    render_oscilloscope(&painter, osc_rect, &telemetry.oscilloscope_slice);
+                }
             }
 
             // Transport position (Bar.Beat.16th) in Monospace
@@ -464,5 +500,66 @@ mod tests {
         assert!(!action.view_session);
         assert!(!action.view_arrangement);
         assert!(!action.toggle_copilot);
+    }
+
+    #[test]
+    fn test_top_control_bar_compact_mode_headless() {
+        let ctx = egui::Context::default();
+        let raw_input = egui::RawInput::default();
+        let telemetry = AudioTelemetry::default();
+        let mut bpm = 124.0;
+        let mut time_sig = (4, 4);
+        let mut metronome = false;
+        let mut arr_rec = false;
+        let mut scale = GlobalScale::default();
+        let mut tuning = TuningSystem::default();
+
+        // 1. Compact mode at 960px width
+        let _ = ctx.run(raw_input.clone(), |ctx| {
+            egui::TopBottomPanel::top("top_panel_compact")
+                .exact_height(44.0)
+                .show(ctx, |ui| {
+                    ui.set_width(960.0);
+                    let action = render_top_control_bar(
+                        ui,
+                        false,
+                        false,
+                        &mut bpm,
+                        &mut time_sig,
+                        &mut metronome,
+                        &mut arr_rec,
+                        &mut scale,
+                        &mut tuning,
+                        0.0,
+                        &telemetry,
+                        false,
+                    );
+                    assert!(!action.toggle_play);
+                });
+        });
+
+        // 2. Full mode at 1440px width
+        let _ = ctx.run(raw_input, |ctx| {
+            egui::TopBottomPanel::top("top_panel_full")
+                .exact_height(44.0)
+                .show(ctx, |ui| {
+                    ui.set_width(1440.0);
+                    let action = render_top_control_bar(
+                        ui,
+                        true,
+                        false,
+                        &mut bpm,
+                        &mut time_sig,
+                        &mut metronome,
+                        &mut arr_rec,
+                        &mut scale,
+                        &mut tuning,
+                        4.0,
+                        &telemetry,
+                        true,
+                    );
+                    assert!(!action.toggle_play);
+                });
+        });
     }
 }

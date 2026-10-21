@@ -6,3 +6,11 @@
 *.wav
 __pycache__/
 *.pyc
+.env
+.env.*
+*.key
+*.pem
+*secret*
+*credentials*
+.oxide_studio*
+oxide_copilot_key*

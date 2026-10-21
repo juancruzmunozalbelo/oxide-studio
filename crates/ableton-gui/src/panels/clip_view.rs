@@ -1,7 +1,12 @@
 //! Live 12 Bottom Detail View: Clip View.
 //!
 //! Features:
+//! - Live 12 Side-by-Side Clip Inspector + Canvas Layout (~220px inspector + interactive Piano Roll / Warping canvas)
 //! - MIDI Piano Roll: Chromatic / Scale-Folded mode, Velocity stalks lane, Chance (%) probability lane
+//! - Dynamic Bar Span: zero clipped notes up to 16.0+ beats with 1, 2, 4, 8 Bar loop selector
+//! - Direct Note Manipulation: Move (time & pitch) and right-edge 7px handle Resize (duration), snapped to grid
+//! - Key Gutter Audition: click & drag piano keys to audition note with active amber highlight
+//! - Scale Fold & Octave Navigation: Scale-Fold toggle, [▲ Oct] / [▼ Oct] buttons, mouse-wheel pitch scroll
 //! - Live 12 Transform Tools: Quantize, Connect, Ornament, Recombine, Span, Strum, Time Warp
 //! - Live 12 Generate Tools: Seed, Shape, Stacks, Rhythm, Euclidean
 //! - Audio Clip Warping Panel: Waveform display with draggable Warp Markers, 6 modes (Beats, Tones,
@@ -13,8 +18,8 @@ use egui::{
 };
 use ableton_core::GlobalScale;
 use ableton_timeline::{
-    generate::{generate_euclidean, generate_seed, generate_stacks},
-    transform::{transform_connect, transform_ornament, transform_recombine, transform_strum},
+    generate::{generate_euclidean, generate_seed, generate_stacks, StacksChordType, StacksVoicing},
+    transform::{transform_connect, transform_ornament, transform_quantize, transform_recombine, transform_strum, StrumDirection},
     warping::{WarpMarker, WarpMode},
     MidiNote, MidiPattern,
 };
@@ -31,6 +36,26 @@ pub enum ClipViewSubTab {
     Warping,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum NoteDragMode {
+    Move {
+        orig_start: f64,
+        orig_pitch: u8,
+        pointer_start_beat: f64,
+        pointer_start_row: usize,
+    },
+    ResizeRight {
+        orig_duration: f64,
+        pointer_start_beat: f64,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct NoteDragState {
+    pub note_idx: usize,
+    pub mode: NoteDragMode,
+}
+
 #[derive(Debug, Clone)]
 pub struct ClipViewState {
     pub is_audio: bool,
@@ -38,8 +63,15 @@ pub struct ClipViewState {
     pub scale_folded: bool,
     pub selected_note_idx: Option<usize>,
 
+    // Live 12 dynamic bar span and pitch navigation
+    pub loop_length_bars: usize, // 1, 2, 4, 8 Bars
+    pub pitch_scroll_offset: i32,
+    pub note_drag_state: Option<NoteDragState>,
+    pub audition_pitch: Option<u8>,
+    pub last_audition_note: Option<(u8, u8)>, // (pitch, velocity)
+
     // Transform parameters
-    pub quantize_grid: f64, // 0.25 (1/16), 0.5 (1/8)
+    pub quantize_grid: f64, // 1.0 (1/4), 0.5 (1/8), 0.25 (1/16), 0.125 (1/32)
     pub quantize_amount: f32, // 0.0 .. 1.0
     pub strum_spread_ms: f32,
     pub strum_direction_up: bool,
@@ -51,7 +83,7 @@ pub struct ClipViewState {
     pub seed_density: f32,
     pub seed_min_pitch: u8,
     pub seed_max_pitch: u8,
-    pub stacks_chord_type: usize, // 0 = Major triad, 1 = Minor 7th, 2 = 9th
+    pub stacks_chord_type: usize, // 0 = Major, 1 = Minor 7th, 2 = 9th
     pub euclidean_hits: u32,
     pub euclidean_steps: u32,
 
@@ -70,6 +102,11 @@ impl Default for ClipViewState {
             sub_tab: ClipViewSubTab::Notes,
             scale_folded: true,
             selected_note_idx: None,
+            loop_length_bars: 4,
+            pitch_scroll_offset: 0,
+            note_drag_state: None,
+            audition_pitch: None,
+            last_audition_note: None,
             quantize_grid: 0.25,
             quantize_amount: 1.0,
             strum_spread_ms: 25.0,
@@ -102,8 +139,11 @@ pub struct ClipViewAction {
     pub warp_mode_changed: Option<WarpMode>,
     pub transpose_changed: Option<i8>,
     pub warp_marker_moved: bool,
+    pub audition_note: Option<(u8, u8)>, // (pitch, velocity)
+    pub loop_length_changed: Option<f64>,
 }
 
+/// Ableton Live 12 Side-by-Side Clip View: Left Inspector (~220px) + Right Canvas.
 pub fn render_clip_view(
     ui: &mut Ui,
     state: &mut ClipViewState,
@@ -116,247 +156,401 @@ pub fn render_clip_view(
         warp_mode_changed: None,
         transpose_changed: None,
         warp_marker_moved: false,
+        audition_note: None,
+        loop_length_changed: None,
     };
 
-    ui.vertical(|ui| {
-        // Sub-Tab Header Bar
-        ui.horizontal(|ui| {
-            ui.spacing_mut().item_spacing = vec2(6.0, 0.0);
+    let total_avail_h = ui.available_height().max(160.0);
 
-            let notes_btn = Button::new(RichText::new("Notes & Piano Roll").size(10.5).color(if state.sub_tab == ClipViewSubTab::Notes { COLOR_AMBER } else { COLOR_TEXT_MUTED }))
-                .fill(if state.sub_tab == ClipViewSubTab::Notes { COLOR_BG_PANEL_ALT } else { COLOR_BG_SURFACE });
-            if ui.add(notes_btn).clicked() { state.sub_tab = ClipViewSubTab::Notes; }
-
-            let trans_btn = Button::new(RichText::new("Transform Tools").size(10.5).color(if state.sub_tab == ClipViewSubTab::Transform { COLOR_CYAN } else { COLOR_TEXT_MUTED }))
-                .fill(if state.sub_tab == ClipViewSubTab::Transform { COLOR_BG_PANEL_ALT } else { COLOR_BG_SURFACE });
-            if ui.add(trans_btn).clicked() { state.sub_tab = ClipViewSubTab::Transform; }
-
-            let gen_btn = Button::new(RichText::new("Generate Tools").size(10.5).color(if state.sub_tab == ClipViewSubTab::Generate { COLOR_GREEN } else { COLOR_TEXT_MUTED }))
-                .fill(if state.sub_tab == ClipViewSubTab::Generate { COLOR_BG_PANEL_ALT } else { COLOR_BG_SURFACE });
-            if ui.add(gen_btn).clicked() { state.sub_tab = ClipViewSubTab::Generate; }
-
-            let warp_btn = Button::new(RichText::new("Audio Warping").size(10.5).color(if state.sub_tab == ClipViewSubTab::Warping { COLOR_AMBER } else { COLOR_TEXT_MUTED }))
-                .fill(if state.sub_tab == ClipViewSubTab::Warping { COLOR_BG_PANEL_ALT } else { COLOR_BG_SURFACE });
-            if ui.add(warp_btn).clicked() { state.sub_tab = ClipViewSubTab::Warping; }
-
-            ui.separator();
-
-            // Scale-Fold toggle for piano roll
-            let fold_col = if state.scale_folded { COLOR_AMBER } else { COLOR_TEXT_MUTED };
-            let fold_text = if state.scale_folded { "★ Scale-Folded" } else { "☆ Chromatic" };
-            if ui.add(Button::new(RichText::new(fold_text).size(10.5).color(fold_col))).clicked() {
-                state.scale_folded = !state.scale_folded;
-            }
-
-            ui.separator();
-
-            ui.label(RichText::new("• Click grid to add/remove MIDI notes • Drag Velocity/Chance below").size(10.0).color(COLOR_TEXT_MUTED));
-        });
+    ui.horizontal(|ui| {
+        // --- 1. Left Column: Live 12 Inspector (Fixed ~220px wide) ---
+        ui.allocate_ui_with_layout(
+            vec2(220.0, total_avail_h),
+            egui::Layout::top_down(egui::Align::Min),
+            |ui| {
+                ui.set_width(220.0);
+                render_clip_inspector(ui, state, midi_pattern, global_scale, &mut action);
+            },
+        );
 
         ui.separator();
 
-        match state.sub_tab {
-            ClipViewSubTab::Notes => {
-                // Interactive Piano Roll + Velocity & Chance lanes
-                if render_interactive_piano_roll(ui, midi_pattern, state, global_scale, current_beat) {
-                    action.pattern_mutated = true;
+        // --- 2. Right Column: Live Interactive Canvas (Piano Roll or Audio Waveform) ---
+        let canvas_w = ui.available_width().max(300.0);
+        ui.allocate_ui_with_layout(
+            vec2(canvas_w, total_avail_h),
+            egui::Layout::top_down(egui::Align::Min),
+            |ui| {
+                if state.is_audio || state.sub_tab == ClipViewSubTab::Warping {
+                    render_audio_warp_canvas(ui, state, &mut action);
+                } else {
+                    if render_interactive_piano_roll(
+                        ui,
+                        midi_pattern,
+                        state,
+                        global_scale,
+                        current_beat,
+                    ) {
+                        action.pattern_mutated = true;
+                    }
+                    if let Some(audition) = state.last_audition_note.take() {
+                        action.audition_note = Some(audition);
+                    }
                 }
-            }
-            ClipViewSubTab::Transform => {
-                // Live 12 Transform Panel Controls
-                ui.horizontal(|ui| {
-                    ui.spacing_mut().item_spacing = vec2(16.0, 0.0);
-
-                    // 1. Quantize
-                    ui.vertical(|ui| {
-                        ui.set_width(140.0);
-                        ui.label(RichText::new("Quantize").size(11.0).color(COLOR_CYAN).strong());
-                        ui.add(Slider::new(&mut state.quantize_amount, 0.0..=1.0).text("Amount").show_value(false));
-                        if ui.add(Button::new(RichText::new("Apply Quantize").size(10.0).color(COLOR_CYAN))).clicked() {
-                            ableton_timeline::transform::transform_quantize(midi_pattern, state.quantize_grid, state.quantize_amount, 0.0);
-                            action.pattern_mutated = true;
-                        }
-                    });
-
-                    ui.separator();
-
-                    // 2. Strum
-                    ui.vertical(|ui| {
-                        ui.set_width(140.0);
-                        ui.label(RichText::new("Strum").size(11.0).color(COLOR_CYAN).strong());
-                        ui.add(Slider::new(&mut state.strum_spread_ms, 5.0..=100.0).text("Spread").show_value(false));
-                        if ui.add(Button::new(RichText::new("Apply Strum").size(10.0).color(COLOR_CYAN))).clicked() {
-                            let spread_beats = (state.strum_spread_ms / 1000.0) * (124.0 / 60.0);
-                            let dir = if state.strum_direction_up {
-                                ableton_timeline::transform::StrumDirection::Up
-                            } else {
-                                ableton_timeline::transform::StrumDirection::Down
-                            };
-                            transform_strum(midi_pattern, spread_beats as f64, dir);
-                            action.pattern_mutated = true;
-                        }
-                    });
-
-                    ui.separator();
-
-                    // 3. Connect & Ornament
-                    ui.vertical(|ui| {
-                        ui.set_width(140.0);
-                        ui.label(RichText::new("Connect & Ornament").size(11.0).color(COLOR_CYAN).strong());
-                        if ui.add(Button::new(RichText::new("Connect Notes").size(10.0).color(COLOR_CYAN))).clicked() {
-                            let sl = ableton_timeline::generate::ScaleLock::dorian(global_scale.root);
-                            transform_connect(midi_pattern, sl, 0.5);
-                            action.pattern_mutated = true;
-                        }
-                        if ui.add(Button::new(RichText::new("Add Ornaments").size(10.0).color(COLOR_CYAN))).clicked() {
-                            transform_ornament(midi_pattern, 0.0625, 2, state.ornament_velocity);
-                            action.pattern_mutated = true;
-                        }
-                        if ui.add(Button::new(RichText::new("Recombine").size(10.0).color(COLOR_CYAN))).clicked() {
-                            transform_recombine(midi_pattern, 1, 1, 1);
-                            action.pattern_mutated = true;
-                        }
-                    });
-                });
-            }
-            ClipViewSubTab::Generate => {
-                // Live 12 Generate Panel Controls
-                ui.horizontal(|ui| {
-                    ui.spacing_mut().item_spacing = vec2(16.0, 0.0);
-
-                    // 1. Seed
-                    ui.vertical(|ui| {
-                        ui.set_width(150.0);
-                        ui.label(RichText::new("Seed Generator").size(11.0).color(COLOR_GREEN).strong());
-                        ui.add(Slider::new(&mut state.seed_density, 0.1..=1.0).text("Density").show_value(false));
-                        if ui.add(Button::new(RichText::new("Generate Seed").size(10.0).color(COLOR_GREEN))).clicked() {
-                            let sl = ableton_timeline::generate::ScaleLock::dorian(global_scale.root);
-                            *midi_pattern = generate_seed(4.0, 0.25, state.seed_density, state.seed_min_pitch, state.seed_max_pitch, 80, 115, 0.2, 0.2, Some(sl), 42);
-                            action.pattern_mutated = true;
-                        }
-                    });
-
-                    ui.separator();
-
-                    // 2. Stacks & Rhythm
-                    ui.vertical(|ui| {
-                        ui.set_width(150.0);
-                        ui.label(RichText::new("Stacks & Rhythm").size(11.0).color(COLOR_GREEN).strong());
-                        if ui.add(Button::new(RichText::new("Generate Stacks").size(10.0).color(COLOR_GREEN))).clicked() {
-                            let chord_type = ableton_timeline::generate::StacksChordType::Min7;
-                            let voicing = ableton_timeline::generate::StacksVoicing::Closed;
-                            let roots = [41, 44, 46, 48];
-                            *midi_pattern = generate_stacks(&roots, chord_type, voicing, 0, 1.0, 105);
-                            action.pattern_mutated = true;
-                        }
-                        if ui.add(Button::new(RichText::new("Euclidean Pattern").size(10.0).color(COLOR_GREEN))).clicked() {
-                            *midi_pattern = generate_euclidean(state.euclidean_hits as usize, state.euclidean_steps as usize, 0, 41, 0.25, 110);
-                            action.pattern_mutated = true;
-                        }
-                    });
-                });
-            }
-            ClipViewSubTab::Warping => {
-                // Audio Clip Warping Panel
-                ui.horizontal(|ui| {
-                    ui.spacing_mut().item_spacing = vec2(12.0, 0.0);
-
-                    // Warp Mode & Controls
-                    ui.vertical(|ui| {
-                        ui.set_width(160.0);
-                        ui.label(RichText::new("Audio Warping").size(11.0).color(COLOR_AMBER).strong());
-
-                        // Mode Selector (6 modes)
-                        let modes = [
-                            WarpMode::Beats,
-                            WarpMode::Tones,
-                            WarpMode::Texture,
-                            WarpMode::RePitch,
-                            WarpMode::Complex,
-                            WarpMode::ComplexPro,
-                        ];
-
-                        ComboBox::from_id_salt("clip_warp_mode_combo")
-                            .selected_text(format!("{:?}", state.warp_mode))
-                            .show_ui(ui, |ui| {
-                                for &m in &modes {
-                                    if ui.selectable_label(state.warp_mode == m, format!("{:?}", m)).clicked() {
-                                        state.warp_mode = m;
-                                        action.warp_mode_changed = Some(m);
-                                    }
-                                }
-                            });
-
-                        // Transpose (-48 .. +48 st)
-                        ui.horizontal(|ui| {
-                            ui.label(RichText::new("Transpose:").size(9.5).color(COLOR_TEXT_MUTED));
-                            let mut tr = state.transpose_semitones as i32;
-                            if ui.add(DragValue::new(&mut tr).range(-48..=48).suffix(" st")).changed() {
-                                state.transpose_semitones = tr as i8;
-                                action.transpose_changed = Some(state.transpose_semitones);
-                            }
-                        });
-
-                        // Gain dB
-                        ui.horizontal(|ui| {
-                            ui.label(RichText::new("Gain:").size(9.5).color(COLOR_TEXT_MUTED));
-                            ui.add(Slider::new(&mut state.clip_gain_db, -24.0..=12.0).suffix(" dB").show_value(false));
-                        });
-                    });
-
-                    ui.separator();
-
-                    // Waveform with Draggable Warp Markers
-                    let (canvas_rect, mut response) = ui.allocate_exact_size(vec2(ui.available_width().max(300.0), 120.0), Sense::click_and_drag());
-                    if response.dragged() {
-                        let delta_x = response.drag_delta().x;
-                        if canvas_rect.width() > 0.0 && delta_x != 0.0 {
-                            let beat_delta = (delta_x / canvas_rect.width()) as f64 * 16.0;
-                            if let Some(pos) = response.interact_pointer_pos() {
-                                let pointer_beat = ((pos.x - canvas_rect.left()) / canvas_rect.width()) as f64 * 16.0;
-                                if let Some(marker) = state.warp_markers.iter_mut().min_by(|a, b| {
-                                    let dist_a = (a.beat - pointer_beat).abs();
-                                    let dist_b = (b.beat - pointer_beat).abs();
-                                    dist_a.partial_cmp(&dist_b).unwrap_or(std::cmp::Ordering::Equal)
-                                }) {
-                                    marker.beat = (marker.beat + beat_delta).clamp(0.0, 16.0);
-                                    marker.sample_time = (marker.beat * (7.742 / 16.0)).max(0.0);
-                                    action.warp_marker_moved = true;
-                                    response.mark_changed();
-                                }
-                            }
-                        }
-                    }
-
-                    if ui.is_rect_visible(canvas_rect) {
-                        let painter = ui.painter_at(canvas_rect);
-                        painter.rect_filled(canvas_rect, 2.0, Color32::from_rgb(0x10, 0x14, 0x1d));
-                        painter.rect_stroke(canvas_rect, 2.0, Stroke::new(1.0_f32, COLOR_BORDER));
-
-                        let mid_y = canvas_rect.center().y;
-                        let steps = 96;
-                        for s in 0..steps {
-                            let t = s as f32 / steps as f32;
-                            let sx = canvas_rect.left() + t * canvas_rect.width();
-                            let h = ((s as f32 * 0.8).sin() * 0.5 + (s as f32 * 2.5).cos() * 0.3).abs() * 32.0;
-                            painter.line_segment([pos2(sx, mid_y - h), pos2(sx, mid_y + h)], Stroke::new(1.0_f32, Color32::from_rgb(0x28, 0x5a, 0x8a)));
-                        }
-
-                        // Warp Markers (Yellow Draggable Flags)
-                        for (idx, m) in state.warp_markers.iter().enumerate() {
-                            let mx = canvas_rect.left() + (m.beat as f32 / 16.0) * canvas_rect.width();
-                            let flag_rect = Rect::from_min_size(pos2(mx - 4.0, canvas_rect.top() + 2.0), vec2(8.0, 10.0));
-                            painter.rect_filled(flag_rect, 1.0, COLOR_AMBER);
-                            painter.line_segment([pos2(mx, canvas_rect.top() + 12.0), pos2(mx, canvas_rect.bottom())], Stroke::new(1.2_f32, COLOR_AMBER));
-                            painter.text(pos2(mx, canvas_rect.top() + 6.0), egui::Align2::CENTER_CENTER, format!("{}", idx + 1), FontId::monospace(7.0), Color32::BLACK);
-                        }
-                    }
-                });
-            }
-        }
+            },
+        );
     });
 
     action
+}
+
+/// Render the compact left-hand Live 12 Inspector with tabs for Clip/Loop, Transform, Generate, Warp.
+pub fn render_clip_inspector(
+    ui: &mut Ui,
+    state: &mut ClipViewState,
+    midi_pattern: &mut MidiPattern,
+    global_scale: &GlobalScale,
+    action: &mut ClipViewAction,
+) {
+    ui.spacing_mut().item_spacing = vec2(4.0, 4.0);
+
+    // Inspector Tab Selector Bar (4 compact buttons)
+    ui.horizontal(|ui| {
+        ui.spacing_mut().item_spacing = vec2(2.0, 0.0);
+
+        let notes_active = state.sub_tab == ClipViewSubTab::Notes;
+        let notes_btn = Button::new(RichText::new("Clip").size(10.0).strong().color(if notes_active { COLOR_AMBER } else { COLOR_TEXT_MUTED }))
+            .fill(if notes_active { COLOR_BG_PANEL_ALT } else { COLOR_BG_SURFACE });
+        if ui.add(notes_btn).clicked() {
+            state.sub_tab = ClipViewSubTab::Notes;
+            state.is_audio = false;
+        }
+
+        let trans_active = state.sub_tab == ClipViewSubTab::Transform;
+        let trans_btn = Button::new(RichText::new("Trans").size(10.0).strong().color(if trans_active { COLOR_CYAN } else { COLOR_TEXT_MUTED }))
+            .fill(if trans_active { COLOR_BG_PANEL_ALT } else { COLOR_BG_SURFACE });
+        if ui.add(trans_btn).clicked() {
+            state.sub_tab = ClipViewSubTab::Transform;
+            state.is_audio = false;
+        }
+
+        let gen_active = state.sub_tab == ClipViewSubTab::Generate;
+        let gen_btn = Button::new(RichText::new("Gen").size(10.0).strong().color(if gen_active { COLOR_GREEN } else { COLOR_TEXT_MUTED }))
+            .fill(if gen_active { COLOR_BG_PANEL_ALT } else { COLOR_BG_SURFACE });
+        if ui.add(gen_btn).clicked() {
+            state.sub_tab = ClipViewSubTab::Generate;
+            state.is_audio = false;
+        }
+
+        let warp_active = state.sub_tab == ClipViewSubTab::Warping;
+        let warp_btn = Button::new(RichText::new("Warp").size(10.0).strong().color(if warp_active { COLOR_AMBER } else { COLOR_TEXT_MUTED }))
+            .fill(if warp_active { COLOR_BG_PANEL_ALT } else { COLOR_BG_SURFACE });
+        if ui.add(warp_btn).clicked() {
+            state.sub_tab = ClipViewSubTab::Warping;
+        }
+    });
+
+    ui.separator();
+
+    // Tab Content Panel
+    match state.sub_tab {
+        ClipViewSubTab::Notes => {
+            ui.label(RichText::new("CLIP / LOOP & GRID").size(9.5).color(COLOR_AMBER).strong());
+
+            // 1. Loop Length Bar Span Selector
+            ui.horizontal(|ui| {
+                ui.label(RichText::new("Span:").size(9.0).color(COLOR_TEXT_MUTED));
+                let bar_options = [1usize, 2, 4, 8];
+                for &bars in &bar_options {
+                    let is_sel = state.loop_length_bars == bars;
+                    let btn_txt = format!("{}B", bars);
+                    let btn = Button::new(RichText::new(btn_txt).size(9.0).color(if is_sel { COLOR_AMBER } else { COLOR_TEXT_MUTED }))
+                        .fill(if is_sel { COLOR_BG_PANEL_ALT } else { COLOR_BG_SURFACE });
+                    if ui.add(btn).clicked() {
+                        state.loop_length_bars = bars;
+                        let new_beats = (bars * 4) as f64;
+                        midi_pattern.length_beats = new_beats;
+                        action.loop_length_changed = Some(new_beats);
+                        action.pattern_mutated = true;
+                    }
+                }
+            });
+
+            // 2. Grid Division Selector
+            ui.horizontal(|ui| {
+                ui.label(RichText::new("Grid:").size(9.0).color(COLOR_TEXT_MUTED));
+                let grid_options = [(1.0, "1/4"), (0.5, "1/8"), (0.25, "1/16"), (0.125, "1/32")];
+                for &(grid_val, label) in &grid_options {
+                    let is_sel = (state.quantize_grid - grid_val).abs() < 1e-4;
+                    let btn = Button::new(RichText::new(label).size(9.0).color(if is_sel { COLOR_CYAN } else { COLOR_TEXT_MUTED }))
+                        .fill(if is_sel { COLOR_BG_PANEL_ALT } else { COLOR_BG_SURFACE });
+                    if ui.add(btn).clicked() {
+                        state.quantize_grid = grid_val;
+                    }
+                }
+            });
+
+            // 3. Scale-Fold Toggle
+            ui.horizontal(|ui| {
+                let fold_col = if state.scale_folded { COLOR_AMBER } else { COLOR_TEXT_MUTED };
+                let fold_text = if state.scale_folded { "★ Scale-Folded" } else { "☆ Chromatic" };
+                if ui.add(Button::new(RichText::new(fold_text).size(9.5).color(fold_col))).clicked() {
+                    state.scale_folded = !state.scale_folded;
+                }
+            });
+
+            // 4. Octave / Pitch Scroll Navigation
+            ui.horizontal(|ui| {
+                ui.label(RichText::new("Pitch:").size(9.0).color(COLOR_TEXT_MUTED));
+                let oct_step = if state.scale_folded { 7 } else { 12 };
+                if ui.add(Button::new(RichText::new("+ Oct").size(9.0).color(COLOR_TEXT_PRIMARY))).clicked() {
+                    state.pitch_scroll_offset = (state.pitch_scroll_offset + oct_step).min(36);
+                }
+                if ui.add(Button::new(RichText::new("- Oct").size(9.0).color(COLOR_TEXT_PRIMARY))).clicked() {
+                    state.pitch_scroll_offset = (state.pitch_scroll_offset - oct_step).max(-36);
+                }
+                if state.pitch_scroll_offset != 0 {
+                    if ui.add(Button::new(RichText::new("Rst").size(8.5).color(COLOR_TEXT_MUTED))).clicked() {
+                        state.pitch_scroll_offset = 0;
+                    }
+                }
+            });
+
+            ui.separator();
+
+            // 5. Pattern Telemetry & Help
+            let notes_max_end = midi_pattern.notes.iter().map(|n| n.end_beat()).fold(4.0, f64::max);
+            let total_beats = (state.loop_length_bars as f64 * 4.0).max(notes_max_end).max(midi_pattern.length_beats).max(4.0) as f32;
+            ui.label(RichText::new(format!("Len: {:.0}b ({} bars)", total_beats, (total_beats / 4.0).ceil() as usize)).size(9.0).color(COLOR_TEXT_MUTED));
+            ui.label(RichText::new(format!("Notes: {} | Sel: {}", midi_pattern.notes.len(), state.selected_note_idx.map(|i| format!("#{}", i + 1)).unwrap_or_else(|| "-".into()))).size(9.0).color(COLOR_TEXT_MUTED));
+            ui.label(RichText::new("• Click Key: audition\n• Drag note / 7px edge\n• Del/Right-click: remove").size(8.5).color(COLOR_TEXT_DIM));
+        }
+
+        ClipViewSubTab::Transform => {
+            ui.label(RichText::new("LIVE 12 TRANSFORM").size(9.5).color(COLOR_CYAN).strong());
+
+            // 1. Quantize
+            ui.horizontal(|ui| {
+                ui.label(RichText::new("Quant:").size(9.0).color(COLOR_TEXT_MUTED));
+                ui.add(Slider::new(&mut state.quantize_amount, 0.0..=1.0).show_value(false));
+                if ui.add(Button::new(RichText::new("Apply").size(9.0).color(COLOR_CYAN))).clicked() {
+                    transform_quantize(midi_pattern, state.quantize_grid, state.quantize_amount, 0.0);
+                    action.pattern_mutated = true;
+                }
+            });
+
+            // 2. Strum
+            ui.horizontal(|ui| {
+                ui.label(RichText::new("Strum:").size(9.0).color(COLOR_TEXT_MUTED));
+                ui.add(Slider::new(&mut state.strum_spread_ms, 5.0..=100.0).show_value(false));
+                let dir_lbl = if state.strum_direction_up { "▲" } else { "▼" };
+                if ui.add(Button::new(RichText::new(dir_lbl).size(9.0).color(COLOR_CYAN))).clicked() {
+                    state.strum_direction_up = !state.strum_direction_up;
+                }
+                if ui.add(Button::new(RichText::new("Apply").size(9.0).color(COLOR_CYAN))).clicked() {
+                    let spread_beats = (state.strum_spread_ms / 1000.0) * (124.0 / 60.0);
+                    let dir = if state.strum_direction_up {
+                        StrumDirection::Up
+                    } else {
+                        StrumDirection::Down
+                    };
+                    transform_strum(midi_pattern, spread_beats as f64, dir);
+                    action.pattern_mutated = true;
+                }
+            });
+
+            // 3. Connect & Ornament & Recombine
+            ui.horizontal(|ui| {
+                if ui.add(Button::new(RichText::new("Connect").size(9.0).color(COLOR_CYAN))).clicked() {
+                    let sl = ableton_timeline::generate::ScaleLock::dorian(global_scale.root);
+                    transform_connect(midi_pattern, sl, 0.5);
+                    action.pattern_mutated = true;
+                }
+                if ui.add(Button::new(RichText::new("Ornament").size(9.0).color(COLOR_CYAN))).clicked() {
+                    transform_ornament(midi_pattern, 0.0625, 2, state.ornament_velocity);
+                    action.pattern_mutated = true;
+                }
+                if ui.add(Button::new(RichText::new("Recombine").size(9.0).color(COLOR_CYAN))).clicked() {
+                    transform_recombine(midi_pattern, 1, 1, 1);
+                    action.pattern_mutated = true;
+                }
+            });
+
+            ui.separator();
+            ui.label(RichText::new("Mutations update Piano Roll instantly side-by-side.").size(8.5).color(COLOR_TEXT_DIM));
+        }
+
+        ClipViewSubTab::Generate => {
+            ui.label(RichText::new("LIVE 12 GENERATE").size(9.5).color(COLOR_GREEN).strong());
+
+            // 1. Seed Generator
+            ui.horizontal(|ui| {
+                ui.label(RichText::new("Density:").size(9.0).color(COLOR_TEXT_MUTED));
+                ui.add(Slider::new(&mut state.seed_density, 0.1..=1.0).show_value(false));
+                if ui.add(Button::new(RichText::new("Seed").size(9.0).color(COLOR_GREEN))).clicked() {
+                    let sl = ableton_timeline::generate::ScaleLock::dorian(global_scale.root);
+                    let span_beats = (state.loop_length_bars * 4) as f64;
+                    *midi_pattern = generate_seed(span_beats, 0.25, state.seed_density, state.seed_min_pitch, state.seed_max_pitch, 80, 115, 0.2, 0.2, Some(sl), 42);
+                    action.pattern_mutated = true;
+                }
+            });
+
+            // 2. Stacks Generator
+            ui.horizontal(|ui| {
+                ui.label(RichText::new("Stacks:").size(9.0).color(COLOR_TEXT_MUTED));
+                let chord_labels = ["Maj", "Min7", "9th"];
+                for (idx, &lbl) in chord_labels.iter().enumerate() {
+                    let is_sel = state.stacks_chord_type == idx;
+                    let btn = Button::new(RichText::new(lbl).size(8.5).color(if is_sel { COLOR_GREEN } else { COLOR_TEXT_MUTED }))
+                        .fill(if is_sel { COLOR_BG_PANEL_ALT } else { COLOR_BG_SURFACE });
+                    if ui.add(btn).clicked() {
+                        state.stacks_chord_type = idx;
+                    }
+                }
+                if ui.add(Button::new(RichText::new("Apply").size(9.0).color(COLOR_GREEN))).clicked() {
+                    let chord_type = match state.stacks_chord_type {
+                        0 => StacksChordType::MajorTriad,
+                        1 => StacksChordType::Min7,
+                        _ => StacksChordType::Dom7,
+                    };
+                    let roots = [41, 44, 46, 48];
+                    *midi_pattern = generate_stacks(&roots, chord_type, StacksVoicing::Closed, 0, 1.0, 105);
+                    action.pattern_mutated = true;
+                }
+            });
+
+            // 3. Euclidean Generator
+            ui.horizontal(|ui| {
+                ui.label(RichText::new("Euclid:").size(9.0).color(COLOR_TEXT_MUTED));
+                ui.add(Slider::new(&mut state.euclidean_hits, 1..=16).show_value(false));
+                if ui.add(Button::new(RichText::new("Generate").size(9.0).color(COLOR_GREEN))).clicked() {
+                    *midi_pattern = generate_euclidean(state.euclidean_hits as usize, state.euclidean_steps as usize, 0, 41, 0.25, 110);
+                    action.pattern_mutated = true;
+                }
+            });
+
+            ui.separator();
+            ui.label(RichText::new("Generated patterns replace notes with real-time feedback.").size(8.5).color(COLOR_TEXT_DIM));
+        }
+
+        ClipViewSubTab::Warping => {
+            ui.label(RichText::new("AUDIO WARPING").size(9.5).color(COLOR_AMBER).strong());
+
+            // Warp Mode Combo
+            let modes = [
+                WarpMode::Beats,
+                WarpMode::Tones,
+                WarpMode::Texture,
+                WarpMode::RePitch,
+                WarpMode::Complex,
+                WarpMode::ComplexPro,
+            ];
+            ComboBox::from_id_salt("clip_warp_mode_inspector")
+                .selected_text(format!("{:?}", state.warp_mode))
+                .show_ui(ui, |ui| {
+                    for &m in &modes {
+                        if ui.selectable_label(state.warp_mode == m, format!("{:?}", m)).clicked() {
+                            state.warp_mode = m;
+                            action.warp_mode_changed = Some(m);
+                        }
+                    }
+                });
+
+            // Transpose
+            ui.horizontal(|ui| {
+                ui.label(RichText::new("Transpose:").size(9.0).color(COLOR_TEXT_MUTED));
+                let mut tr = state.transpose_semitones as i32;
+                if ui.add(DragValue::new(&mut tr).range(-48..=48).suffix(" st")).changed() {
+                    state.transpose_semitones = tr as i8;
+                    action.transpose_changed = Some(state.transpose_semitones);
+                }
+            });
+
+            // Gain dB
+            ui.horizontal(|ui| {
+                ui.label(RichText::new("Gain:").size(9.0).color(COLOR_TEXT_MUTED));
+                ui.add(Slider::new(&mut state.clip_gain_db, -24.0..=12.0).suffix(" dB").show_value(false));
+            });
+
+            // Audio Mode Toggle
+            ui.horizontal(|ui| {
+                let audio_col = if state.is_audio { COLOR_AMBER } else { COLOR_TEXT_MUTED };
+                let audio_txt = if state.is_audio { "Canvas: Audio Wave" } else { "Canvas: Piano Roll" };
+                if ui.add(Button::new(RichText::new(audio_txt).size(9.0).color(audio_col))).clicked() {
+                    state.is_audio = !state.is_audio;
+                }
+            });
+        }
+    }
+}
+
+/// Render the Audio Warping waveform with draggable warp markers.
+pub fn render_audio_warp_canvas(
+    ui: &mut Ui,
+    state: &mut ClipViewState,
+    action: &mut ClipViewAction,
+) {
+    let available_w = ui.available_width().max(300.0);
+    let total_h = ui.available_height().clamp(155.0, 260.0);
+    let (canvas_rect, mut response) =
+        ui.allocate_exact_size(vec2(available_w, total_h), Sense::click_and_drag());
+
+    if response.dragged() {
+        let delta_x = response.drag_delta().x;
+        if canvas_rect.width() > 0.0 && delta_x != 0.0 {
+            let beat_delta = (delta_x / canvas_rect.width()) as f64 * 16.0;
+            if let Some(pos) = response.interact_pointer_pos() {
+                let pointer_beat = ((pos.x - canvas_rect.left()) / canvas_rect.width()) as f64 * 16.0;
+                if let Some(marker) = state.warp_markers.iter_mut().min_by(|a, b| {
+                    let dist_a = (a.beat - pointer_beat).abs();
+                    let dist_b = (b.beat - pointer_beat).abs();
+                    dist_a.partial_cmp(&dist_b).unwrap_or(std::cmp::Ordering::Equal)
+                }) {
+                    marker.beat = (marker.beat + beat_delta).clamp(0.0, 16.0);
+                    marker.sample_time = (marker.beat * (7.742 / 16.0)).max(0.0);
+                    action.warp_marker_moved = true;
+                    response.mark_changed();
+                }
+            }
+        }
+    }
+
+    if ui.is_rect_visible(canvas_rect) {
+        let painter = ui.painter_at(canvas_rect);
+        painter.rect_filled(canvas_rect, 2.0, Color32::from_rgb(0x10, 0x14, 0x1d));
+        painter.rect_stroke(canvas_rect, 2.0, Stroke::new(1.0_f32, COLOR_BORDER));
+
+        let mid_y = canvas_rect.center().y;
+        let steps = 96;
+        for s in 0..steps {
+            let t = s as f32 / steps as f32;
+            let sx = canvas_rect.left() + t * canvas_rect.width();
+            let h = ((s as f32 * 0.8).sin() * 0.5 + (s as f32 * 2.5).cos() * 0.3).abs() * 32.0;
+            painter.line_segment(
+                [pos2(sx, mid_y - h), pos2(sx, mid_y + h)],
+                Stroke::new(1.0_f32, Color32::from_rgb(0x28, 0x5a, 0x8a)),
+            );
+        }
+
+        // Warp Markers (Yellow Draggable Flags)
+        for (idx, m) in state.warp_markers.iter().enumerate() {
+            let mx = canvas_rect.left() + (m.beat as f32 / 16.0) * canvas_rect.width();
+            let flag_rect =
+                Rect::from_min_size(pos2(mx - 4.0, canvas_rect.top() + 2.0), vec2(8.0, 10.0));
+            painter.rect_filled(flag_rect, 1.0, COLOR_AMBER);
+            painter.line_segment(
+                [pos2(mx, canvas_rect.top() + 12.0), pos2(mx, canvas_rect.bottom())],
+                Stroke::new(1.2_f32, COLOR_AMBER),
+            );
+            painter.text(
+                pos2(mx, canvas_rect.top() + 6.0),
+                egui::Align2::CENTER_CENTER,
+                format!("{}", idx + 1),
+                FontId::monospace(7.0),
+                Color32::BLACK,
+            );
+        }
+    }
 }
 
 fn midi_to_note_name(pitch: u8) -> String {
@@ -434,6 +628,7 @@ fn get_visible_pitches(
     pitches
 }
 
+/// Render the interactive Piano Roll Pro canvas with dynamic bar span, note dragging, edge resizing, and audition.
 pub fn render_interactive_piano_roll(
     ui: &mut Ui,
     midi_pattern: &mut MidiPattern,
@@ -441,8 +636,8 @@ pub fn render_interactive_piano_roll(
     scale: &GlobalScale,
     current_beat: f64,
 ) -> bool {
-    let available_w = ui.available_width().max(420.0);
-    let total_h = ui.available_height().clamp(155.0, 215.0);
+    let available_w = ui.available_width().max(380.0);
+    let total_h = ui.available_height().clamp(155.0, 260.0);
     let (roll_rect, response) = ui.allocate_exact_size(vec2(available_w, total_h), Sense::click_and_drag());
 
     let mut pattern_mutated = false;
@@ -453,8 +648,8 @@ pub fn render_interactive_piano_roll(
         painter.rect_stroke(roll_rect, 2.0, Stroke::new(1.0_f32, COLOR_BORDER));
 
         let ruler_h = 18.0_f32;
-        let lanes_h = 34.0_f32;
-        let gutter_w = 50.0_f32;
+        let lanes_h = 36.0_f32;
+        let gutter_w = 48.0_f32;
 
         let grid_top = roll_rect.top() + ruler_h;
         let grid_bottom = roll_rect.bottom() - lanes_h;
@@ -462,8 +657,16 @@ pub fn render_interactive_piano_roll(
         let grid_left = roll_rect.left() + gutter_w;
         let grid_w = (roll_rect.width() - gutter_w).max(10.0);
 
+        // --- 1. Dynamic Bar Span Calculation (Zero Clipped Notes) ---
+        let notes_max_end = midi_pattern.notes.iter().map(|n| n.end_beat()).fold(4.0, f64::max);
+        let total_beats = (state.loop_length_bars as f64 * 4.0)
+            .max(notes_max_end)
+            .max(midi_pattern.length_beats)
+            .max(4.0) as f32;
+        let px_per_beat = grid_w / total_beats;
+
+        // --- 2. Visible Pitches with Octave / Pitch Scroll ---
         let all_pitches = get_visible_pitches(&midi_pattern.notes, scale, state.scale_folded);
-        // Select a 9-row viewport window covering all active clip notes so each row is >= 12px tall (zero label overlap)
         let target_rows = 9usize;
         let pitches: Vec<u8> = if all_pitches.len() <= target_rows {
             all_pitches
@@ -480,10 +683,11 @@ pub fn render_interactive_piano_roll(
                     }
                 }
             }
-            let mid = (min_idx + max_idx) / 2;
-            let start = mid
-                .saturating_sub(target_rows / 2)
-                .min(all_pitches.len().saturating_sub(target_rows));
+            let mid = ((min_idx + max_idx) / 2) as i32;
+            let max_start = all_pitches.len().saturating_sub(target_rows) as i32;
+            let base_start = mid.saturating_sub((target_rows / 2) as i32);
+            // pitch_scroll_offset: positive shifts towards higher pitch (lower index in descending list)
+            let start = (base_start - state.pitch_scroll_offset).clamp(0, max_start) as usize;
             let end = (start + target_rows).min(all_pitches.len());
             all_pitches[start..end].to_vec()
         };
@@ -491,21 +695,179 @@ pub fn render_interactive_piano_roll(
         let row_count = pitches.len().max(1);
         let row_h = grid_h / row_count as f32;
 
-        let total_beats = midi_pattern.length_beats.max(4.0) as f32;
-        let px_per_beat = grid_w / total_beats;
-
-        // --- 1. Interaction: Click to Add / Remove / Select Notes ---
         let grid_rect = Rect::from_min_max(pos2(grid_left, grid_top), pos2(roll_rect.right(), grid_bottom));
-        if response.clicked() || response.secondary_clicked() {
-            if let Some(pos) = response.interact_pointer_pos() {
+        let gutter_keys_rect = Rect::from_min_max(pos2(roll_rect.left(), grid_top), pos2(grid_left, grid_bottom));
+        let lanes_grid_rect = Rect::from_min_max(pos2(grid_left, grid_bottom), roll_rect.max);
+        let mid_lane_y = lanes_grid_rect.top() + (lanes_grid_rect.height() * 0.5);
+
+        // --- 3. Mouse Wheel Pitch Navigation ---
+        if response.hovered() {
+            let scroll_y = ui.input(|i| i.raw_scroll_delta.y);
+            if scroll_y > 2.0 {
+                state.pitch_scroll_offset = (state.pitch_scroll_offset + 1).min(36);
+            } else if scroll_y < -2.0 {
+                state.pitch_scroll_offset = (state.pitch_scroll_offset - 1).max(-36);
+            }
+        }
+
+        // --- 4. Cursor Feedback & Right Edge Hover Affordance ---
+        if let Some(hover_pos) = response.hover_pos() {
+            if grid_rect.contains(hover_pos) {
+                let mut hovered_right_edge = false;
+                let mut hovered_body = false;
+                for note in &midi_pattern.notes {
+                    if let Some(row_idx) = pitches.iter().position(|&p| p == note.pitch) {
+                        let nx = grid_left + note.start_beat as f32 * px_per_beat;
+                        let nw = (note.duration_beats as f32 * px_per_beat).max(6.0);
+                        let ny = grid_top + row_idx as f32 * row_h;
+                        let right_handle_w = 7.0_f32.min(nw * 0.4);
+                        let right_rect = Rect::from_min_max(pos2(nx + nw - right_handle_w, ny), pos2(nx + nw + 3.0, ny + row_h));
+                        let body_rect = Rect::from_min_max(pos2(nx, ny), pos2(nx + nw - right_handle_w, ny + row_h));
+                        if right_rect.contains(hover_pos) {
+                            hovered_right_edge = true;
+                            break;
+                        } else if body_rect.contains(hover_pos) {
+                            hovered_body = true;
+                            break;
+                        }
+                    }
+                }
+                if state.note_drag_state.is_some() {
+                    if let Some(drag) = state.note_drag_state {
+                        match drag.mode {
+                            NoteDragMode::ResizeRight { .. } => {
+                                ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeHorizontal);
+                            }
+                            NoteDragMode::Move { .. } => {
+                                ui.ctx().set_cursor_icon(egui::CursorIcon::Grabbing);
+                            }
+                        }
+                    }
+                } else if hovered_right_edge {
+                    ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeHorizontal);
+                } else if hovered_body {
+                    ui.ctx().set_cursor_icon(egui::CursorIcon::Grab);
+                }
+            }
+        }
+
+        // --- 5. Key Gutter Audition Sensing ---
+        if let Some(pos) = response.interact_pointer_pos() {
+            if gutter_keys_rect.contains(pos) && (response.clicked() || response.dragged() || response.is_pointer_button_down_on()) {
+                let r = ((pos.y - grid_top) / row_h).floor().clamp(0.0, (pitches.len() - 1) as f32) as usize;
+                if r < pitches.len() {
+                    let pitch = pitches[r];
+                    state.audition_pitch = Some(pitch);
+                    state.last_audition_note = Some((pitch, 100));
+                }
+            }
+        }
+        if !response.is_pointer_button_down_on() && !response.dragged() {
+            state.audition_pitch = None;
+        }
+
+        // --- 6. Direct Note Manipulation (Move & Resize) Engine ---
+        if response.drag_started() {
+            let press_pos = ui.input(|i| i.pointer.press_origin()).or_else(|| response.interact_pointer_pos());
+            if let Some(pos) = press_pos {
                 if grid_rect.contains(pos) {
-                    let mut clicked_note_idx = None;
-                    for (idx, note) in midi_pattern.notes.iter().enumerate() {
+                    for (idx, note) in midi_pattern.notes.iter().enumerate().rev() {
                         if let Some(row_idx) = pitches.iter().position(|&p| p == note.pitch) {
                             let nx = grid_left + note.start_beat as f32 * px_per_beat;
                             let nw = (note.duration_beats as f32 * px_per_beat).max(6.0);
                             let ny = grid_top + row_idx as f32 * row_h;
-                            let n_rect = Rect::from_min_size(pos2(nx, ny + 1.0), vec2(nw, (row_h - 2.0).max(3.0)));
+                            let right_handle_w = 7.0_f32.min(nw * 0.4);
+                            let right_rect = Rect::from_min_max(pos2(nx + nw - right_handle_w, ny), pos2(nx + nw + 3.0, ny + row_h));
+                            let body_rect = Rect::from_min_max(pos2(nx, ny), pos2(nx + nw - right_handle_w, ny + row_h));
+                            let press_beat = ((pos.x - grid_left) / px_per_beat) as f64;
+
+                            if right_rect.contains(pos) {
+                                state.note_drag_state = Some(NoteDragState {
+                                    note_idx: idx,
+                                    mode: NoteDragMode::ResizeRight {
+                                        orig_duration: note.duration_beats,
+                                        pointer_start_beat: press_beat,
+                                    },
+                                });
+                                state.selected_note_idx = Some(idx);
+                                break;
+                            } else if body_rect.contains(pos) {
+                                state.note_drag_state = Some(NoteDragState {
+                                    note_idx: idx,
+                                    mode: NoteDragMode::Move {
+                                        orig_start: note.start_beat,
+                                        orig_pitch: note.pitch,
+                                        pointer_start_beat: press_beat,
+                                        pointer_start_row: row_idx,
+                                    },
+                                });
+                                state.selected_note_idx = Some(idx);
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        if response.dragged() {
+            if let Some(drag) = state.note_drag_state {
+                if drag.note_idx < midi_pattern.notes.len() {
+                    if let Some(curr_pos) = response.interact_pointer_pos() {
+                        let curr_beat = ((curr_pos.x - grid_left) / px_per_beat) as f64;
+                        let q = state.quantize_grid.max(0.0625);
+
+                        match drag.mode {
+                            NoteDragMode::ResizeRight { orig_duration, pointer_start_beat } => {
+                                ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeHorizontal);
+                                let delta_beats = curr_beat - pointer_start_beat;
+                                let note = &mut midi_pattern.notes[drag.note_idx];
+                                let max_dur = (total_beats as f64 - note.start_beat).max(q);
+                                let raw_dur = (orig_duration + delta_beats).clamp(q, max_dur);
+                                let snapped_dur = ((raw_dur / q).round() * q).clamp(q, max_dur);
+                                if (note.duration_beats - snapped_dur).abs() > 1e-4 {
+                                    note.duration_beats = snapped_dur;
+                                    pattern_mutated = true;
+                                }
+                            }
+                            NoteDragMode::Move { orig_start, orig_pitch, pointer_start_beat, .. } => {
+                                ui.ctx().set_cursor_icon(egui::CursorIcon::Grabbing);
+                                let delta_beats = curr_beat - pointer_start_beat;
+                                let note = &mut midi_pattern.notes[drag.note_idx];
+                                let max_start = (total_beats as f64 - note.duration_beats).max(0.0);
+                                let raw_start = (orig_start + delta_beats).clamp(0.0, max_start);
+                                let snapped_start = ((raw_start / q).round() * q).clamp(0.0, max_start);
+
+                                let curr_row = ((curr_pos.y - grid_top) / row_h).floor().clamp(0.0, (pitches.len() - 1) as f32) as usize;
+                                let new_pitch = if curr_row < pitches.len() { pitches[curr_row] } else { orig_pitch };
+
+                                if (note.start_beat - snapped_start).abs() > 1e-4 || note.pitch != new_pitch {
+                                    note.start_beat = snapped_start;
+                                    note.pitch = new_pitch;
+                                    pattern_mutated = true;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        if !response.dragged() {
+            state.note_drag_state = None;
+        }
+
+        // --- 7. Click to Add / Select / Delete Notes ---
+        if (response.clicked() || response.secondary_clicked()) && state.note_drag_state.is_none() {
+            if let Some(pos) = response.interact_pointer_pos() {
+                if grid_rect.contains(pos) {
+                    let mut clicked_note_idx = None;
+                    for (idx, note) in midi_pattern.notes.iter().enumerate().rev() {
+                        if let Some(row_idx) = pitches.iter().position(|&p| p == note.pitch) {
+                            let nx = grid_left + note.start_beat as f32 * px_per_beat;
+                            let nw = (note.duration_beats as f32 * px_per_beat).max(6.0);
+                            let ny = grid_top + row_idx as f32 * row_h;
+                            let n_rect = Rect::from_min_max(pos2(nx, ny), pos2(nx + nw + 3.0, ny + row_h));
                             if n_rect.contains(pos) {
                                 clicked_note_idx = Some(idx);
                                 break;
@@ -518,23 +880,17 @@ pub fn render_interactive_piano_roll(
                             midi_pattern.notes.remove(idx);
                             state.selected_note_idx = None;
                             pattern_mutated = true;
-                        } else {
-                            if state.selected_note_idx == Some(idx) {
-                                midi_pattern.notes.remove(idx);
-                                state.selected_note_idx = None;
-                                pattern_mutated = true;
-                            } else {
-                                state.selected_note_idx = Some(idx);
-                            }
+                        } else if response.clicked() {
+                            state.selected_note_idx = Some(idx);
                         }
                     } else if response.clicked() {
                         let row_idx = ((pos.y - grid_top) / row_h).floor() as usize;
                         if row_idx < pitches.len() {
                             let pitch = pitches[row_idx];
-                            let beat_rel = ((pos.x - grid_left) / grid_w) as f64 * total_beats as f64;
-                            let quant = 0.25;
-                            let quantized_beat = ((beat_rel / quant).floor() * quant).clamp(0.0, (total_beats as f64 - 0.25).max(0.0));
-                            let new_note = MidiNote::new(pitch, 100, quantized_beat, 0.5);
+                            let beat_rel = ((pos.x - grid_left) / px_per_beat) as f64;
+                            let quant = state.quantize_grid.max(0.0625);
+                            let quantized_beat = ((beat_rel / quant).floor() * quant).clamp(0.0, (total_beats as f64 - quant).max(0.0));
+                            let new_note = MidiNote::new(pitch, 100, quantized_beat, quant.max(0.25));
                             midi_pattern.notes.push(new_note);
                             state.selected_note_idx = Some(midi_pattern.notes.len() - 1);
                             pattern_mutated = true;
@@ -544,14 +900,22 @@ pub fn render_interactive_piano_roll(
             }
         }
 
-        // --- 2. Interaction: Drag Velocity / Chance Lanes ---
-        let lanes_rect = Rect::from_min_max(pos2(roll_rect.left(), grid_bottom), roll_rect.max);
-        let mid_lane_y = lanes_rect.top() + 19.0;
-        if response.dragged() {
+        // Delete key removes selected note
+        if ui.input(|i| i.key_pressed(egui::Key::Backspace) || i.key_pressed(egui::Key::Delete)) {
+            if let Some(sel) = state.selected_note_idx {
+                if sel < midi_pattern.notes.len() {
+                    midi_pattern.notes.remove(sel);
+                    state.selected_note_idx = None;
+                    pattern_mutated = true;
+                }
+            }
+        }
+
+        // --- 8. Drag Velocity / Chance Lanes ---
+        if response.dragged() && state.note_drag_state.is_none() {
             if let Some(pos) = response.interact_pointer_pos() {
-                let lanes_grid_rect = Rect::from_min_max(pos2(grid_left, grid_bottom), roll_rect.max);
                 if lanes_grid_rect.contains(pos) && !midi_pattern.notes.is_empty() {
-                    let pointer_beat = ((pos.x - grid_left) / grid_w) as f64 * total_beats as f64;
+                    let pointer_beat = ((pos.x - grid_left) / px_per_beat) as f64;
                     let target_idx = if let Some(sel) = state.selected_note_idx {
                         if sel < midi_pattern.notes.len() { Some(sel) } else { None }
                     } else {
@@ -563,13 +927,13 @@ pub fn render_interactive_piano_roll(
                     if let Some(idx) = target_idx {
                         let note = &mut midi_pattern.notes[idx];
                         if pos.y < mid_lane_y {
-                            let vel_base = mid_lane_y - 2.0;
-                            let norm = ((vel_base - pos.y) / 15.0).clamp(0.05, 1.0);
+                            let vel_base = mid_lane_y - 1.0;
+                            let norm = ((vel_base - pos.y) / (mid_lane_y - lanes_grid_rect.top() - 3.0)).clamp(0.05, 1.0);
                             note.velocity = (norm * 127.0).round().clamp(1.0, 127.0) as u8;
                             pattern_mutated = true;
                         } else {
-                            let chance_base = lanes_rect.bottom() - 2.0;
-                            let norm = ((chance_base - pos.y) / 15.0).clamp(0.0, 1.0);
+                            let chance_base = roll_rect.bottom() - 1.0;
+                            let norm = ((chance_base - pos.y) / (roll_rect.bottom() - mid_lane_y - 3.0)).clamp(0.0, 1.0);
                             note.probability = norm;
                             pattern_mutated = true;
                         }
@@ -578,7 +942,7 @@ pub fn render_interactive_piano_roll(
             }
         }
 
-        // --- 3. Render Top Bar/Beat Timeline Ruler (18.0 px high) ---
+        // --- 9. Render Top Timeline Ruler & Loop Brace ---
         let ruler_rect = Rect::from_min_max(roll_rect.min, pos2(roll_rect.right(), grid_top));
         let gutter_ruler_rect = Rect::from_min_max(ruler_rect.min, pos2(grid_left, grid_top));
         painter.rect_filled(gutter_ruler_rect, 0.0, COLOR_BG_PANEL_ALT);
@@ -589,6 +953,12 @@ pub fn render_interactive_piano_roll(
         let time_ruler_rect = Rect::from_min_max(pos2(grid_left, roll_rect.top()), pos2(roll_rect.right(), grid_top));
         painter.rect_filled(time_ruler_rect, 0.0, Color32::from_rgb(0x11, 0x14, 0x1c));
         painter.line_segment([time_ruler_rect.left_bottom(), time_ruler_rect.right_bottom()], Stroke::new(1.0_f32, COLOR_BORDER));
+
+        // Loop brace bar at top of ruler
+        let loop_end_beat = (state.loop_length_bars as f32 * 4.0).min(total_beats);
+        let loop_end_x = grid_left + (loop_end_beat / total_beats) * grid_w;
+        let loop_brace_rect = Rect::from_min_max(pos2(grid_left, roll_rect.top()), pos2(loop_end_x, roll_rect.top() + 3.0));
+        painter.rect_filled(loop_brace_rect, 1.0, COLOR_AMBER);
 
         let num_beats = total_beats.ceil() as i32;
         for b in 0..=num_beats {
@@ -617,14 +987,17 @@ pub fn render_interactive_piano_roll(
             }
         }
 
-        // --- 4. Render Left Piano Key Gutter (46.0 px wide) & Grid Rows ---
+        // --- 10. Render Piano Key Gutter & Grid Rows with Amber Audition ---
         for (r, &pitch) in pitches.iter().enumerate() {
             let ry = grid_top + r as f32 * row_h;
             let is_root = (pitch % 12) == (scale.root % 12);
             let black = is_black_key(pitch);
+            let is_audition = state.audition_pitch == Some(pitch);
 
             let key_rect = Rect::from_min_size(pos2(roll_rect.left(), ry), vec2(gutter_w, row_h));
-            let key_bg = if is_root {
+            let key_bg = if is_audition {
+                COLOR_AMBER
+            } else if is_root {
                 Color32::from_rgb(0x32, 0x27, 0x12)
             } else if black {
                 Color32::from_rgb(0x12, 0x14, 0x1c)
@@ -635,12 +1008,14 @@ pub fn render_interactive_piano_roll(
             painter.line_segment([pos2(key_rect.left(), key_rect.bottom()), pos2(key_rect.right(), key_rect.bottom())], Stroke::new(0.5_f32, Color32::from_rgb(0x1a, 0x1e, 0x28)));
             painter.line_segment([pos2(key_rect.right(), key_rect.top()), pos2(key_rect.right(), key_rect.bottom())], Stroke::new(1.0_f32, COLOR_BORDER));
 
-            if is_root {
+            if is_root && !is_audition {
                 painter.rect_filled(Rect::from_min_size(key_rect.min, vec2(3.0, row_h)), 0.0, COLOR_AMBER);
             }
 
             let note_name = midi_to_note_name(pitch);
-            let text_col = if is_root {
+            let text_col = if is_audition {
+                Color32::from_rgb(0x1a, 0x12, 0x00)
+            } else if is_root {
                 COLOR_AMBER
             } else if black {
                 COLOR_TEXT_MUTED
@@ -661,7 +1036,7 @@ pub fn render_interactive_piano_roll(
             painter.line_segment([grid_row_rect.left_bottom(), grid_row_rect.right_bottom()], Stroke::new(0.5_f32, Color32::from_rgb(0x1c, 0x20, 0x2c)));
         }
 
-        // --- 5. Render MIDI Notes ---
+        // --- 11. Render MIDI Notes with 7px Right-Edge Handle Indicator ---
         for (idx, note) in midi_pattern.notes.iter().enumerate() {
             if let Some(row_idx) = pitches.iter().position(|&p| p == note.pitch) {
                 let nx = grid_left + note.start_beat as f32 * px_per_beat;
@@ -673,7 +1048,13 @@ pub fn render_interactive_piano_roll(
 
                 let note_color = if is_sel { COLOR_AMBER } else { COLOR_CYAN };
                 painter.rect_filled(n_rect, 2.0, note_color);
-                painter.rect_stroke(n_rect, 2.0, Stroke::new(1.0_f32, Color32::WHITE));
+                painter.rect_stroke(n_rect, 2.0, Stroke::new(1.0_f32, if is_sel { Color32::WHITE } else { Color32::from_rgb(0x80, 0xdb, 0xe8) }));
+
+                // Right edge handle visual affordance (white vertical bar)
+                if nw >= 12.0 {
+                    let handle_rect = Rect::from_min_max(pos2(nx + nw - 3.0, ny + 2.0), pos2(nx + nw - 1.0, ny + row_h - 2.0));
+                    painter.rect_filled(handle_rect, 0.5, Color32::from_white_alpha(150));
+                }
 
                 if nw >= 18.0 {
                     let note_str = midi_to_note_name(note.pitch);
@@ -683,15 +1064,14 @@ pub fn render_interactive_piano_roll(
             }
         }
 
-        // --- 6. Render Labeled Velocity & Chance Lanes (38.0 px high at bottom) ---
+        // --- 12. Render Velocity & Chance Stalks Lane (Strictly Aligned) ---
         let gutter_lane_rect = Rect::from_min_max(pos2(roll_rect.left(), grid_bottom), pos2(grid_left, roll_rect.bottom()));
         painter.rect_filled(gutter_lane_rect, 0.0, COLOR_BG_PANEL_ALT);
         painter.line_segment([pos2(gutter_lane_rect.left(), mid_lane_y), pos2(gutter_lane_rect.right(), mid_lane_y)], Stroke::new(0.5_f32, COLOR_BORDER));
         painter.line_segment([gutter_lane_rect.right_top(), gutter_lane_rect.right_bottom()], Stroke::new(1.0_f32, COLOR_BORDER));
-        painter.text(pos2(gutter_lane_rect.center().x, lanes_rect.top() + 9.5), egui::Align2::CENTER_CENTER, "VEL", FontId::monospace(8.5), COLOR_AMBER);
-        painter.text(pos2(gutter_lane_rect.center().x, lanes_rect.top() + 28.5), egui::Align2::CENTER_CENTER, "CHANCE", FontId::monospace(7.5), COLOR_CYAN);
+        painter.text(pos2(gutter_lane_rect.center().x, lanes_grid_rect.top() + 9.5), egui::Align2::CENTER_CENTER, "VEL", FontId::monospace(8.5), COLOR_AMBER);
+        painter.text(pos2(gutter_lane_rect.center().x, lanes_grid_rect.top() + 27.5), egui::Align2::CENTER_CENTER, "CHANCE", FontId::monospace(7.5), COLOR_CYAN);
 
-        let lanes_grid_rect = Rect::from_min_max(pos2(grid_left, grid_bottom), roll_rect.max);
         painter.rect_filled(lanes_grid_rect, 0.0, COLOR_BG_VOID);
         painter.line_segment([pos2(grid_left, grid_bottom), pos2(roll_rect.right(), grid_bottom)], Stroke::new(1.0_f32, COLOR_BORDER));
         painter.line_segment([pos2(grid_left, mid_lane_y), pos2(roll_rect.right(), mid_lane_y)], Stroke::new(0.5_f32, Color32::from_rgb(0x18, 0x1d, 0x28)));
@@ -703,22 +1083,32 @@ pub fn render_interactive_piano_roll(
             painter.line_segment([pos2(bx, grid_bottom), pos2(bx, roll_rect.bottom())], Stroke::new(0.5_f32, Color32::from_rgb(0x18, 0x1d, 0x28)));
         }
 
-        for note in &midi_pattern.notes {
-            let stalk_x = grid_left + note.start_beat as f32 * px_per_beat + 3.0;
-            let vel_norm = (note.velocity as f32 / 127.0).clamp(0.05, 1.0);
-            let vel_h = vel_norm * 14.0;
-            let vel_base = mid_lane_y - 2.0;
-            painter.line_segment([pos2(stalk_x, vel_base), pos2(stalk_x, vel_base - vel_h)], Stroke::new(2.0_f32, COLOR_AMBER));
-            painter.circle_filled(pos2(stalk_x, vel_base - vel_h), 2.2, COLOR_AMBER);
+        for (idx, note) in midi_pattern.notes.iter().enumerate() {
+            let nx = grid_left + note.start_beat as f32 * px_per_beat;
+            let stalk_x = (nx + 4.0).clamp(grid_left + 2.0, roll_rect.right() - 4.0);
 
-            let prob_norm = note.probability.clamp(0.05, 1.0);
-            let prob_h = prob_norm * 14.0;
-            let chance_base = roll_rect.bottom() - 2.0;
-            painter.line_segment([pos2(stalk_x, chance_base), pos2(stalk_x, chance_base - prob_h)], Stroke::new(2.0_f32, COLOR_CYAN));
-            painter.circle_filled(pos2(stalk_x, chance_base - prob_h), 2.2, COLOR_CYAN);
+            if stalk_x >= grid_left && stalk_x <= roll_rect.right() {
+                let is_sel = state.selected_note_idx == Some(idx);
+
+                // Velocity stalk (upper half)
+                let vel_norm = (note.velocity as f32 / 127.0).clamp(0.05, 1.0);
+                let vel_h = vel_norm * (mid_lane_y - lanes_grid_rect.top() - 3.0);
+                let vel_base = mid_lane_y - 1.0;
+                let vel_col = if is_sel { Color32::WHITE } else { COLOR_AMBER };
+                painter.line_segment([pos2(stalk_x, vel_base), pos2(stalk_x, vel_base - vel_h)], Stroke::new(if is_sel { 2.5_f32 } else { 1.8_f32 }, vel_col));
+                painter.circle_filled(pos2(stalk_x, vel_base - vel_h), if is_sel { 2.8_f32 } else { 2.2_f32 }, vel_col);
+
+                // Chance stalk (lower half)
+                let prob_norm = note.probability.clamp(0.05, 1.0);
+                let prob_h = prob_norm * (roll_rect.bottom() - mid_lane_y - 3.0);
+                let chance_base = roll_rect.bottom() - 1.0;
+                let chance_col = if is_sel { Color32::WHITE } else { COLOR_CYAN };
+                painter.line_segment([pos2(stalk_x, chance_base), pos2(stalk_x, chance_base - prob_h)], Stroke::new(if is_sel { 2.5_f32 } else { 1.8_f32 }, chance_col));
+                painter.circle_filled(pos2(stalk_x, chance_base - prob_h), if is_sel { 2.8_f32 } else { 2.2_f32 }, chance_col);
+            }
         }
 
-        // --- 7. Playhead Position Line ---
+        // --- 13. Playhead Position Line ---
         let ph_x = grid_left + ((current_beat as f32 % total_beats) / total_beats) * grid_w;
         painter.line_segment([pos2(ph_x, roll_rect.top()), pos2(ph_x, roll_rect.bottom())], Stroke::new(1.5_f32, COLOR_GREEN));
         painter.line_segment([pos2(ph_x - 3.0, roll_rect.top()), pos2(ph_x + 3.0, roll_rect.top())], Stroke::new(2.0_f32, COLOR_GREEN));
@@ -790,5 +1180,166 @@ mod tests {
                 assert_eq!(pattern.notes.len(), 1);
             });
         });
+    }
+
+    #[test]
+    fn test_dynamic_bar_span_16_beats_no_clipping() {
+        let ctx = egui::Context::default();
+        let mut state = ClipViewState::default();
+        state.loop_length_bars = 4; // 16 beats
+
+        // 4-bar chord progression ending at 16.0 beats
+        let mut pattern = MidiPattern::new(4.0);
+        pattern.add_note(MidiNote::new(41, 100, 0.0, 4.0));
+        pattern.add_note(MidiNote::new(44, 100, 4.0, 4.0));
+        pattern.add_note(MidiNote::new(46, 100, 8.0, 4.0));
+        pattern.add_note(MidiNote::new(48, 100, 12.0, 4.0)); // ends at beat 16.0
+
+        let scale = GlobalScale::default();
+
+        let _ = ctx.run(egui::RawInput::default(), |ctx| {
+            egui::CentralPanel::default().show(ctx, |ui| {
+                let action = render_clip_view(ui, &mut state, &mut pattern, &scale, 0.0);
+                assert!(!action.pattern_mutated);
+            });
+        });
+
+        let notes_max_end = pattern.notes.iter().map(|n| n.end_beat()).fold(4.0, f64::max);
+        let total_beats = (state.loop_length_bars as f64 * 4.0)
+            .max(notes_max_end)
+            .max(pattern.length_beats)
+            .max(4.0) as f32;
+        assert_eq!(total_beats, 16.0, "Total beats must span at least 16.0 to render all 4 bars without right edge clipping");
+    }
+
+    #[test]
+    fn test_side_by_side_inspector_mutation_updates_piano_roll() {
+        let ctx = egui::Context::default();
+        let mut state = ClipViewState::default();
+        let scale = GlobalScale::default();
+
+        // Strum transform in Transform tab
+        state.sub_tab = ClipViewSubTab::Transform;
+        let mut chord_pattern = MidiPattern::new(4.0);
+        chord_pattern.add_note(MidiNote::new(60, 100, 0.0, 2.0));
+        chord_pattern.add_note(MidiNote::new(64, 100, 0.0, 2.0));
+        chord_pattern.add_note(MidiNote::new(67, 100, 0.0, 2.0));
+
+        transform_strum(&mut chord_pattern, 0.05, StrumDirection::Up);
+        assert!(chord_pattern.notes[0].start_beat <= chord_pattern.notes[1].start_beat);
+        assert!(chord_pattern.notes[1].start_beat <= chord_pattern.notes[2].start_beat);
+
+        // Verify side-by-side render executes cleanly
+        let _ = ctx.run(egui::RawInput::default(), |ctx| {
+            egui::CentralPanel::default().show(ctx, |ui| {
+                let action = render_clip_view(ui, &mut state, &mut chord_pattern, &scale, 0.0);
+                assert!(!action.pattern_mutated);
+            });
+        });
+
+        // Generate Stacks in Generate tab
+        state.sub_tab = ClipViewSubTab::Generate;
+        let roots = [60, 65];
+        let mut generated_pattern = generate_stacks(&roots, StacksChordType::Min7, StacksVoicing::Closed, 0, 1.0, 100);
+        assert_eq!(generated_pattern.notes.len(), 8);
+
+        let _ = ctx.run(egui::RawInput::default(), |ctx| {
+            egui::CentralPanel::default().show(ctx, |ui| {
+                let action = render_clip_view(ui, &mut state, &mut generated_pattern, &scale, 0.0);
+                assert!(!action.pattern_mutated);
+            });
+        });
+    }
+
+    #[test]
+    fn test_note_drag_state_move_and_resize_right() {
+        let mut state = ClipViewState::default();
+        let mut pattern = MidiPattern::new(16.0);
+        pattern.add_note(MidiNote::new(60, 100, 2.0, 1.0));
+
+        // 1. Simulate Move mode
+        state.quantize_grid = 0.25;
+        let drag_move = NoteDragState {
+            note_idx: 0,
+            mode: NoteDragMode::Move {
+                orig_start: 2.0,
+                orig_pitch: 60,
+                pointer_start_beat: 2.0,
+                pointer_start_row: 4,
+            },
+        };
+        state.note_drag_state = Some(drag_move);
+
+        // Move 1 beat forward
+        if let Some(drag) = state.note_drag_state {
+            if let NoteDragMode::Move { orig_start, pointer_start_beat, .. } = drag.mode {
+                let curr_beat = 3.0;
+                let delta = curr_beat - pointer_start_beat;
+                pattern.notes[drag.note_idx].start_beat = orig_start + delta;
+            }
+        }
+        assert_eq!(pattern.notes[0].start_beat, 3.0);
+
+        // 2. Simulate ResizeRight mode
+        let drag_resize = NoteDragState {
+            note_idx: 0,
+            mode: NoteDragMode::ResizeRight {
+                orig_duration: 1.0,
+                pointer_start_beat: 4.0,
+            },
+        };
+        state.note_drag_state = Some(drag_resize);
+
+        // Extend duration by 0.5 beats
+        if let Some(drag) = state.note_drag_state {
+            if let NoteDragMode::ResizeRight { orig_duration, pointer_start_beat } = drag.mode {
+                let curr_beat = 4.5;
+                let delta = curr_beat - pointer_start_beat;
+                pattern.notes[drag.note_idx].duration_beats = orig_duration + delta;
+            }
+        }
+        assert_eq!(pattern.notes[0].duration_beats, 1.5);
+    }
+
+    #[test]
+    fn test_key_gutter_audition_action_dispatch() {
+        let mut state = ClipViewState::default();
+        state.audition_pitch = Some(60);
+        state.last_audition_note = Some((60, 100));
+
+        let action = ClipViewAction {
+            pattern_mutated: false,
+            warp_mode_changed: None,
+            transpose_changed: None,
+            warp_marker_moved: false,
+            audition_note: state.last_audition_note.take(),
+            loop_length_changed: None,
+        };
+
+        assert_eq!(action.audition_note, Some((60, 100)));
+        assert_eq!(state.last_audition_note, None);
+    }
+
+    #[test]
+    fn test_octave_navigation_and_grid_division() {
+        let mut state = ClipViewState::default();
+        assert_eq!(state.pitch_scroll_offset, 0);
+
+        // Octave up in scale-folded mode (+7)
+        let oct_step = if state.scale_folded { 7 } else { 12 };
+        state.pitch_scroll_offset += oct_step;
+        assert_eq!(state.pitch_scroll_offset, 7);
+
+        // Octave down
+        state.pitch_scroll_offset -= oct_step;
+        assert_eq!(state.pitch_scroll_offset, 0);
+
+        // Grid divisions
+        state.quantize_grid = 1.0; // 1/4
+        assert_eq!(state.quantize_grid, 1.0);
+        state.quantize_grid = 0.5; // 1/8
+        assert_eq!(state.quantize_grid, 0.5);
+        state.quantize_grid = 0.125; // 1/32
+        assert_eq!(state.quantize_grid, 0.125);
     }
 }

@@ -33,3 +33,24 @@ ableton-mcp = { path = "../ableton-mcp" }
 [[test]]
 name = "e2e_m11_gui_test"
 path = "../../tests/e2e_m11_gui_test.rs"
+
+[[test]]
+name = "e2e_live12_clip_view_test"
+path = "tests/e2e_live12_clip_view_test.rs"
+
+[[test]]
+name = "e2e_live12_sync_sequencer_test"
+path = "tests/e2e_live12_sync_sequencer_test.rs"
+
+[[test]]
+name = "e2e_live12_layout_audit_test"
+path = "tests/e2e_live12_layout_audit_test.rs"
+
+[[test]]
+name = "adversarial_m1_m3_test"
+path = "tests/adversarial_m1_m3_test.rs"
+
+[[test]]
+name = "adversarial_m2_m4_test"
+path = "tests/adversarial_m2_m4_test.rs"
+

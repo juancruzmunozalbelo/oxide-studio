@@ -24,6 +24,8 @@ pub struct TimelineGuiState {
     pub locators: Vec<(f64, String)>, // (beat, name)
     pub automation_points: Vec<AutomationPoint>,
     pub selected_take_region: Option<(usize, f64, f64)>, // (take_idx, start_beat, end_beat)
+    pub selected_track: usize,
+    pub selected_clip: Option<(usize, usize)>, // (track_idx, clip_idx)
 }
 
 impl Default for TimelineGuiState {
@@ -49,6 +51,8 @@ impl Default for TimelineGuiState {
                 AutomationPoint::new(32.0, 0.95, 0.3),
             ],
             selected_take_region: Some((0, 4.0, 12.0)),
+            selected_track: 0,
+            selected_clip: None,
         }
     }
 }
@@ -57,6 +61,8 @@ pub struct TimelineAction {
     pub seek_beat: Option<f64>,
     pub back_to_arrangement: bool,
     pub loop_toggled: bool,
+    pub track_selected: Option<usize>,
+    pub clip_selected: Option<(usize, usize)>, // (track_idx, clip_idx)
 }
 
 pub fn render_arrangement_timeline(
@@ -70,6 +76,8 @@ pub fn render_arrangement_timeline(
         seek_beat: None,
         back_to_arrangement: false,
         loop_toggled: false,
+        track_selected: None,
+        clip_selected: None,
     };
 
     ui.vertical(|ui| {
@@ -141,12 +149,51 @@ pub fn render_arrangement_timeline(
         let track_start_x = rect.left() + track_header_w;
         let ruler_height = 24.0;
 
+        let track_h = 44.0;
+
         // Scrubbing by clicking ruler
         if response.clicked() || response.dragged() {
             if let Some(pos) = response.interact_pointer_pos() {
                 if pos.x >= track_start_x && pos.y <= rect.top() + ruler_height {
                     let clicked_beat = ((pos.x - track_start_x) / pixels_per_beat).max(0.0) as f64;
                     action.seek_beat = Some(clicked_beat);
+                }
+            }
+        }
+
+        // Selection by clicking track lane headers or clips
+        if response.clicked() {
+            if let Some(pos) = response.interact_pointer_pos() {
+                if pos.y > rect.top() + ruler_height {
+                    let mut check_y = rect.top() + ruler_height;
+                    for (t_idx, track) in timeline.tracks.iter().enumerate() {
+                        let lane_bottom = check_y + track_h;
+                        if pos.y >= check_y && pos.y < lane_bottom {
+                            gui_state.selected_track = t_idx;
+                            action.track_selected = Some(t_idx);
+                            ui.data_mut(|d| d.insert_temp(egui::Id::new("aruston_selected_track"), t_idx));
+
+                            if pos.x >= track_start_x {
+                                for (c_idx, clip) in track.clips.iter().enumerate() {
+                                    let cx1 = track_start_x + clip.timeline_start_beat as f32 * pixels_per_beat;
+                                    let cx2 = track_start_x + (clip.timeline_start_beat + clip.duration_beats) as f32 * pixels_per_beat;
+                                    if pos.x >= cx1 && pos.x <= cx2 {
+                                        gui_state.selected_clip = Some((t_idx, c_idx));
+                                        action.clip_selected = Some((t_idx, c_idx));
+                                        break;
+                                    }
+                                }
+                            }
+                            break;
+                        }
+                        check_y += track_h;
+                        if gui_state.show_automation && t_idx == 0 {
+                            check_y += 32.0;
+                        }
+                        if gui_state.show_comping && t_idx == 1 {
+                            check_y += 56.0;
+                        }
+                    }
                 }
             }
         }
@@ -236,15 +283,30 @@ pub fn render_arrangement_timeline(
                     pos2(lane_rect.left(), lane_rect.top()),
                     pos2(track_start_x, lane_rect.bottom()),
                 );
-                painter.rect_filled(header_box, 1.0, COLOR_BG_PANEL_ALT);
-                painter.rect_stroke(header_box, 1.0, Stroke::new(1.0_f32, COLOR_BORDER));
-                painter.text(
-                    pos2(header_box.left() + 6.0, header_box.center().y),
-                    egui::Align2::LEFT_CENTER,
-                    &track.name,
-                    FontId::monospace(10.0),
-                    COLOR_TEXT_PRIMARY,
-                );
+                let is_track_selected = gui_state.selected_track == t_idx;
+                if is_track_selected {
+                    painter.rect_filled(header_box, 1.0, Color32::from_rgb(0x13, 0x24, 0x36));
+                    painter.rect_stroke(header_box, 1.0, Stroke::new(1.8_f32, COLOR_CYAN));
+                    let left_bar = Rect::from_min_size(header_box.min, vec2(3.0, header_box.height()));
+                    painter.rect_filled(left_bar, 1.0, COLOR_CYAN);
+                    painter.text(
+                        pos2(header_box.left() + 8.0, header_box.center().y),
+                        egui::Align2::LEFT_CENTER,
+                        format!("● {}", track.name),
+                        FontId::monospace(10.0),
+                        COLOR_CYAN,
+                    );
+                } else {
+                    painter.rect_filled(header_box, 1.0, COLOR_BG_PANEL_ALT);
+                    painter.rect_stroke(header_box, 1.0, Stroke::new(1.0_f32, COLOR_BORDER));
+                    painter.text(
+                        pos2(header_box.left() + 6.0, header_box.center().y),
+                        egui::Align2::LEFT_CENTER,
+                        &track.name,
+                        FontId::monospace(10.0),
+                        COLOR_TEXT_PRIMARY,
+                    );
+                }
 
                 // Track lane background
                 painter.line_segment(
@@ -253,7 +315,7 @@ pub fn render_arrangement_timeline(
                 );
 
                 // Render Clips on Track
-                for clip in &track.clips {
+                for (clip_idx, clip) in track.clips.iter().enumerate() {
                     let cx1 = track_start_x + clip.timeline_start_beat as f32 * pixels_per_beat;
                     let cx2 = track_start_x + (clip.timeline_start_beat + clip.duration_beats) as f32 * pixels_per_beat;
                     let c_rect = Rect::from_min_max(
@@ -268,7 +330,14 @@ pub fn render_arrangement_timeline(
                     };
 
                     painter.rect_filled(c_rect, 2.0, clip_bg);
-                    painter.rect_stroke(c_rect, 2.0, Stroke::new(1.0_f32, COLOR_CYAN));
+
+                    let is_clip_selected = gui_state.selected_clip == Some((t_idx, clip_idx));
+                    if is_clip_selected {
+                        painter.rect_stroke(c_rect, 2.0, Stroke::new(2.0_f32, COLOR_AMBER));
+                        painter.circle_filled(pos2(c_rect.right() - 5.0, c_rect.top() + 5.0), 2.5, COLOR_AMBER);
+                    } else {
+                        painter.rect_stroke(c_rect, 2.0, Stroke::new(1.0_f32, COLOR_CYAN));
+                    }
 
                     // Clip Name label
                     painter.text(
@@ -389,4 +458,43 @@ pub fn render_arrangement_timeline(
     });
 
     action
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ableton_timeline::{ArrangementClip, ArrangementTrack, ClipPattern, MidiPattern};
+
+    #[test]
+    fn test_timeline_gui_state_selection_defaults() {
+        let state = TimelineGuiState::default();
+        assert_eq!(state.selected_track, 0);
+        assert!(state.selected_clip.is_none());
+    }
+
+    #[test]
+    fn test_timeline_render_with_track_and_clip_selection() {
+        let ctx = egui::Context::default();
+        let mut timeline = ArrangementTimeline::new();
+        let mut trk = ArrangementTrack::new(1, "Test Track", "MidiSynth");
+        trk.add_clip(ArrangementClip::new(1, "Clip 1", 0.0, 16.0, ClipPattern::Midi(MidiPattern::new(16.0))));
+        timeline.tracks.push(trk);
+
+        let mut gui_state = TimelineGuiState::default();
+        gui_state.selected_track = 0;
+        gui_state.selected_clip = Some((0, 0));
+
+        let _ = ctx.run(egui::RawInput::default(), |ctx| {
+            egui::CentralPanel::default().show(ctx, |ui| {
+                let action = render_arrangement_timeline(
+                    ui,
+                    &mut timeline,
+                    &mut gui_state,
+                    0.0,
+                    false,
+                );
+                assert!(!action.back_to_arrangement);
+            });
+        });
+    }
 }
