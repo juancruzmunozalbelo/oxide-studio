@@ -28,3 +28,7 @@ path = "../../tests/e2e_mcp_server_test.rs"
 name = "e2e_mcp_adversarial_m7_2_test"
 path = "../../tests/e2e_mcp_adversarial_m7_2_test.rs"
 
+[[test]]
+name = "e2e_m12_mcp_bridge_test"
+path = "../../tests/e2e_m12_mcp_bridge_test.rs"
+

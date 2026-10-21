@@ -4,3 +4,5 @@
 .DS_Store
 .agents/
 *.wav
+__pycache__/
+*.pyc

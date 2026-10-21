@@ -1,12 +1,21 @@
 //! DAW state container for the Model Context Protocol server.
 
+use std::collections::HashMap;
 use std::path::Path;
+use ableton_core::device::DeviceChain;
+use ableton_core::scale::{GlobalScale, ScaleMode};
 use ableton_core::AudioTelemetry;
 use ableton_dsp::SynthEngine;
 use ableton_drums::DrumRack;
 use ableton_fx::{FdnReverb, MasterLimiter, Mixer, Saturator, TempoDelay};
 use ableton_project::{DAWProject, TrackDefinition};
+use ableton_timeline::groove::GroovePool;
+use ableton_timeline::track::TrackManager;
+use ableton_timeline::warping::WarpedAudioClip;
 use ableton_timeline::{ArrangementTimeline, SessionMatrix};
+
+use crate::bridge::TcpLomClient;
+use crate::browser::BrowserLibrary;
 
 pub struct DawState {
     pub project: DAWProject,
@@ -25,6 +34,13 @@ pub struct DawState {
     pub matrix: SessionMatrix,
     pub timeline: ArrangementTimeline,
     pub last_saved_path: Option<String>,
+    pub groove_pool: GroovePool,
+    pub track_manager: TrackManager,
+    pub scale: GlobalScale,
+    pub browser: BrowserLibrary,
+    pub audio_clips: HashMap<(u32, u32), WarpedAudioClip>,
+    pub device_chains: HashMap<u32, DeviceChain>,
+    pub lom_client: TcpLomClient,
 }
 
 impl DawState {
@@ -51,6 +67,13 @@ impl DawState {
 
         let matrix = SessionMatrix::new(2, 4);
         let timeline = ArrangementTimeline::new();
+        let groove_pool = GroovePool::new();
+        let track_manager = TrackManager::new();
+        let scale = GlobalScale::new(5, ScaleMode::Dorian);
+        let browser = BrowserLibrary::new_factory();
+        let audio_clips = HashMap::new();
+        let device_chains = HashMap::new();
+        let lom_client = TcpLomClient::default();
 
         Self {
             project,
@@ -69,6 +92,13 @@ impl DawState {
             matrix,
             timeline,
             last_saved_path: None,
+            groove_pool,
+            track_manager,
+            scale,
+            browser,
+            audio_clips,
+            device_chains,
+            lom_client,
         }
     }
 
@@ -91,6 +121,13 @@ impl DawState {
         self.synth.reset();
         self.synth.load_preset("wowbass.preset");
         self.mixer = Mixer::new(self.sample_rate);
+        self.groove_pool = GroovePool::new();
+        self.track_manager = TrackManager::new();
+        self.scale = GlobalScale::new(5, ScaleMode::Dorian);
+        self.browser = BrowserLibrary::new_factory();
+        self.audio_clips.clear();
+        self.device_chains.clear();
+        self.lom_client = TcpLomClient::default();
     }
 
     /// Synchronize project document with live state before saving.

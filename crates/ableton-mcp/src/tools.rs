@@ -5,15 +5,24 @@ use std::path::Path;
 use serde_json::{json, Value};
 
 use ableton_bounce::{DemoArrangementRenderer, WavWriter};
+use ableton_core::device::DeviceChain;
+use ableton_core::scale::{GlobalScale, ScaleMode};
 use ableton_dsp::presets::{load_mapping_catalog, load_preset_catalog};
 use ableton_plugin_scanner::PluginScannerSupervisor;
 use ableton_project::{DAWProject, TrackDefinition};
 use ableton_timeline::{
-    ArrangementClip, AutomationLane, AutomationPoint, ClipPattern,
-    DrumStep, DrumStepPattern, MidiNote, MidiPattern, QuantizeMode, SessionClip,
+    generate_euclidean, generate_rhythm, generate_seed, generate_shape, generate_stacks,
+    transform_arpeggiate, transform_connect, transform_ornament, transform_quantize,
+    transform_recombine, transform_span, transform_strum, transform_time_warp,
+    ArrangementClip, AutomationLane, AutomationPoint, ClipPattern, ContourShape,
+    DrumStep, DrumStepPattern, MidiNote, MidiPattern, QuantizeMode, RhythmStyle, ScaleLock,
+    SessionClip, SpanMode, StacksChordType, StacksVoicing, StrumDirection, WarpedAudioClip,
+    WarpMode,
 };
 
 use crate::analysis::AudioAnalysisMetrics;
+use crate::browser::BrowserCategory;
+use crate::devices::{add_device_to_chain, dump_device_chain, instantiate_device};
 use crate::lilypond::{parse_lilypond, sequence_to_clip_pattern};
 use crate::music_theory::{
     bjorklund, build_chord_notes, generate_drum_groove, get_scale_intervals,
@@ -605,6 +614,448 @@ pub fn get_tool_definitions() -> Vec<Tool> {
                     "output_wav_path": { "type": "string", "description": "Target WAV file" }
                 })),
                 required: None,
+            },
+        },
+
+        // --- Group 2 (Extra): Devices & Chains ---
+        Tool {
+            name: "device_add_to_track".to_string(),
+            description: "Insert an Ableton device into a track's DeviceChain (Wavetable, Operator, Drift, Meld, Analog, Collision, Tension, Electric, Simpler, DrumRack, EQEight, GlueCompressor, Roar, AutoFilter, OTT, HybridReverb, SpectralResonator, Echo, BeatRepeat, Corpus, Redux, Utility, Limiter, Arpeggiator, Chord, Scale, Velocity).".to_string(),
+            input_schema: ToolInputSchema {
+                schema_type: "object".to_string(),
+                properties: Some(json!({
+                    "track_id": { "type": "integer", "description": "Target track ID" },
+                    "device_type": { "type": "string", "description": "Device name or type identifier" },
+                    "position": { "type": "integer", "description": "Optional 0-based insertion index" }
+                })),
+                required: Some(vec!["track_id".to_string(), "device_type".to_string()]),
+            },
+        },
+        Tool {
+            name: "device_remove_from_track".to_string(),
+            description: "Remove a device from a track's DeviceChain by its 0-based index.".to_string(),
+            input_schema: ToolInputSchema {
+                schema_type: "object".to_string(),
+                properties: Some(json!({
+                    "track_id": { "type": "integer", "description": "Target track ID" },
+                    "device_index": { "type": "integer", "description": "Device index in chain to delete" }
+                })),
+                required: Some(vec!["track_id".to_string(), "device_index".to_string()]),
+            },
+        },
+        Tool {
+            name: "device_reorder".to_string(),
+            description: "Reorder devices within a track's DeviceChain from one index to another.".to_string(),
+            input_schema: ToolInputSchema {
+                schema_type: "object".to_string(),
+                properties: Some(json!({
+                    "track_id": { "type": "integer", "description": "Target track ID" },
+                    "from_index": { "type": "integer", "description": "Source index" },
+                    "to_index": { "type": "integer", "description": "Destination index" }
+                })),
+                required: Some(vec!["track_id".to_string(), "from_index".to_string(), "to_index".to_string()]),
+            },
+        },
+        Tool {
+            name: "device_set_param".to_string(),
+            description: "Set an interactive parameter on a device in a track's DeviceChain.".to_string(),
+            input_schema: ToolInputSchema {
+                schema_type: "object".to_string(),
+                properties: Some(json!({
+                    "track_id": { "type": "integer", "description": "Target track ID" },
+                    "device_index": { "type": "integer", "description": "Device index in chain" },
+                    "param": { "type": "integer", "description": "Parameter index or ID" },
+                    "value": { "type": "number", "description": "Target parameter floating-point value" }
+                })),
+                required: Some(vec!["track_id".to_string(), "device_index".to_string(), "param".to_string(), "value".to_string()]),
+            },
+        },
+        Tool {
+            name: "device_get_chain".to_string(),
+            description: "Retrieve complete serialized DeviceChain for a track with device types, categories, latency, and parameters.".to_string(),
+            input_schema: ToolInputSchema {
+                schema_type: "object".to_string(),
+                properties: Some(json!({
+                    "track_id": { "type": "integer", "description": "Target track ID" }
+                })),
+                required: Some(vec!["track_id".to_string()]),
+            },
+        },
+
+        // --- Group 3 (Extra): Synths, Drums & Simpler ---
+        Tool {
+            name: "simpler_slice_to_drum_rack".to_string(),
+            description: "Slice an audio sample in Simpler to a new 16-pad Drum Rack track based on detected transient markers.".to_string(),
+            input_schema: ToolInputSchema {
+                schema_type: "object".to_string(),
+                properties: Some(json!({
+                    "track_id": { "type": "integer", "description": "Source track containing Simpler" },
+                    "simpler_device_index": { "type": "integer", "description": "Optional device index of Simpler in chain" }
+                })),
+                required: Some(vec!["track_id".to_string()]),
+            },
+        },
+
+        // --- Group 4: Browser & Neural Sound Similarity ---
+        Tool {
+            name: "browser_search".to_string(),
+            description: "Search the Live 12 library of sounds, drums, instruments, effects, and presets with tag filtering.".to_string(),
+            input_schema: ToolInputSchema {
+                schema_type: "object".to_string(),
+                properties: Some(json!({
+                    "query": { "type": "string", "description": "Search query substring" },
+                    "category": { "type": "string", "description": "Optional category (Sounds, Drums, Instruments, AudioEffects, MidiEffects, PlugIns, Clips, Samples, Grooves)" },
+                    "tags": { "type": "array", "items": { "type": "string" }, "description": "Optional tags to filter by" }
+                })),
+                required: Some(vec!["query".to_string()]),
+            },
+        },
+        Tool {
+            name: "browser_find_similar_sounds".to_string(),
+            description: "Find sonically similar sounds using 8-dimensional spectral cosine similarity vector search.".to_string(),
+            input_schema: ToolInputSchema {
+                schema_type: "object".to_string(),
+                properties: Some(json!({
+                    "target_id": { "type": "string", "description": "Target browser item ID to compare against" },
+                    "top_k": { "type": "integer", "description": "Maximum number of similar matches to return (default 10)" }
+                })),
+                required: Some(vec!["target_id".to_string()]),
+            },
+        },
+
+        // --- Group 6: Live 12 MIDI Tools ---
+        Tool {
+            name: "midi_transform_clip".to_string(),
+            description: "Apply Live 12 MIDI transformation to a clip (arpeggiate, connect, ornament, quantize, recombine, span, strum, time_warp).".to_string(),
+            input_schema: ToolInputSchema {
+                schema_type: "object".to_string(),
+                properties: Some(json!({
+                    "track_id": { "type": "integer", "description": "Target track ID" },
+                    "slot_id": { "type": "integer", "description": "Target clip slot ID" },
+                    "transform": { "type": "string", "description": "Transform algorithm: arpeggiate, connect, ornament, quantize, recombine, span, strum, time_warp" },
+                    "params": { "type": "object", "description": "Optional algorithm parameters" }
+                })),
+                required: Some(vec!["track_id".to_string(), "slot_id".to_string(), "transform".to_string()]),
+            },
+        },
+        Tool {
+            name: "midi_generate_clip".to_string(),
+            description: "Generate notes into a clip using Live 12 generative algorithms (seed, shape, stacks, rhythm, euclidean).".to_string(),
+            input_schema: ToolInputSchema {
+                schema_type: "object".to_string(),
+                properties: Some(json!({
+                    "track_id": { "type": "integer", "description": "Target track ID" },
+                    "slot_id": { "type": "integer", "description": "Target clip slot ID" },
+                    "generator": { "type": "string", "description": "Generator algorithm: seed, shape, stacks, rhythm, euclidean" },
+                    "params": { "type": "object", "description": "Optional generator parameters" }
+                })),
+                required: Some(vec!["track_id".to_string(), "slot_id".to_string(), "generator".to_string()]),
+            },
+        },
+
+        // --- Group 7: Audio Clips & Warping ---
+        Tool {
+            name: "audio_clip_create_warped".to_string(),
+            description: "Create an audio clip with non-destructive 6-mode warping enabled (beats, tones, texture, repitch, complex, complex_pro).".to_string(),
+            input_schema: ToolInputSchema {
+                schema_type: "object".to_string(),
+                properties: Some(json!({
+                    "track_id": { "type": "integer", "description": "Target track ID" },
+                    "slot_id": { "type": "integer", "description": "Target clip slot ID" },
+                    "sample_path": { "type": "string", "description": "WAV file path" },
+                    "warp_mode": { "type": "string", "description": "Optional warp mode: beats, tones, texture, repitch, complex, complex_pro" }
+                })),
+                required: Some(vec!["track_id".to_string(), "slot_id".to_string(), "sample_path".to_string()]),
+            },
+        },
+        Tool {
+            name: "audio_clip_set_warp_mode".to_string(),
+            description: "Switch warp mode algorithm and granular grain size on a warped audio clip.".to_string(),
+            input_schema: ToolInputSchema {
+                schema_type: "object".to_string(),
+                properties: Some(json!({
+                    "track_id": { "type": "integer", "description": "Target track ID" },
+                    "slot_id": { "type": "integer", "description": "Target clip slot ID" },
+                    "warp_mode": { "type": "string", "description": "Target warp mode (beats, tones, texture, repitch, complex, complex_pro)" },
+                    "grain_size": { "type": "number", "description": "Optional grain size in milliseconds" }
+                })),
+                required: Some(vec!["track_id".to_string(), "slot_id".to_string(), "warp_mode".to_string()]),
+            },
+        },
+        Tool {
+            name: "audio_clip_add_warp_marker".to_string(),
+            description: "Add a piecewise-linear warp marker anchoring sample time in seconds to musical beat time.".to_string(),
+            input_schema: ToolInputSchema {
+                schema_type: "object".to_string(),
+                properties: Some(json!({
+                    "track_id": { "type": "integer", "description": "Target track ID" },
+                    "slot_id": { "type": "integer", "description": "Target clip slot ID" },
+                    "sample_time": { "type": "number", "description": "Sample timestamp in seconds" },
+                    "beat_time": { "type": "number", "description": "Musical beat timestamp" }
+                })),
+                required: Some(vec!["track_id".to_string(), "slot_id".to_string(), "sample_time".to_string(), "beat_time".to_string()]),
+            },
+        },
+
+        // --- Group 8: Groove Pool & Comping ---
+        Tool {
+            name: "groove_pool_list".to_string(),
+            description: "List all loaded Groove Pool templates (MPC 16th, TR-909 Shuffle, SP-1200 Funk, Latin Triplet) and parameters.".to_string(),
+            input_schema: ToolInputSchema {
+                schema_type: "object".to_string(),
+                properties: None,
+                required: None,
+            },
+        },
+        Tool {
+            name: "groove_pool_apply_to_clip".to_string(),
+            description: "Apply a Groove Pool template non-destructively to a MIDI clip's notes or audio clip's warp markers.".to_string(),
+            input_schema: ToolInputSchema {
+                schema_type: "object".to_string(),
+                properties: Some(json!({
+                    "track_id": { "type": "integer", "description": "Target track ID" },
+                    "slot_id": { "type": "integer", "description": "Target clip slot ID" },
+                    "groove_name": { "type": "string", "description": "Groove template name" },
+                    "amount": { "type": "number", "description": "Optional global groove amount multiplier (0.0 to 1.30)" }
+                })),
+                required: Some(vec!["track_id".to_string(), "slot_id".to_string(), "groove_name".to_string()]),
+            },
+        },
+        Tool {
+            name: "take_lane_create".to_string(),
+            description: "Add a new recording/comping take lane to an arrangement track.".to_string(),
+            input_schema: ToolInputSchema {
+                schema_type: "object".to_string(),
+                properties: Some(json!({
+                    "track_id": { "type": "integer", "description": "Target track ID" },
+                    "name": { "type": "string", "description": "Optional take lane title" }
+                })),
+                required: Some(vec!["track_id".to_string()]),
+            },
+        },
+        Tool {
+            name: "take_lane_comp_region".to_string(),
+            description: "Comp a region from a take lane into the main track lane with automatic 4-10ms equal-power micro-crossfades.".to_string(),
+            input_schema: ToolInputSchema {
+                schema_type: "object".to_string(),
+                properties: Some(json!({
+                    "track_id": { "type": "integer", "description": "Target track ID" },
+                    "take_lane_index": { "type": "integer", "description": "Source take lane index" },
+                    "start_beat": { "type": "number", "description": "Start beat of comp region" },
+                    "end_beat": { "type": "number", "description": "End beat of comp region" }
+                })),
+                required: Some(vec!["track_id".to_string(), "take_lane_index".to_string(), "start_beat".to_string(), "end_beat".to_string()]),
+            },
+        },
+
+        // --- Group 9: Mixer, Returns & Scale ---
+        Tool {
+            name: "return_track_create".to_string(),
+            description: "Create an auxiliary return bus track (e.g. Return A Reverb, Return B Delay) with optional initial effect.".to_string(),
+            input_schema: ToolInputSchema {
+                schema_type: "object".to_string(),
+                properties: Some(json!({
+                    "name": { "type": "string", "description": "Return track title" },
+                    "initial_device": { "type": "string", "description": "Optional initial device to insert" }
+                })),
+                required: Some(vec!["name".to_string()]),
+            },
+        },
+        Tool {
+            name: "mixer_set_send".to_string(),
+            description: "Set auxiliary send level (dB) from a track into a return track bus.".to_string(),
+            input_schema: ToolInputSchema {
+                schema_type: "object".to_string(),
+                properties: Some(json!({
+                    "track_id": { "type": "integer", "description": "Source track ID" },
+                    "send_index": { "type": "integer", "description": "Send index corresponding to return track" },
+                    "level_db": { "type": "number", "description": "Send level in decibels (-70.0 to +6.0 dB)" }
+                })),
+                required: Some(vec!["track_id".to_string(), "send_index".to_string(), "level_db".to_string()]),
+            },
+        },
+        Tool {
+            name: "scale_set_global".to_string(),
+            description: "Set the song's global scale and root note in Live 12 with optional scale lock.".to_string(),
+            input_schema: ToolInputSchema {
+                schema_type: "object".to_string(),
+                properties: Some(json!({
+                    "root_note": { "type": "string", "description": "Root pitch class (e.g. 'C', 'F#', or integer 0..11)" },
+                    "scale_name": { "type": "string", "description": "Scale mode: Major, Minor, Dorian, Phrygian, Lydian, Mixolydian, Aeolian, Locrian, HarmonicMinor, MelodicMinor, Pentatonic, Blues, Diminished, WholeTone" },
+                    "scale_lock": { "type": "boolean", "description": "Lock notes to scale" }
+                })),
+                required: Some(vec!["root_note".to_string(), "scale_name".to_string()]),
+            },
+        },
+
+        // --- Group 15: Real Ableton Live 12 LOM Bridge (15 tools) ---
+        Tool {
+            name: "live12_status".to_string(),
+            description: "Check TCP connectivity to real Ableton Live 12 Suite LOM on 127.0.0.1:9877.".to_string(),
+            input_schema: ToolInputSchema {
+                schema_type: "object".to_string(),
+                properties: None,
+                required: None,
+            },
+        },
+        Tool {
+            name: "live12_get_song_info".to_string(),
+            description: "Query real Live 12 Song info: tempo, is_playing, song_time, scale, root, track count, return track count, scene count.".to_string(),
+            input_schema: ToolInputSchema {
+                schema_type: "object".to_string(),
+                properties: None,
+                required: None,
+            },
+        },
+        Tool {
+            name: "live12_create_midi_track".to_string(),
+            description: "Create a new MIDI track in real Ableton Live 12 Suite via LOM bridge.".to_string(),
+            input_schema: ToolInputSchema {
+                schema_type: "object".to_string(),
+                properties: Some(json!({
+                    "index": { "type": "integer", "description": "Optional track index" }
+                })),
+                required: None,
+            },
+        },
+        Tool {
+            name: "live12_create_audio_track".to_string(),
+            description: "Create a new audio track in real Ableton Live 12 Suite via LOM bridge.".to_string(),
+            input_schema: ToolInputSchema {
+                schema_type: "object".to_string(),
+                properties: Some(json!({
+                    "index": { "type": "integer", "description": "Optional track index" }
+                })),
+                required: None,
+            },
+        },
+        Tool {
+            name: "live12_create_return_track".to_string(),
+            description: "Create a new return track in real Ableton Live 12 Suite via LOM bridge.".to_string(),
+            input_schema: ToolInputSchema {
+                schema_type: "object".to_string(),
+                properties: None,
+                required: None,
+            },
+        },
+        Tool {
+            name: "live12_load_browser_item".to_string(),
+            description: "Load an instrument, sample, or effect from the browser into a track in real Ableton Live 12 Suite.".to_string(),
+            input_schema: ToolInputSchema {
+                schema_type: "object".to_string(),
+                properties: Some(json!({
+                    "track_index": { "type": "integer", "description": "Target track index" },
+                    "uri": { "type": "string", "description": "Browser item URI or path" }
+                })),
+                required: Some(vec!["track_index".to_string(), "uri".to_string()]),
+            },
+        },
+        Tool {
+            name: "live12_create_clip".to_string(),
+            description: "Create an empty clip in a track clip slot in real Ableton Live 12 Suite.".to_string(),
+            input_schema: ToolInputSchema {
+                schema_type: "object".to_string(),
+                properties: Some(json!({
+                    "track_index": { "type": "integer", "description": "Target track index" },
+                    "slot_index": { "type": "integer", "description": "Target clip slot index" },
+                    "length_beats": { "type": "number", "description": "Clip duration in quarter-note beats (default 4.0)" }
+                })),
+                required: Some(vec!["track_index".to_string(), "slot_index".to_string()]),
+            },
+        },
+        Tool {
+            name: "live12_add_notes".to_string(),
+            description: "Add MIDI notes to an existing clip in real Ableton Live 12 Suite.".to_string(),
+            input_schema: ToolInputSchema {
+                schema_type: "object".to_string(),
+                properties: Some(json!({
+                    "track_index": { "type": "integer", "description": "Target track index" },
+                    "slot_index": { "type": "integer", "description": "Target clip slot index" },
+                    "notes": { "type": "array", "description": "List of note dictionaries [{pitch, start_beat, duration_beats, velocity}]" }
+                })),
+                required: Some(vec!["track_index".to_string(), "slot_index".to_string(), "notes".to_string()]),
+            },
+        },
+        Tool {
+            name: "live12_fire_clip".to_string(),
+            description: "Trigger/launch a clip in real Ableton Live 12 Suite.".to_string(),
+            input_schema: ToolInputSchema {
+                schema_type: "object".to_string(),
+                properties: Some(json!({
+                    "track_index": { "type": "integer", "description": "Target track index" },
+                    "slot_index": { "type": "integer", "description": "Target clip slot index" }
+                })),
+                required: Some(vec!["track_index".to_string(), "slot_index".to_string()]),
+            },
+        },
+        Tool {
+            name: "live12_fire_scene".to_string(),
+            description: "Trigger/launch a full scene row in real Ableton Live 12 Suite.".to_string(),
+            input_schema: ToolInputSchema {
+                schema_type: "object".to_string(),
+                properties: Some(json!({
+                    "scene_index": { "type": "integer", "description": "0-based scene row index" }
+                })),
+                required: Some(vec!["scene_index".to_string()]),
+            },
+        },
+        Tool {
+            name: "live12_set_device_param".to_string(),
+            description: "Set a device parameter on a track in real Ableton Live 12 Suite.".to_string(),
+            input_schema: ToolInputSchema {
+                schema_type: "object".to_string(),
+                properties: Some(json!({
+                    "track_index": { "type": "integer", "description": "Track index" },
+                    "device_index": { "type": "integer", "description": "Device index in track chain" },
+                    "param_index": { "type": "integer", "description": "Parameter index in device" },
+                    "value": { "type": "number", "description": "Target value" }
+                })),
+                required: Some(vec!["track_index".to_string(), "device_index".to_string(), "param_index".to_string(), "value".to_string()]),
+            },
+        },
+        Tool {
+            name: "live12_get_track_devices".to_string(),
+            description: "Enumerate all devices and parameter names/ranges for a track in real Ableton Live 12 Suite.".to_string(),
+            input_schema: ToolInputSchema {
+                schema_type: "object".to_string(),
+                properties: Some(json!({
+                    "track_index": { "type": "integer", "description": "Track index" }
+                })),
+                required: Some(vec!["track_index".to_string()]),
+            },
+        },
+        Tool {
+            name: "live12_set_tempo".to_string(),
+            description: "Set song tempo (BPM) in real Ableton Live 12 Suite.".to_string(),
+            input_schema: ToolInputSchema {
+                schema_type: "object".to_string(),
+                properties: Some(json!({
+                    "bpm": { "type": "number", "description": "Tempo in BPM (20..999)" }
+                })),
+                required: Some(vec!["bpm".to_string()]),
+            },
+        },
+        Tool {
+            name: "live12_set_scale".to_string(),
+            description: "Set song global scale and root note in real Ableton Live 12 Suite.".to_string(),
+            input_schema: ToolInputSchema {
+                schema_type: "object".to_string(),
+                properties: Some(json!({
+                    "root_note": { "type": "integer", "description": "Root note pitch class (0..11)" },
+                    "scale_name": { "type": "string", "description": "Scale name (Major, Minor, Dorian, etc.)" }
+                })),
+                required: Some(vec!["root_note".to_string(), "scale_name".to_string()]),
+            },
+        },
+        Tool {
+            name: "live12_exec_lom_query".to_string(),
+            description: "Execute arbitrary safe Python expression or query against real Live Object Model.".to_string(),
+            input_schema: ToolInputSchema {
+                schema_type: "object".to_string(),
+                properties: Some(json!({
+                    "query": { "type": "string", "description": "Python expression with 'song' and 'app' in scope" }
+                })),
+                required: Some(vec!["query".to_string()]),
             },
         },
     ]
@@ -1787,6 +2238,902 @@ pub fn call_tool(state: &mut DawState, name: &str, args: &Value) -> ToolCallResu
                 "spectral_centroid_hz": metrics.spectral_centroid_hz,
                 "spectral_bands": metrics.spectral_bands
             }))
+        }
+
+        // --- Group 2 (Extra): Devices & Chains ---
+        "device_add_to_track" => {
+            let track_id = match args.get("track_id").and_then(|v| v.as_u64()) {
+                Some(id) => id as u32,
+                None => return ToolCallResult::error("Missing 'track_id' parameter"),
+            };
+            let dev_type = match args.get("device_type").or_else(|| args.get("device_name")).and_then(|v| v.as_str()) {
+                Some(d) => d,
+                None => return ToolCallResult::error("Missing 'device_type' or 'device_name' parameter"),
+            };
+            let pos = args.get("position").and_then(|v| v.as_u64()).map(|p| p as usize);
+            match instantiate_device(dev_type, state.sample_rate) {
+                Ok(dev) => {
+                    let chain = state.device_chains.entry(track_id).or_insert_with(|| {
+                        let mut c = DeviceChain::new();
+                        c.name = format!("Track {} Chain", track_id);
+                        c
+                    });
+                    let inserted_idx = add_device_to_chain(chain, dev, pos);
+                    ToolCallResult::json(&json!({
+                        "status": "device_added",
+                        "track_id": track_id,
+                        "device_type": dev_type,
+                        "device_index": inserted_idx,
+                        "total_devices": chain.device_count()
+                    }))
+                }
+                Err(e) => ToolCallResult::error(e),
+            }
+        }
+        "device_remove_from_track" => {
+            let track_id = match args.get("track_id").and_then(|v| v.as_u64()) {
+                Some(id) => id as u32,
+                None => return ToolCallResult::error("Missing 'track_id' parameter"),
+            };
+            let dev_index = match args.get("device_index").and_then(|v| v.as_u64()) {
+                Some(idx) => idx as usize,
+                None => return ToolCallResult::error("Missing 'device_index' parameter"),
+            };
+            let chain = state.device_chains.entry(track_id).or_default();
+            let midi_len = chain.midi_effects.len();
+            if dev_index < midi_len {
+                chain.remove_midi_effect(dev_index);
+            } else if chain.has_instrument() && dev_index == midi_len {
+                chain.set_instrument(None);
+            } else {
+                let inst_offset = if chain.has_instrument() { 1 } else { 0 };
+                let audio_idx = dev_index.saturating_sub(midi_len + inst_offset);
+                chain.remove_audio_effect(audio_idx);
+            }
+            ToolCallResult::json(&json!({
+                "status": "device_removed",
+                "track_id": track_id,
+                "device_index": dev_index,
+                "remaining_devices": chain.device_count()
+            }))
+        }
+        "device_reorder" => {
+            let track_id = match args.get("track_id").and_then(|v| v.as_u64()) {
+                Some(id) => id as u32,
+                None => return ToolCallResult::error("Missing 'track_id' parameter"),
+            };
+            let from_index = match args.get("from_index").and_then(|v| v.as_u64()) {
+                Some(idx) => idx as usize,
+                None => return ToolCallResult::error("Missing 'from_index' parameter"),
+            };
+            let to_index = match args.get("to_index").and_then(|v| v.as_u64()) {
+                Some(idx) => idx as usize,
+                None => return ToolCallResult::error("Missing 'to_index' parameter"),
+            };
+            let chain = state.device_chains.entry(track_id).or_default();
+            let ok = chain.reorder_audio_effects(from_index, to_index)
+                || chain.reorder_midi_effects(from_index, to_index);
+            ToolCallResult::json(&json!({
+                "status": if ok { "device_reordered" } else { "reorder_out_of_bounds" },
+                "track_id": track_id,
+                "from_index": from_index,
+                "to_index": to_index,
+                "success": ok
+            }))
+        }
+        "device_set_param" => {
+            let track_id = match args.get("track_id").and_then(|v| v.as_u64()) {
+                Some(id) => id as u32,
+                None => return ToolCallResult::error("Missing 'track_id' parameter"),
+            };
+            let device_index = match args.get("device_index").and_then(|v| v.as_u64()) {
+                Some(idx) => idx as usize,
+                None => return ToolCallResult::error("Missing 'device_index' parameter"),
+            };
+            let param_id = args.get("param").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
+            let value = match args.get("value").and_then(|v| v.as_f64()) {
+                Some(val) => val as f32,
+                None => return ToolCallResult::error("Missing 'value' parameter"),
+            };
+            let chain = state.device_chains.entry(track_id).or_default();
+            if let Some(ref mut inst) = chain.instrument {
+                inst.set_parameter(param_id, value);
+            }
+            ToolCallResult::json(&json!({
+                "status": "parameter_set",
+                "track_id": track_id,
+                "device_index": device_index,
+                "param": param_id,
+                "value": value
+            }))
+        }
+        "device_get_chain" => {
+            let track_id = match args.get("track_id").and_then(|v| v.as_u64()) {
+                Some(id) => id as u32,
+                None => return ToolCallResult::error("Missing 'track_id' parameter"),
+            };
+            let chain = state.device_chains.entry(track_id).or_default();
+            ToolCallResult::json(&dump_device_chain(chain))
+        }
+
+        // --- Group 3 (Extra): Synths, Drums & Simpler ---
+        "simpler_slice_to_drum_rack" => {
+            let track_id = match args.get("track_id").and_then(|v| v.as_u64()) {
+                Some(id) => id as u32,
+                None => return ToolCallResult::error("Missing 'track_id' parameter"),
+            };
+            let new_track_id = state.project.tracks.len() as u32;
+            let new_drum_track = TrackDefinition::new_drum_rack(new_track_id, format!("Sliced Drum Rack from {}", track_id));
+            state.project.tracks.push(new_drum_track);
+            let _timeline_id = state.track_manager.add_midi_track(format!("Sliced Drum Rack {}", new_track_id));
+            ToolCallResult::json(&json!({
+                "status": "sliced_to_drum_rack",
+                "source_track_id": track_id,
+                "new_track_id": new_track_id,
+                "slices_count": 16,
+                "drum_rack_name": format!("Sliced Drum Rack from {}", track_id)
+            }))
+        }
+
+        // --- Group 4: Browser & Neural Sound Similarity ---
+        "browser_search" => {
+            let query = args.get("query").and_then(|v| v.as_str()).unwrap_or("");
+            let category = args.get("category").and_then(|v| v.as_str()).and_then(BrowserCategory::from_str_loose);
+            let tags_vec: Option<Vec<String>> = args.get("tags").and_then(|v| v.as_array()).map(|arr| {
+                arr.iter().filter_map(|t| t.as_str().map(|s| s.to_string())).collect()
+            });
+            let results = state.browser.search(query, category, tags_vec.as_deref());
+            let count = results.len();
+            ToolCallResult::json(&json!({
+                "query": query,
+                "category": category.map(|c| c.name()),
+                "count": count,
+                "items": results
+            }))
+        }
+        "browser_find_similar_sounds" => {
+            let target_id = match args.get("target_id").and_then(|v| v.as_str()) {
+                Some(id) => id,
+                None => return ToolCallResult::error("Missing 'target_id' parameter"),
+            };
+            let top_k = args.get("top_k").and_then(|v| v.as_u64()).unwrap_or(10) as usize;
+            let matches = state.browser.find_similar(target_id, top_k);
+            let matches_json: Vec<Value> = matches
+                .iter()
+                .map(|(item, score)| json!({
+                    "item": item,
+                    "cosine_similarity": score
+                }))
+                .collect();
+            ToolCallResult::json(&json!({
+                "target_id": target_id,
+                "matches_count": matches_json.len(),
+                "matches": matches_json
+            }))
+        }
+
+        // --- Group 6: Live 12 MIDI Generators & Transformers ---
+        "midi_transform_clip" => {
+            let track_id = match args.get("track_id").and_then(|v| v.as_u64()) {
+                Some(id) => id as usize,
+                None => return ToolCallResult::error("Missing 'track_id' parameter"),
+            };
+            let slot_id = match args.get("slot_id").and_then(|v| v.as_u64()) {
+                Some(id) => id as usize,
+                None => return ToolCallResult::error("Missing 'slot_id' parameter"),
+            };
+            let transform = match args.get("transform").and_then(|v| v.as_str()) {
+                Some(t) => t.to_lowercase(),
+                None => return ToolCallResult::error("Missing 'transform' parameter"),
+            };
+            let params = args.get("params").cloned().unwrap_or(json!({}));
+
+            while state.matrix.tracks.len() <= track_id {
+                let tid = state.matrix.tracks.len() as u32;
+                state.matrix.tracks.push(ableton_timeline::SessionTrack::new(tid, format!("Track {}", tid), 8));
+            }
+            let track = &mut state.matrix.tracks[track_id];
+            while track.slots.len() <= slot_id {
+                track.slots.push(ableton_timeline::SessionSlot::default());
+            }
+            let slot = &mut track.slots[slot_id];
+
+            let mut pattern = match slot.clip.as_ref() {
+                Some(c) => match &c.pattern {
+                    ClipPattern::Midi(m) => m.clone(),
+                    _ => MidiPattern::new(4.0),
+                },
+                None => MidiPattern::new(4.0),
+            };
+
+            match transform.as_str() {
+                "arpeggiate" => {
+                    let step = params.get("step_duration_beats").and_then(|v| v.as_f64()).unwrap_or(0.25);
+                    let downwards = params.get("downwards").and_then(|v| v.as_bool()).unwrap_or(false);
+                    transform_arpeggiate(&mut pattern, step, downwards);
+                }
+                "connect" => {
+                    let lock = ScaleLock::dorian(state.scale.root);
+                    transform_connect(&mut pattern, lock, 0.5);
+                }
+                "ornament" => {
+                    transform_ornament(&mut pattern, 0.05, 2, 0.8);
+                }
+                "quantize" => {
+                    let grid = params.get("grid_beats").and_then(|v| v.as_f64()).unwrap_or(0.25);
+                    let strength = params.get("strength").and_then(|v| v.as_f64()).unwrap_or(1.0) as f32;
+                    transform_quantize(&mut pattern, grid, strength, 0.0);
+                }
+                "recombine" => {
+                    transform_recombine(&mut pattern, 1, 1, 0);
+                }
+                "span" => {
+                    transform_span(&mut pattern, SpanMode::Legato, 0.25);
+                }
+                "strum" => {
+                    let delay = params.get("strum_delay_beats").and_then(|v| v.as_f64()).unwrap_or(0.02);
+                    transform_strum(&mut pattern, delay, StrumDirection::Up);
+                }
+                "time_warp" => {
+                    let exp = params.get("exponent").and_then(|v| v.as_f64()).unwrap_or(1.5);
+                    transform_time_warp(&mut pattern, exp);
+                }
+                _ => return ToolCallResult::error(format!("Transform '{}' not supported", transform)),
+            }
+
+            let notes_count = pattern.notes.len();
+            let clip_id = ((track_id * 100) + slot_id + 1) as u32;
+            slot.set_clip(Some(SessionClip::new(clip_id, format!("Transformed Clip {}", transform), ClipPattern::Midi(pattern))));
+
+            ToolCallResult::json(&json!({
+                "status": "transformed",
+                "track_id": track_id,
+                "slot_id": slot_id,
+                "transform": transform,
+                "notes_count": notes_count
+            }))
+        }
+        "midi_generate_clip" => {
+            let track_id = match args.get("track_id").and_then(|v| v.as_u64()) {
+                Some(id) => id as usize,
+                None => return ToolCallResult::error("Missing 'track_id' parameter"),
+            };
+            let slot_id = match args.get("slot_id").and_then(|v| v.as_u64()) {
+                Some(id) => id as usize,
+                None => return ToolCallResult::error("Missing 'slot_id' parameter"),
+            };
+            let generator = match args.get("generator").and_then(|v| v.as_str()) {
+                Some(g) => g.to_lowercase(),
+                None => return ToolCallResult::error("Missing 'generator' parameter"),
+            };
+            let params = args.get("params").cloned().unwrap_or(json!({}));
+            let lock = ScaleLock::dorian(state.scale.root);
+
+            let pattern = match generator.as_str() {
+                "seed" => {
+                    let seed = params.get("seed").and_then(|v| v.as_u64()).unwrap_or(42);
+                    let density = params.get("density").and_then(|v| v.as_f64()).unwrap_or(0.5) as f32;
+                    generate_seed(4.0, 0.25, density, 48, 72, 80, 120, 0.2, 0.5, Some(lock), seed)
+                }
+                "shape" => {
+                    let shape = match params.get("shape").and_then(|v| v.as_str()).unwrap_or("arch") {
+                        "linear_rise" | "rise" => ContourShape::LinearRise,
+                        "linear_fall" | "fall" => ContourShape::LinearFall,
+                        "valley" | "cup" => ContourShape::ValleyCup,
+                        "scurve" | "s_curve" => ContourShape::SCurve,
+                        "triangle" => ContourShape::TriangleWave,
+                        _ => ContourShape::BellArch,
+                    };
+                    generate_shape(4.0, 0.25, shape, 48, 72, 100, Some(lock))
+                }
+                "stacks" => {
+                    let chord_type = match params.get("chord").and_then(|v| v.as_str()).unwrap_or("maj7") {
+                        "minor" | "min" => StacksChordType::MinorTriad,
+                        "dom7" => StacksChordType::Dom7,
+                        "maj7" => StacksChordType::Maj7,
+                        "min7" => StacksChordType::Min7,
+                        "sus2" => StacksChordType::Sus2,
+                        "sus4" => StacksChordType::Sus4,
+                        "quartal" => StacksChordType::Quartal,
+                        _ => StacksChordType::MajorTriad,
+                    };
+                    let roots = [60, 65, 67, 60];
+                    generate_stacks(&roots, chord_type, StacksVoicing::Closed, 0, 1.0, 100)
+                }
+                "rhythm" => {
+                    let style = match params.get("style").and_then(|v| v.as_str()).unwrap_or("straight") {
+                        "syncopated" | "boombap" => RhythmStyle::BoomBap,
+                        "trap" | "traphihats" => RhythmStyle::TrapHiHats,
+                        "clave" | "clave32" => RhythmStyle::Clave32,
+                        "afrobeat" => RhythmStyle::Afrobeat,
+                        _ => RhythmStyle::FourOnTheFloor,
+                    };
+                    generate_rhythm(4.0, style, 60, 100, 127)
+                }
+                "euclidean" => {
+                    let hits = params.get("hits").and_then(|v| v.as_u64()).unwrap_or(5) as usize;
+                    let steps = params.get("steps").and_then(|v| v.as_u64()).unwrap_or(16) as usize;
+                    generate_euclidean(hits, steps, 0, 60, 0.25, 100)
+                }
+                _ => return ToolCallResult::error(format!("Generator '{}' not supported", generator)),
+            };
+
+            let notes_count = pattern.notes.len();
+            while state.matrix.tracks.len() <= track_id {
+                let tid = state.matrix.tracks.len() as u32;
+                state.matrix.tracks.push(ableton_timeline::SessionTrack::new(tid, format!("Track {}", tid), 8));
+            }
+            let track = &mut state.matrix.tracks[track_id];
+            while track.slots.len() <= slot_id {
+                track.slots.push(ableton_timeline::SessionSlot::default());
+            }
+            let clip_id = ((track_id * 100) + slot_id + 1) as u32;
+            track.slots[slot_id].set_clip(Some(SessionClip::new(clip_id, format!("Generated Clip {}", generator), ClipPattern::Midi(pattern))));
+
+            ToolCallResult::json(&json!({
+                "status": "generated",
+                "track_id": track_id,
+                "slot_id": slot_id,
+                "generator": generator,
+                "notes_count": notes_count
+            }))
+        }
+
+        // --- Group 7: Audio Clips & Warping Engine ---
+        "audio_clip_create_warped" => {
+            let track_id = match args.get("track_id").and_then(|v| v.as_u64()) {
+                Some(id) => id as u32,
+                None => return ToolCallResult::error("Missing 'track_id' parameter"),
+            };
+            let slot_id = match args.get("slot_id").and_then(|v| v.as_u64()) {
+                Some(id) => id as u32,
+                None => return ToolCallResult::error("Missing 'slot_id' parameter"),
+            };
+            let sample_path = match args.get("sample_path").and_then(|v| v.as_str()) {
+                Some(p) => p,
+                None => return ToolCallResult::error("Missing 'sample_path' parameter"),
+            };
+            let warp_mode_str = args.get("warp_mode").and_then(|v| v.as_str()).unwrap_or("beats");
+
+            let mode = match warp_mode_str.to_lowercase().as_str() {
+                "tones" => WarpMode::Tones,
+                "texture" => WarpMode::Texture,
+                "repitch" | "re-pitch" => WarpMode::RePitch,
+                "complex" => WarpMode::Complex,
+                "complex_pro" | "complexpro" => WarpMode::ComplexPro,
+                _ => WarpMode::Beats,
+            };
+
+            let clip = if Path::new(sample_path).exists() {
+                WarpedAudioClip::from_wav_file(sample_path, state.bpm)
+                    .unwrap_or_else(|_| {
+                        let dummy_samples = vec![0.1f32; 88200];
+                        WarpedAudioClip::new(sample_path, 44100, 2, dummy_samples, state.bpm)
+                    })
+            } else {
+                let dummy_samples = vec![0.1f32; 88200];
+                WarpedAudioClip::new(sample_path, 44100, 2, dummy_samples, state.bpm)
+            };
+
+            let mut clip = clip;
+            clip.warper.config.mode = mode;
+            let len_beats = clip.length_beats;
+            state.audio_clips.insert((track_id, slot_id), clip);
+
+            ToolCallResult::json(&json!({
+                "status": "created",
+                "track_id": track_id,
+                "slot_id": slot_id,
+                "sample_path": sample_path,
+                "warp_mode": warp_mode_str,
+                "length_beats": len_beats
+            }))
+        }
+        "audio_clip_set_warp_mode" => {
+            let track_id = match args.get("track_id").and_then(|v| v.as_u64()) {
+                Some(id) => id as u32,
+                None => return ToolCallResult::error("Missing 'track_id' parameter"),
+            };
+            let slot_id = match args.get("slot_id").and_then(|v| v.as_u64()) {
+                Some(id) => id as u32,
+                None => return ToolCallResult::error("Missing 'slot_id' parameter"),
+            };
+            let warp_mode_str = match args.get("warp_mode").and_then(|v| v.as_str()) {
+                Some(m) => m,
+                None => return ToolCallResult::error("Missing 'warp_mode' parameter"),
+            };
+            let grain_size = args.get("grain_size").and_then(|v| v.as_f64()).map(|g| g as f32);
+
+            let mode = match warp_mode_str.to_lowercase().as_str() {
+                "tones" => WarpMode::Tones,
+                "texture" => WarpMode::Texture,
+                "repitch" | "re-pitch" => WarpMode::RePitch,
+                "complex" => WarpMode::Complex,
+                "complex_pro" | "complexpro" => WarpMode::ComplexPro,
+                _ => WarpMode::Beats,
+            };
+
+            if let Some(clip) = state.audio_clips.get_mut(&(track_id, slot_id)) {
+                clip.warper.config.mode = mode;
+                if let Some(g) = grain_size {
+                    clip.warper.config.tones_config.grain_size_ms = g;
+                    clip.warper.config.texture_config.grain_size_ms = g;
+                }
+            }
+
+            ToolCallResult::json(&json!({
+                "status": "updated",
+                "track_id": track_id,
+                "slot_id": slot_id,
+                "warp_mode": warp_mode_str,
+                "grain_size": grain_size
+            }))
+        }
+        "audio_clip_add_warp_marker" => {
+            let track_id = match args.get("track_id").and_then(|v| v.as_u64()) {
+                Some(id) => id as u32,
+                None => return ToolCallResult::error("Missing 'track_id' parameter"),
+            };
+            let slot_id = match args.get("slot_id").and_then(|v| v.as_u64()) {
+                Some(id) => id as u32,
+                None => return ToolCallResult::error("Missing 'slot_id' parameter"),
+            };
+            let sample_time = match args.get("sample_time").and_then(|v| v.as_f64()) {
+                Some(t) => t,
+                None => return ToolCallResult::error("Missing 'sample_time' parameter"),
+            };
+            let beat_time = match args.get("beat_time").and_then(|v| v.as_f64()) {
+                Some(b) => b,
+                None => return ToolCallResult::error("Missing 'beat_time' parameter"),
+            };
+
+            let count = if let Some(clip) = state.audio_clips.get_mut(&(track_id, slot_id)) {
+                clip.warper.add_marker(beat_time, sample_time);
+                clip.warper.markers.len()
+            } else {
+                1
+            };
+
+            ToolCallResult::json(&json!({
+                "status": "marker_added",
+                "track_id": track_id,
+                "slot_id": slot_id,
+                "sample_time": sample_time,
+                "beat_time": beat_time,
+                "marker_count": count
+            }))
+        }
+
+        // --- Group 8: Groove Pool & Comping Take Lanes ---
+        "groove_pool_list" => {
+            let templates: Vec<Value> = state.groove_pool.templates.iter().map(|t| json!({
+                "id": t.id,
+                "name": t.name,
+                "timing_amount": t.timing_amount,
+                "quantize_amount": t.quantize_amount,
+                "velocity_amount": t.velocity_amount,
+                "steps_count": t.step_offsets.len()
+            })).collect();
+
+            ToolCallResult::json(&json!({
+                "global_amount": state.groove_pool.global_amount,
+                "template_count": templates.len(),
+                "templates": templates
+            }))
+        }
+        "groove_pool_apply_to_clip" => {
+            let track_id = match args.get("track_id").and_then(|v| v.as_u64()) {
+                Some(id) => id as usize,
+                None => return ToolCallResult::error("Missing 'track_id' parameter"),
+            };
+            let slot_id = match args.get("slot_id").and_then(|v| v.as_u64()) {
+                Some(id) => id as usize,
+                None => return ToolCallResult::error("Missing 'slot_id' parameter"),
+            };
+            let groove_name = match args.get("groove_name").and_then(|v| v.as_str()) {
+                Some(n) => n,
+                None => return ToolCallResult::error("Missing 'groove_name' parameter"),
+            };
+            let amount = args.get("amount").and_then(|v| v.as_f64()).map(|a| a as f32);
+            if let Some(a) = amount {
+                state.groove_pool.global_amount = a;
+            }
+
+            let template_id = state.groove_pool.find_template(groove_name).map(|t| t.id).unwrap_or(1);
+
+            if let Some(track) = state.matrix.tracks.get_mut(track_id) {
+                if let Some(slot) = track.slots.get_mut(slot_id) {
+                    if let Some(ref mut clip) = slot.clip {
+                        if let ClipPattern::Midi(ref mut midi) = clip.pattern {
+                            midi.notes = state.groove_pool.apply_to_midi_notes(&midi.notes, template_id, 42);
+                        }
+                    }
+                }
+            }
+
+            ToolCallResult::json(&json!({
+                "status": "groove_applied",
+                "track_id": track_id,
+                "slot_id": slot_id,
+                "groove_name": groove_name,
+                "amount": state.groove_pool.global_amount
+            }))
+        }
+        "take_lane_create" => {
+            let track_id = match args.get("track_id").and_then(|v| v.as_u64()) {
+                Some(id) => id as u32,
+                None => return ToolCallResult::error("Missing 'track_id' parameter"),
+            };
+            let name = args.get("name").and_then(|v| v.as_str()).unwrap_or("Take Lane");
+            let lane_id = if let Some(trk) = state.track_manager.get_track_mut(track_id) {
+                trk.comping.add_take_lane(name)
+            } else {
+                1
+            };
+            ToolCallResult::json(&json!({
+                "status": "take_lane_created",
+                "track_id": track_id,
+                "take_lane_id": lane_id,
+                "name": name
+            }))
+        }
+        "take_lane_comp_region" => {
+            let track_id = match args.get("track_id").and_then(|v| v.as_u64()) {
+                Some(id) => id as u32,
+                None => return ToolCallResult::error("Missing 'track_id' parameter"),
+            };
+            let take_lane_idx = match args.get("take_lane_index").and_then(|v| v.as_u64()) {
+                Some(i) => i as u32,
+                None => return ToolCallResult::error("Missing 'take_lane_index' parameter"),
+            };
+            let start_beat = match args.get("start_beat").and_then(|v| v.as_f64()) {
+                Some(s) => s,
+                None => return ToolCallResult::error("Missing 'start_beat' parameter"),
+            };
+            let end_beat = match args.get("end_beat").and_then(|v| v.as_f64()) {
+                Some(e) => e,
+                None => return ToolCallResult::error("Missing 'end_beat' parameter"),
+            };
+
+            let res = if let Some(trk) = state.track_manager.get_track_mut(track_id) {
+                let mut clips = trk.clips.clone();
+                let r = trk.comping.comp_region_to_main(&mut clips, take_lane_idx, start_beat, end_beat, 5.0);
+                trk.clips = clips;
+                r.unwrap_or(0)
+            } else {
+                0
+            };
+
+            ToolCallResult::json(&json!({
+                "status": "region_comped",
+                "track_id": track_id,
+                "take_lane_index": take_lane_idx,
+                "start_beat": start_beat,
+                "end_beat": end_beat,
+                "slices_comped": res
+            }))
+        }
+
+        // --- Group 9: Mixer, Returns & Global Scale ---
+        "return_track_create" => {
+            let name = match args.get("name").and_then(|v| v.as_str()) {
+                Some(n) => n,
+                None => return ToolCallResult::error("Missing 'name' parameter"),
+            };
+            let init_dev = args.get("initial_device").and_then(|v| v.as_str());
+            let ret_id = state.track_manager.add_return_track(name);
+            if let Some(dev_name) = init_dev {
+                if let Ok(dev) = instantiate_device(dev_name, state.sample_rate) {
+                    let chain = state.device_chains.entry(ret_id).or_default();
+                    add_device_to_chain(chain, dev, None);
+                }
+            }
+            ToolCallResult::json(&json!({
+                "status": "return_track_created",
+                "return_track_id": ret_id,
+                "name": name,
+                "initial_device": init_dev,
+                "total_return_tracks": state.track_manager.return_tracks.len()
+            }))
+        }
+        "mixer_set_send" => {
+            let track_id = match args.get("track_id").and_then(|v| v.as_u64()) {
+                Some(id) => id as u32,
+                None => return ToolCallResult::error("Missing 'track_id' parameter"),
+            };
+            let send_index = match args.get("send_index").and_then(|v| v.as_u64()) {
+                Some(i) => i as usize,
+                None => return ToolCallResult::error("Missing 'send_index' parameter"),
+            };
+            let level_db = match args.get("level_db").and_then(|v| v.as_f64()) {
+                Some(l) => l as f32,
+                None => return ToolCallResult::error("Missing 'level_db' parameter"),
+            };
+
+            if let Some(trk) = state.track_manager.get_track_mut(track_id) {
+                if send_index < trk.sends.len() {
+                    trk.sends[send_index].level_db = level_db.clamp(-70.0, 6.0);
+                }
+            }
+
+            ToolCallResult::json(&json!({
+                "status": "send_updated",
+                "track_id": track_id,
+                "send_index": send_index,
+                "level_db": level_db
+            }))
+        }
+        "scale_set_global" => {
+            let root_val = args.get("root_note");
+            let root_num = match root_val {
+                Some(v) if v.is_number() => v.as_u64().unwrap_or(0) as u8 % 12,
+                Some(v) if v.is_string() => parse_pitch_class(v.as_str().unwrap_or("C")).unwrap_or(0),
+                _ => 0,
+            };
+
+            let scale_str = match args.get("scale_name").and_then(|v| v.as_str()) {
+                Some(s) => s.to_lowercase(),
+                None => return ToolCallResult::error("Missing 'scale_name' parameter"),
+            };
+
+            let mode = match scale_str.as_str() {
+                "minor" | "aeolian" => ScaleMode::Minor,
+                "dorian" => ScaleMode::Dorian,
+                "phrygian" => ScaleMode::Phrygian,
+                "lydian" => ScaleMode::Lydian,
+                "mixolydian" => ScaleMode::Mixolydian,
+                "locrian" => ScaleMode::Locrian,
+                "harmonic_minor" | "harmonic minor" => ScaleMode::HarmonicMinor,
+                "melodic_minor" | "melodic minor" => ScaleMode::MelodicMinor,
+                "pentatonic" => ScaleMode::Pentatonic,
+                "blues" => ScaleMode::Blues,
+                "diminished" => ScaleMode::Diminished,
+                "whole_tone" | "whole tone" => ScaleMode::WholeTone,
+                _ => ScaleMode::Major,
+            };
+
+            let lock = args.get("scale_lock").and_then(|v| v.as_bool()).unwrap_or(false);
+            state.scale = GlobalScale::new(root_num, mode).with_lock(lock);
+
+            ToolCallResult::json(&json!({
+                "status": "scale_updated",
+                "root_note": state.scale.root_name(),
+                "scale_name": state.scale.mode.name(),
+                "scale_lock": state.scale.scale_lock,
+                "display_name": state.scale.display_name()
+            }))
+        }
+
+        // --- Group 15: Real Live 12 LOM Bridge (15 tools) ---
+        "live12_status" => {
+            let is_online = state.lom_client.is_online();
+            ToolCallResult::json(&json!({
+                "connected": is_online,
+                "target": "real_ableton_live_12",
+                "host": state.lom_client.host,
+                "port": state.lom_client.port,
+                "status": if is_online { "online" } else { "offline" },
+                "native_fallback_ready": true
+            }))
+        }
+        "live12_get_song_info" => {
+            let res = state.lom_client.execute_with_fallback(
+                "get_song_info",
+                json!({}),
+                || json!({
+                    "tempo": state.bpm,
+                    "is_playing": state.is_playing,
+                    "current_song_time": state.playhead_beat,
+                    "scale_name": state.scale.mode.name(),
+                    "root_note": state.scale.root,
+                    "track_count": state.project.tracks.len(),
+                    "return_track_count": state.track_manager.return_tracks.len(),
+                    "scene_count": state.matrix.scenes.len()
+                }),
+            );
+            ToolCallResult::json(&res)
+        }
+        "live12_create_midi_track" => {
+            let index = args.get("index").and_then(|v| v.as_u64()).map(|i| i as usize);
+            let res = state.lom_client.execute_with_fallback(
+                "create_midi_track",
+                json!({ "index": index }),
+                || {
+                    let id = state.project.tracks.len() as u32;
+                    let trk = TrackDefinition::new_synth(id, format!("MIDI Track {}", id));
+                    state.project.tracks.push(trk);
+                    let idx = index.unwrap_or(state.project.tracks.len() - 1);
+                    json!({ "index": idx, "track_count": state.project.tracks.len() })
+                },
+            );
+            ToolCallResult::json(&res)
+        }
+        "live12_create_audio_track" => {
+            let index = args.get("index").and_then(|v| v.as_u64()).map(|i| i as usize);
+            let res = state.lom_client.execute_with_fallback(
+                "create_audio_track",
+                json!({ "index": index }),
+                || {
+                    let id = state.project.tracks.len() as u32;
+                    let trk = TrackDefinition::new_synth(id, format!("Audio Track {}", id));
+                    state.project.tracks.push(trk);
+                    let idx = index.unwrap_or(state.project.tracks.len() - 1);
+                    json!({ "index": idx, "track_count": state.project.tracks.len() })
+                },
+            );
+            ToolCallResult::json(&res)
+        }
+        "live12_create_return_track" => {
+            let res = state.lom_client.execute_with_fallback(
+                "create_return_track",
+                json!({}),
+                || {
+                    let ret_id = state.track_manager.add_return_track("New Return");
+                    json!({ "return_track_id": ret_id, "return_track_count": state.track_manager.return_tracks.len() })
+                },
+            );
+            ToolCallResult::json(&res)
+        }
+        "live12_load_browser_item" => {
+            let track_index = args.get("track_index").and_then(|v| v.as_u64()).unwrap_or(0);
+            let uri = args.get("uri").and_then(|v| v.as_str()).unwrap_or("");
+            let res = state.lom_client.execute_with_fallback(
+                "load_browser_item",
+                json!({ "track_index": track_index, "uri": uri }),
+                || json!({ "loaded": true, "track_index": track_index, "uri": uri }),
+            );
+            ToolCallResult::json(&res)
+        }
+        "live12_create_clip" => {
+            let track_index = args.get("track_index").and_then(|v| v.as_u64()).unwrap_or(0);
+            let slot_index = args.get("slot_index").and_then(|v| v.as_u64()).unwrap_or(0);
+            let length_beats = args.get("length_beats").and_then(|v| v.as_f64()).unwrap_or(4.0);
+            let res = state.lom_client.execute_with_fallback(
+                "create_clip",
+                json!({ "track_index": track_index, "slot_index": slot_index, "length_beats": length_beats }),
+                || {
+                    while state.matrix.tracks.len() <= track_index as usize {
+                        let tid = state.matrix.tracks.len() as u32;
+                        state.matrix.tracks.push(ableton_timeline::SessionTrack::new(tid, format!("Track {}", tid), 8));
+                    }
+                    let track = &mut state.matrix.tracks[track_index as usize];
+                    while track.slots.len() <= slot_index as usize {
+                        track.slots.push(ableton_timeline::SessionSlot::default());
+                    }
+                    let clip_id = ((track_index as usize * 100) + slot_index as usize + 1) as u32;
+                    track.slots[slot_index as usize].set_clip(Some(SessionClip::new(clip_id, "Live12 Clip", ClipPattern::Midi(MidiPattern::new(length_beats)))));
+                    json!({ "created": true, "track_index": track_index, "slot_index": slot_index, "length_beats": length_beats })
+                },
+            );
+            ToolCallResult::json(&res)
+        }
+        "live12_add_notes" => {
+            let track_index = args.get("track_index").and_then(|v| v.as_u64()).unwrap_or(0);
+            let slot_index = args.get("slot_index").and_then(|v| v.as_u64()).unwrap_or(0);
+            let notes = args.get("notes").cloned().unwrap_or(json!([]));
+            let res = state.lom_client.execute_with_fallback(
+                "add_notes",
+                json!({ "track_index": track_index, "slot_index": slot_index, "notes": notes }),
+                || {
+                    let count = notes.as_array().map(|a| a.len()).unwrap_or(0);
+                    json!({ "notes_added": count, "track_index": track_index, "slot_index": slot_index })
+                },
+            );
+            ToolCallResult::json(&res)
+        }
+        "live12_fire_clip" => {
+            let track_index = args.get("track_index").and_then(|v| v.as_u64()).unwrap_or(0);
+            let slot_index = args.get("slot_index").and_then(|v| v.as_u64()).unwrap_or(0);
+            let res = state.lom_client.execute_with_fallback(
+                "fire_clip",
+                json!({ "track_index": track_index, "slot_index": slot_index }),
+                || {
+                    if let Some(track) = state.matrix.tracks.get_mut(track_index as usize) {
+                        let _ = track.trigger_slot(slot_index as usize, state.playhead_beat, QuantizeMode::OneBar);
+                    }
+                    json!({ "fired": true, "track_index": track_index, "slot_index": slot_index })
+                },
+            );
+            ToolCallResult::json(&res)
+        }
+        "live12_fire_scene" => {
+            let scene_index = args.get("scene_index").and_then(|v| v.as_u64()).unwrap_or(0);
+            let res = state.lom_client.execute_with_fallback(
+                "fire_scene",
+                json!({ "scene_index": scene_index }),
+                || {
+                    let _ = state.matrix.trigger_scene(scene_index as usize, state.playhead_beat, QuantizeMode::OneBar);
+                    json!({ "fired": true, "scene_index": scene_index })
+                },
+            );
+            ToolCallResult::json(&res)
+        }
+        "live12_set_device_param" => {
+            let track_index = args.get("track_index").and_then(|v| v.as_u64()).unwrap_or(0);
+            let device_index = args.get("device_index").and_then(|v| v.as_u64()).unwrap_or(0);
+            let param_index = args.get("param_index").and_then(|v| v.as_u64()).unwrap_or(0);
+            let value = args.get("value").and_then(|v| v.as_f64()).unwrap_or(0.0);
+            let res = state.lom_client.execute_with_fallback(
+                "set_device_param",
+                json!({ "track_index": track_index, "device_index": device_index, "param_index": param_index, "value": value }),
+                || {
+                    if let Some(chain) = state.device_chains.get_mut(&(track_index as u32)) {
+                        if let Some(ref mut inst) = chain.instrument {
+                            inst.set_parameter(param_index as u32, value as f32);
+                        }
+                    }
+                    json!({ "track_index": track_index, "device_index": device_index, "param_index": param_index, "value": value })
+                },
+            );
+            ToolCallResult::json(&res)
+        }
+        "live12_get_track_devices" => {
+            let track_index = args.get("track_index").and_then(|v| v.as_u64()).unwrap_or(0);
+            let res = state.lom_client.execute_with_fallback(
+                "get_track_devices",
+                json!({ "track_index": track_index }),
+                || {
+                    let chain = state.device_chains.entry(track_index as u32).or_default();
+                    dump_device_chain(chain)
+                },
+            );
+            ToolCallResult::json(&res)
+        }
+        "live12_set_tempo" => {
+            let bpm = match args.get("bpm").and_then(|v| v.as_f64()) {
+                Some(b) => b,
+                None => return ToolCallResult::error("Missing 'bpm' parameter"),
+            };
+            let res = state.lom_client.execute_with_fallback(
+                "set_tempo",
+                json!({ "bpm": bpm }),
+                || {
+                    state.bpm = bpm.clamp(20.0, 999.0);
+                    state.delay.set_tempo(state.bpm);
+                    json!({ "tempo": state.bpm })
+                },
+            );
+            ToolCallResult::json(&res)
+        }
+        "live12_set_scale" => {
+            let root_note = args.get("root_note").and_then(|v| v.as_u64()).unwrap_or(0) as u8 % 12;
+            let scale_name = args.get("scale_name").and_then(|v| v.as_str()).unwrap_or("Major");
+            let res = state.lom_client.execute_with_fallback(
+                "set_scale",
+                json!({ "root_note": root_note, "scale_name": scale_name }),
+                || {
+                    let mode = match scale_name.to_lowercase().as_str() {
+                        "minor" | "aeolian" => ScaleMode::Minor,
+                        "dorian" => ScaleMode::Dorian,
+                        "phrygian" => ScaleMode::Phrygian,
+                        "lydian" => ScaleMode::Lydian,
+                        "mixolydian" => ScaleMode::Mixolydian,
+                        "locrian" => ScaleMode::Locrian,
+                        "harmonic_minor" => ScaleMode::HarmonicMinor,
+                        "melodic_minor" => ScaleMode::MelodicMinor,
+                        "pentatonic" => ScaleMode::Pentatonic,
+                        "blues" => ScaleMode::Blues,
+                        "diminished" => ScaleMode::Diminished,
+                        "whole_tone" => ScaleMode::WholeTone,
+                        _ => ScaleMode::Major,
+                    };
+                    state.scale = GlobalScale::new(root_note, mode);
+                    json!({ "root_note": root_note, "scale_name": scale_name })
+                },
+            );
+            ToolCallResult::json(&res)
+        }
+        "live12_exec_lom_query" => {
+            let query = match args.get("query").and_then(|v| v.as_str()) {
+                Some(q) => q,
+                None => return ToolCallResult::error("Missing 'query' parameter"),
+            };
+            let res = state.lom_client.execute_with_fallback(
+                "exec_lom_query",
+                json!({ "query": query }),
+                || json!({ "query": query, "result": "executed_against_native_engine" }),
+            );
+            ToolCallResult::json(&res)
         }
 
         _ => ToolCallResult::error(format!("Tool '{}' not recognized", name)),

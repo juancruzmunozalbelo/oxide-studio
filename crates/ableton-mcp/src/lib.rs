@@ -13,6 +13,9 @@
 //! - "Agent Ears" Perceptual & 4-Band Spectral Audio Analysis (Sub/Bass, Low-Mid, High-Mid, High, Centroid)
 
 pub mod analysis;
+pub mod bridge;
+pub mod browser;
+pub mod devices;
 pub mod lilypond;
 pub mod music_theory;
 pub mod protocol;
@@ -20,6 +23,10 @@ pub mod resources;
 pub mod server;
 pub mod state;
 pub mod tools;
+
+pub use bridge::TcpLomClient;
+pub use browser::{BrowserCategory, BrowserItem, BrowserLibrary};
+pub use devices::{add_device_to_chain, dump_device_chain, instantiate_device, CreatedDevice};
 
 pub use analysis::{AudioAnalysisMetrics, FourBandEnergy};
 pub use lilypond::{parse_lilypond, sequence_to_clip_pattern};
