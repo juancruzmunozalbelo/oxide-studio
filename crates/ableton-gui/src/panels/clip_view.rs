@@ -101,6 +101,7 @@ pub struct ClipViewAction {
     pub pattern_mutated: bool,
     pub warp_mode_changed: Option<WarpMode>,
     pub transpose_changed: Option<i8>,
+    pub warp_marker_moved: bool,
 }
 
 pub fn render_clip_view(
@@ -114,6 +115,7 @@ pub fn render_clip_view(
         pattern_mutated: false,
         warp_mode_changed: None,
         transpose_changed: None,
+        warp_marker_moved: false,
     };
 
     ui.vertical(|ui| {
@@ -299,7 +301,27 @@ pub fn render_clip_view(
                     ui.separator();
 
                     // Waveform with Draggable Warp Markers
-                    let (canvas_rect, _response) = ui.allocate_exact_size(vec2(ui.available_width().max(300.0), 120.0), Sense::click_and_drag());
+                    let (canvas_rect, mut response) = ui.allocate_exact_size(vec2(ui.available_width().max(300.0), 120.0), Sense::click_and_drag());
+                    if response.dragged() {
+                        let delta_x = response.drag_delta().x;
+                        if canvas_rect.width() > 0.0 && delta_x != 0.0 {
+                            let beat_delta = (delta_x / canvas_rect.width()) as f64 * 16.0;
+                            if let Some(pos) = response.interact_pointer_pos() {
+                                let pointer_beat = ((pos.x - canvas_rect.left()) / canvas_rect.width()) as f64 * 16.0;
+                                if let Some(marker) = state.warp_markers.iter_mut().min_by(|a, b| {
+                                    let dist_a = (a.beat - pointer_beat).abs();
+                                    let dist_b = (b.beat - pointer_beat).abs();
+                                    dist_a.partial_cmp(&dist_b).unwrap_or(std::cmp::Ordering::Equal)
+                                }) {
+                                    marker.beat = (marker.beat + beat_delta).clamp(0.0, 16.0);
+                                    marker.sample_time = (marker.beat * (7.742 / 16.0)).max(0.0);
+                                    action.warp_marker_moved = true;
+                                    response.mark_changed();
+                                }
+                            }
+                        }
+                    }
+
                     if ui.is_rect_visible(canvas_rect) {
                         let painter = ui.painter_at(canvas_rect);
                         painter.rect_filled(canvas_rect, 2.0, Color32::from_rgb(0x10, 0x14, 0x1d));

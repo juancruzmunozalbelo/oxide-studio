@@ -649,6 +649,8 @@ impl eframe::App for AbletonStudioApp {
                         );
                         if clip_act.pattern_mutated {
                             self.status_message = "MIDI Pattern Updated via Live 12 Tool".into();
+                        } else if clip_act.warp_marker_moved {
+                            self.status_message = "Audio Warp Marker Adjusted".into();
                         }
                     }
                     DeckTab::DeviceRack => {
@@ -659,6 +661,8 @@ impl eframe::App for AbletonStudioApp {
                         );
                         if let Some(kind) = dev_act.insert_device {
                             self.status_message = format!("Inserted Device: {}", kind.name());
+                        } else if let Some(idx) = dev_act.device_parameter_changed {
+                            self.status_message = format!("Device #{} Parameter Modulated", idx + 1);
                         }
                     }
                     DeckTab::DrumSequencer => {

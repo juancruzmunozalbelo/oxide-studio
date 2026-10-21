@@ -131,6 +131,10 @@ impl<'a> Widget for DrumRackVisualizerWidget<'a> {
 }
 
 pub fn render_drum_rack_canvas(painter: &Painter, rect: Rect, state: &DrumRackVisualizerState) {
+    if rect.width() < 12.0 || rect.height() < 12.0 {
+        return;
+    }
+
     painter.rect_filled(rect, 3.0, COLOR_BG_VOID);
     painter.rect_stroke(rect, 3.0, Stroke::new(1.0_f32, COLOR_BORDER));
 
@@ -166,12 +170,13 @@ pub fn render_drum_rack_canvas(painter: &Painter, rect: Rect, state: &DrumRackVi
     let pad_h = (rect.height() - 26.0) / 4.0;
 
     // Header label
-    let sel_p = &state.pads[state.selected_pad];
+    let sel_p = state.pads.get(state.selected_pad).unwrap_or(&state.pads[0]);
+    let sel_pad_idx = if state.selected_pad < state.pads.len() { state.selected_pad + 1 } else { 1 };
     painter.text(
         pos2(grid_left, rect.top() + 4.0),
         egui::Align2::LEFT_TOP,
         format!("Drum Rack Pad #{}: {} (Note: {}, Choke: {})",
-            state.selected_pad + 1, sel_p.name, sel_p.note_number,
+            sel_pad_idx, sel_p.name, sel_p.note_number,
             if sel_p.choke_group > 0 { format!("{}", sel_p.choke_group) } else { "None".into() }),
         egui::FontId::monospace(9.5),
         COLOR_AMBER,

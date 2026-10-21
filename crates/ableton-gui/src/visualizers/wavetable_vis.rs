@@ -71,6 +71,10 @@ impl<'a> Widget for WavetableVisualizerWidget<'a> {
 }
 
 pub fn render_wavetable_canvas(painter: &Painter, rect: Rect, state: &WavetableVisualizerState) {
+    if rect.width() < 16.0 || rect.height() < 8.0 {
+        return;
+    }
+
     // Background frame
     painter.rect_filled(rect, 3.0, COLOR_BG_VOID);
     painter.rect_stroke(rect, 3.0, Stroke::new(1.0_f32, COLOR_BORDER));
@@ -145,6 +149,10 @@ pub fn render_wavetable_canvas(painter: &Painter, rect: Rect, state: &WavetableV
     );
 
     // 2. Dual Cytomic ZDF Filter Response Curves (Filter 1: Amber, Filter 2: Cyan)
+    if filter_rect.height() < 8.0 || filter_rect.width() < 16.0 {
+        return;
+    }
+
     let f_pts_count = 40;
     for (f_idx, (cutoff, res, color, label)) in [
         (state.filter1_cutoff, state.filter1_res, COLOR_AMBER, "ZDF LowPass"),
@@ -156,7 +164,8 @@ pub fn render_wavetable_canvas(painter: &Painter, rect: Rect, state: &WavetableV
         let mut f_pts = Vec::with_capacity(f_pts_count);
         let log_min = (20.0_f32).ln();
         let log_max = (20000.0_f32).ln();
-        let fc_norm = (cutoff.ln() - log_min) / (log_max - log_min);
+        let safe_cutoff = cutoff.max(20.0);
+        let fc_norm = (safe_cutoff.ln() - log_min) / (log_max - log_min);
 
         for i in 0..f_pts_count {
             let t = i as f32 / (f_pts_count - 1) as f32;
@@ -182,7 +191,9 @@ pub fn render_wavetable_canvas(painter: &Painter, rect: Rect, state: &WavetableV
 
             let norm_y = (-response_db / 36.0).clamp(-1.0, 1.0);
             let y = filter_rect.center().y + norm_y * (filter_rect.height() * 0.35);
-            f_pts.push(pos2(x, y.clamp(filter_rect.top() + 4.0, filter_rect.bottom() - 4.0)));
+            let min_y = (filter_rect.top() + 4.0).min(filter_rect.bottom());
+            let max_y = (filter_rect.bottom() - 4.0).max(min_y);
+            f_pts.push(pos2(x, y.clamp(min_y, max_y)));
         }
 
         if f_pts.len() >= 2 {

@@ -144,18 +144,14 @@ impl GlobalScale {
         if self.is_in_scale(note) {
             return note;
         }
-        let octave = note / 12;
-        let pc = note % 12;
-        let mask = self.degree_mask();
-
-        for d in 1..=6 {
-            let lower = (pc + 12 - d) % 12;
-            if (mask & (1 << lower)) != 0 {
-                return (octave as i16 * 12 + lower as i16).clamp(0, 127) as u8;
+        for d in 1..=127 {
+            let lower = note as i16 - d;
+            if lower >= 0 && self.is_in_scale(lower as u8) {
+                return lower as u8;
             }
-            let upper = (pc + d) % 12;
-            if (mask & (1 << upper)) != 0 {
-                return (octave as i16 * 12 + upper as i16).clamp(0, 127) as u8;
+            let upper = note as i16 + d;
+            if upper <= 127 && self.is_in_scale(upper as u8) {
+                return upper as u8;
             }
         }
         note

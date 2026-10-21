@@ -16,17 +16,18 @@
 //!   - `Drum Rack`: 4x4 interactive 16-pad matrix with bank scroll and choke groups
 
 use egui::{
-    vec2, Button, Layout, RichText, ScrollArea, Sense, Stroke, Ui,
+    vec2, Button, Layout, RichText, ScrollArea, Stroke, Ui,
 };
 use crate::theme::{
     COLOR_AMBER, COLOR_BG_PANEL_ALT, COLOR_TEXT_MUTED, COLOR_TEXT_PRIMARY,
 };
 use crate::visualizers::{
-    render_auto_filter_canvas, render_drum_rack_canvas, render_eq8_canvas, render_glue_canvas,
-    render_operator_canvas, render_ott_canvas, render_roar_canvas, render_simpler_canvas,
-    render_wavetable_canvas, AutoFilterVisualizerState, DrumRackVisualizerState,
-    EqEightVisualizerState, GlueCompressorVisualizerState, OperatorVisualizerState,
-    OttVisualizerState, RoarVisualizerState, SimplerVisualizerState, WavetableVisualizerState,
+    AutoFilterVisualizerState, AutoFilterVisualizerWidget,
+    DrumRackVisualizerState, DrumRackVisualizerWidget, EqEightVisualizerState,
+    EqEightVisualizerWidget, GlueCompressorVisualizerState, GlueCompressorVisualizerWidget,
+    OperatorVisualizerState, OperatorVisualizerWidget, OttVisualizerState, OttVisualizerWidget,
+    RoarVisualizerState, RoarVisualizerWidget, SimplerVisualizerState, SimplerVisualizerWidget,
+    WavetableVisualizerState, WavetableVisualizerWidget,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -140,6 +141,7 @@ pub struct DeviceChainAction {
     pub move_device_left: Option<usize>,
     pub move_device_right: Option<usize>,
     pub insert_device: Option<DeviceKind>,
+    pub device_parameter_changed: Option<usize>,
 }
 
 pub fn render_device_chain_view(
@@ -153,6 +155,7 @@ pub fn render_device_chain_view(
         move_device_left: None,
         move_device_right: None,
         insert_device: None,
+        device_parameter_changed: None,
     };
 
     ui.horizontal(|ui| {
@@ -220,40 +223,40 @@ pub fn render_device_chain_view(
 
                     ui.separator();
 
-                    // Render Custom Visualizer for this device
+                    // Render Custom Interactive Visualizer Widget for this device
                     let vis_h = 145.0;
-                    let (vis_rect, _) = ui.allocate_exact_size(vec2(dev_w, vis_h), Sense::click_and_drag());
-                    if ui.is_rect_visible(vis_rect) {
-                        let painter = ui.painter_at(vis_rect);
-                        match dev.kind {
-                            DeviceKind::Wavetable => {
-                                render_wavetable_canvas(&painter, vis_rect, &dev.wavetable);
-                            }
-                            DeviceKind::Operator => {
-                                render_operator_canvas(&painter, vis_rect, &dev.operator);
-                            }
-                            DeviceKind::Roar => {
-                                render_roar_canvas(&painter, vis_rect, &dev.roar);
-                            }
-                            DeviceKind::EQEight => {
-                                render_eq8_canvas(&painter, vis_rect, &dev.eq8, spectrum_bins);
-                            }
-                            DeviceKind::GlueCompressor => {
-                                render_glue_canvas(&painter, vis_rect, &dev.glue);
-                            }
-                            DeviceKind::AutoFilter => {
-                                render_auto_filter_canvas(&painter, vis_rect, &dev.auto_filter);
-                            }
-                            DeviceKind::OTT => {
-                                render_ott_canvas(&painter, vis_rect, &dev.ott);
-                            }
-                            DeviceKind::Simpler => {
-                                render_simpler_canvas(&painter, vis_rect, &dev.simpler);
-                            }
-                            DeviceKind::DrumRack => {
-                                render_drum_rack_canvas(&painter, vis_rect, &dev.drum_rack);
-                            }
+                    let vis_size = vec2(dev_w, vis_h);
+                    let vis_response = match dev.kind {
+                        DeviceKind::Wavetable => {
+                            ui.add(WavetableVisualizerWidget::new(&mut dev.wavetable, vis_size))
                         }
+                        DeviceKind::Operator => {
+                            ui.add(OperatorVisualizerWidget::new(&mut dev.operator, vis_size))
+                        }
+                        DeviceKind::Roar => {
+                            ui.add(RoarVisualizerWidget::new(&mut dev.roar, vis_size))
+                        }
+                        DeviceKind::EQEight => {
+                            ui.add(EqEightVisualizerWidget::new(&mut dev.eq8, spectrum_bins, vis_size))
+                        }
+                        DeviceKind::GlueCompressor => {
+                            ui.add(GlueCompressorVisualizerWidget::new(&mut dev.glue, vis_size))
+                        }
+                        DeviceKind::AutoFilter => {
+                            ui.add(AutoFilterVisualizerWidget::new(&mut dev.auto_filter, vis_size))
+                        }
+                        DeviceKind::OTT => {
+                            ui.add(OttVisualizerWidget::new(&mut dev.ott, vis_size))
+                        }
+                        DeviceKind::Simpler => {
+                            ui.add(SimplerVisualizerWidget::new(&mut dev.simpler, vis_size))
+                        }
+                        DeviceKind::DrumRack => {
+                            ui.add(DrumRackVisualizerWidget::new(&mut dev.drum_rack, vis_size))
+                        }
+                    };
+                    if vis_response.changed() {
+                        action.device_parameter_changed = Some(idx);
                     }
                 });
 

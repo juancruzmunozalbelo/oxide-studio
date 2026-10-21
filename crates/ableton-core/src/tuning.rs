@@ -81,8 +81,8 @@ impl TuningSystem {
                 self.reference_pitch * ratio * 2.0_f64.powi(octave)
             }
             TuningType::TwentyFourEdo => {
-                let semitones = note as f64 - self.reference_note as f64;
-                self.reference_pitch * 2.0_f64.powf(semitones / 12.0)
+                let steps = note as f64 - self.reference_note as f64;
+                self.reference_pitch * 2.0_f64.powf(steps / 24.0)
             }
             TuningType::Scala => {
                 if self.scala_cents.is_empty() {
@@ -90,6 +90,7 @@ impl TuningSystem {
                     self.reference_pitch * 2.0_f64.powf(semitones / 12.0)
                 } else {
                     let count = self.scala_cents.len();
+                    let period_cents = self.scala_cents.last().copied().unwrap_or(1200.0);
                     let diff = note as i32 - self.reference_note as i32;
                     let oct = diff.div_euclid(count as i32);
                     let rem = diff.rem_euclid(count as i32) as usize;
@@ -98,7 +99,7 @@ impl TuningSystem {
                     } else {
                         self.scala_cents[rem - 1]
                     };
-                    let cents = step_cents + (oct as f64 * 1200.0);
+                    let cents = step_cents + (oct as f64 * period_cents);
                     self.reference_pitch * 2.0_f64.powf(cents / 1200.0)
                 }
             }
@@ -114,7 +115,10 @@ impl TuningSystem {
 
     /// Load Scala (.scl) format string.
     pub fn load_scala(&mut self, scl_content: &str) -> Result<(), String> {
-        let mut lines = scl_content.lines().map(|l| l.trim()).filter(|l| !l.is_empty() && !l.starts_with('!'));
+        let mut lines = scl_content
+            .lines()
+            .map(|l| l.trim())
+            .filter(|l| !l.is_empty() && !l.starts_with('!'));
         // Line 1: description
         let _desc = lines.next().ok_or("Missing description in Scala file")?;
         // Line 2: number of notes
@@ -122,10 +126,13 @@ impl TuningSystem {
         let num_notes: usize = num_str.parse().map_err(|_| "Invalid note count in Scala file")?;
 
         let mut cents_list = Vec::with_capacity(num_notes);
-        for line in lines.take(num_notes) {
+        for line in lines {
             let token = line.split_whitespace().next().ok_or("Empty pitch line in Scala file")?;
             if token.contains('.') {
                 let cents: f64 = token.parse().map_err(|_| "Failed to parse cents value")?;
+                if cents.is_nan() || cents.is_infinite() {
+                    return Err("Invalid cents value in Scala file".into());
+                }
                 cents_list.push(cents);
             } else if token.contains('/') {
                 let parts: Vec<&str> = token.split('/').collect();
@@ -134,11 +141,24 @@ impl TuningSystem {
                 }
                 let num: f64 = parts[0].parse().map_err(|_| "Invalid ratio numerator")?;
                 let den: f64 = parts[1].parse().map_err(|_| "Invalid ratio denominator")?;
+                if den <= 0.0 || num <= 0.0 || num.is_nan() || den.is_nan() || num.is_infinite() || den.is_infinite() {
+                    return Err("Ratio numerator and denominator must be strictly positive".into());
+                }
                 cents_list.push(1200.0 * (num / den).log2());
             } else {
                 let integer_val: f64 = token.parse().map_err(|_| "Invalid pitch value")?;
+                if integer_val <= 0.0 || integer_val.is_nan() || integer_val.is_infinite() {
+                    return Err("Pitch value must be strictly positive".into());
+                }
                 cents_list.push(1200.0 * integer_val.log2());
             }
+            if cents_list.len() == num_notes {
+                break;
+            }
+        }
+
+        if cents_list.len() != num_notes {
+            return Err("Incomplete Scala file: note count mismatch".into());
         }
 
         self.scala_cents = cents_list;
@@ -192,5 +212,28 @@ mod tests {
         tuning.load_scala(scl_text).expect("Scala load failed");
         assert_eq!(tuning.scala_cents.len(), 12);
         assert_eq!(tuning.tuning_type, TuningType::Scala);
+    }
+
+    #[test]
+    fn test_24edo_tuning() {
+        let tuning = TuningSystem::new(TuningType::TwentyFourEdo);
+        let f69 = tuning.frequency_for_note(69);
+        assert!((f69 - 440.0).abs() < 1e-6);
+        let f70 = tuning.frequency_for_note(70);
+        let expected_f70 = 440.0 * 2.0_f64.powf(1.0 / 24.0);
+        assert!((f70 - expected_f70).abs() < 1e-6);
+        let dev70 = tuning.cents_deviation_from_12tet(70);
+        assert!((dev70 - (-50.0)).abs() < 1e-4);
+    }
+
+    #[test]
+    fn test_scala_validation() {
+        let mut tuning = TuningSystem::default();
+        // Truncated
+        assert!(tuning.load_scala("Truncated\n12\n100.0\n").is_err());
+        // Zero denominator
+        assert!(tuning.load_scala("Div Zero\n1\n5/0\n").is_err());
+        // Negative ratio
+        assert!(tuning.load_scala("Negative\n1\n-3/2\n").is_err());
     }
 }

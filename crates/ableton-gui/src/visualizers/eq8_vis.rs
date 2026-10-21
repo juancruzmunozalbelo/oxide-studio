@@ -72,7 +72,7 @@ impl<'a> Widget for EqEightVisualizerWidget<'a> {
         if response.dragged() || response.clicked() {
             if let Some(pos) = response.interact_pointer_pos() {
                 // If dragging, update the selected band's freq and gain
-                let sel = self.state.selected_band;
+                let sel = self.state.selected_band.min(self.state.bands.len().saturating_sub(1));
                 let norm_x = ((pos.x - rect.left()) / rect.width()).clamp(0.0, 1.0);
                 let new_freq = (log_min + norm_x * (log_max - log_min)).exp();
                 let norm_y = ((pos.y - rect.center().y) / (rect.height() * 0.45)).clamp(-1.0, 1.0);
@@ -96,6 +96,10 @@ impl<'a> Widget for EqEightVisualizerWidget<'a> {
 }
 
 pub fn render_eq8_canvas(painter: &Painter, rect: Rect, state: &EqEightVisualizerState, spectrum_bins: &[f32; 64]) {
+    if rect.width() < 12.0 || rect.height() < 12.0 {
+        return;
+    }
+
     painter.rect_filled(rect, 3.0, COLOR_BG_VOID);
     painter.rect_stroke(rect, 3.0, Stroke::new(1.0_f32, COLOR_BORDER));
 
@@ -197,10 +201,14 @@ pub fn render_eq8_canvas(painter: &Painter, rect: Rect, state: &EqEightVisualize
     // 4. Interactive 8 Draggable Nodes
     for (idx, band) in state.bands.iter().enumerate() {
         if !band.enabled { continue; }
-        let norm_f = (band.freq_hz.ln() - log_min) / (log_max - log_min);
+        let norm_f = (band.freq_hz.max(20.0).ln() - log_min) / (log_max - log_min);
         let px = rect.left() + norm_f * rect.width();
         let py = center_y - (band.gain_db / 18.0) * (rect.height() * 0.42);
-        let node_pos = pos2(px.clamp(rect.left() + 6.0, rect.right() - 6.0), py.clamp(rect.top() + 6.0, rect.bottom() - 6.0));
+        let min_x = (rect.left() + 6.0).min(rect.right());
+        let max_x = (rect.right() - 6.0).max(min_x);
+        let min_y = (rect.top() + 6.0).min(rect.bottom());
+        let max_y = (rect.bottom() - 6.0).max(min_y);
+        let node_pos = pos2(px.clamp(min_x, max_x), py.clamp(min_y, max_y));
 
         let is_selected = idx == state.selected_band;
         painter.circle_filled(node_pos, if is_selected { 5.5 } else { 4.0 }, if is_selected { COLOR_AMBER } else { COLOR_CYAN });
@@ -217,12 +225,13 @@ pub fn render_eq8_canvas(painter: &Painter, rect: Rect, state: &EqEightVisualize
     }
 
     // Header readout for active band
-    let sel_band = &state.bands[state.selected_band];
+    let sel_band = state.bands.get(state.selected_band).unwrap_or(&state.bands[0]);
+    let sel_display_idx = if state.selected_band < state.bands.len() { state.selected_band + 1 } else { 1 };
     painter.text(
         pos2(rect.left() + 8.0, rect.top() + 6.0),
         egui::Align2::LEFT_TOP,
         format!("EQ Eight Band {}: {:.0} Hz, {:+.1} dB, Q: {:.2}",
-            state.selected_band + 1, sel_band.freq_hz, sel_band.gain_db, sel_band.q),
+            sel_display_idx, sel_band.freq_hz, sel_band.gain_db, sel_band.q),
         egui::FontId::monospace(10.0),
         COLOR_AMBER,
     );
