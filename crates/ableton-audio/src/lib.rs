@@ -6,11 +6,16 @@
 //! - Lock-free SPSC command and telemetry queues via `rtrb`
 //! - Parameter smoothing with `portable-atomic::AtomicF32`
 
+pub mod mixer;
 pub mod parameters;
 pub mod processor;
 pub mod queues;
 pub mod stream;
 
+pub use mixer::{
+    AudioReturnChannel, AudioSendState, AudioTrackChannel, ModularAudioMixer, MAX_DELAY_MS,
+    METER_WINDOW_SECONDS,
+};
 pub use parameters::{
     AtomicParameters, ParameterSmoother, MAX_PARAMS, PARAM_BPM, PARAM_FX_DELAY_WET,
     PARAM_FX_DRIVE, PARAM_FX_REVERB_WET, PARAM_MASTER_VOL, PARAM_SYNTH_CUTOFF,

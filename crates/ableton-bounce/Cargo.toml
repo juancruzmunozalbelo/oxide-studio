@@ -45,9 +45,19 @@ path = "../../tests/e2e_m8_adversarial_filters_synths_test.rs"
 [dev-dependencies]
 ableton-timeline = { path = "../ableton-timeline" }
 ableton-plugin-scanner = { path = "../ableton-plugin-scanner" }
+ableton-audio = { path = "../ableton-audio" }
 
 [[test]]
 name = "e2e_m9_chains_fx_test"
 path = "../../tests/e2e_m9_chains_fx_test.rs"
+
+[[test]]
+name = "adversarial_m9_stress_test"
+path = "../../tests/adversarial_m9_stress_test.rs"
+
+[[test]]
+name = "e2e_m10_warping_mixer_test"
+path = "../../tests/e2e_m10_warping_mixer_test.rs"
+
 
 

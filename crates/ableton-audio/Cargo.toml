@@ -8,6 +8,7 @@ ableton-core = { path = "../ableton-core" }
 ableton-dsp = { path = "../ableton-dsp" }
 ableton-drums = { path = "../ableton-drums" }
 ableton-fx = { path = "../ableton-fx" }
+ableton-timeline = { path = "../ableton-timeline" }
 cpal = "0.18"
 rtrb = "0.4"
 portable-atomic = { version = "1.15", features = ["float"] }

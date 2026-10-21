@@ -2,6 +2,28 @@
 
 use serde::{Deserialize, Serialize};
 
+/// Curve interpolation profiles supported for automation breakpoints.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum AutomationCurveType {
+    Linear,
+    Exponential,
+    Logarithmic,
+    SCurve,
+    Step,
+}
+
+impl AutomationCurveType {
+    pub fn to_curve_tension(&self) -> f32 {
+        match self {
+            AutomationCurveType::Linear => 0.0,
+            AutomationCurveType::Exponential => 0.5,
+            AutomationCurveType::Logarithmic => -0.5,
+            AutomationCurveType::SCurve => 0.25,
+            AutomationCurveType::Step => 1.0,
+        }
+    }
+}
+
 /// Breakpoint on an automation lane.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct AutomationPoint {
@@ -30,6 +52,14 @@ impl AutomationPoint {
             beat,
             value_norm,
             curve: 0.0,
+        }
+    }
+
+    pub fn with_curve_type(beat: f64, value_norm: f32, curve_type: AutomationCurveType) -> Self {
+        Self {
+            beat,
+            value_norm,
+            curve: curve_type.to_curve_tension(),
         }
     }
 }
@@ -119,6 +149,53 @@ impl AutomationLane {
     }
 }
 
+/// Multi-lane parameter automation container managing simultaneous parameter envelopes for a track.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct MultiLaneAutomation {
+    pub lanes: Vec<AutomationLane>,
+    pub is_expanded: bool,
+}
+
+impl Default for MultiLaneAutomation {
+    fn default() -> Self {
+        Self {
+            lanes: Vec::new(),
+            is_expanded: false,
+        }
+    }
+}
+
+impl MultiLaneAutomation {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Retrieve or create an automation lane for a parameter.
+    pub fn get_or_create_lane(&mut self, parameter_id: u32, parameter_name: impl Into<String>) -> &mut AutomationLane {
+        if let Some(pos) = self.lanes.iter().position(|l| l.parameter_id == parameter_id) {
+            &mut self.lanes[pos]
+        } else {
+            self.lanes.push(AutomationLane::new(parameter_id, parameter_name));
+            self.lanes.last_mut().unwrap()
+        }
+    }
+
+    /// Record an automation breakpoint value at `beat`.
+    pub fn record_value(&mut self, parameter_id: u32, parameter_name: &str, beat: f64, value_norm: f32) {
+        let lane = self.get_or_create_lane(parameter_id, parameter_name);
+        lane.add_point(AutomationPoint::linear(beat, value_norm));
+    }
+
+    /// Evaluate a parameter value at `beat`.
+    pub fn evaluate_param(&self, parameter_id: u32, beat: f64, default_value: f32) -> f32 {
+        if let Some(lane) = self.lanes.iter().find(|l| l.parameter_id == parameter_id) {
+            lane.interpolate_at(beat, default_value)
+        } else {
+            default_value
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -170,5 +247,20 @@ mod tests {
         assert_eq!(lane.interpolate_at(6.0, 0.0), 0.6);
         assert_eq!(lane.interpolate_at(8.0, 0.0), 0.4);
         assert_eq!(lane.interpolate_at(10.0, 0.0), 0.4);
+    }
+
+    #[test]
+    fn test_multi_lane_automation() {
+        let mut multi = MultiLaneAutomation::new();
+        multi.record_value(1, "cutoff", 0.0, 0.2);
+        multi.record_value(1, "cutoff", 4.0, 0.8);
+
+        multi.record_value(2, "resonance", 0.0, 0.5);
+        multi.record_value(2, "resonance", 4.0, 0.1);
+
+        assert_eq!(multi.lanes.len(), 2);
+        assert_eq!(multi.evaluate_param(1, 2.0, 0.0), 0.5);
+        assert_eq!(multi.evaluate_param(2, 2.0, 0.0), 0.3);
+        assert_eq!(multi.evaluate_param(3, 2.0, 0.99), 0.99); // default
     }
 }

@@ -26,6 +26,7 @@ dependencies = [
  "ableton-drums",
  "ableton-dsp",
  "ableton-fx",
+ "ableton-timeline",
  "cpal",
  "portable-atomic",
  "rtrb",
@@ -36,6 +37,7 @@ dependencies = [
 name = "ableton-bounce"
 version = "0.1.0"
 dependencies = [
+ "ableton-audio",
  "ableton-core",
  "ableton-drums",
  "ableton-dsp",
