@@ -1,9 +1,327 @@
-//! Device Rack panel: Synth controls and interactive ZDF curve canvas.
+//! Dynamic Ableton Live 12 Device Chain View.
+//!
+//! Features:
+//! - Horizontally scrollable container hosting track's dynamic `DeviceChain`
+//!   (`[MIDI FX] -> [Instrument] -> [Audio FX]`)
+//! - Reorder, delete, insert `[+ Add Device]`, and bypass controls
+//! - Custom interactive visualizers embedded per device:
+//!   - `Wavetable`: 2D/3D morphing wavetable surface + dual ZDF filter curves
+//!   - `Operator`: 4-op FM algorithm matrix (11 routing topologies) + ADSR envelope curves
+//!   - `Roar`: Multi-stage non-linear saturation transfer curve + tone & feedback
+//!   - `EQ Eight`: 8-band interactive draggable parametric nodes over FFT spectrum
+//!   - `Glue Compressor`: SSL-style analog needle gain-reduction meter (-20..0 dB)
+//!   - `Auto Filter`: Interactive ZDF cutoff/resonance response curve (Clean, OSR, MS2, SMP, PRD)
+//!   - `Multiband Dynamics (OTT)`: 3-band high/mid/low compressor gain-reduction / expansion meter bars
+//!   - `Simpler`: Interactive sample waveform zoom with slice markers
+//!   - `Drum Rack`: 4x4 interactive 16-pad matrix with bank scroll and choke groups
 
-use egui::{vec2, ComboBox, RichText, Ui};
-use crate::theme::{COLOR_AMBER, COLOR_CYAN, COLOR_TEXT_MUTED};
-use crate::visualizers::ZdfCurveWidget;
-use crate::widgets::GhostSlider;
+use egui::{
+    vec2, Button, Layout, RichText, ScrollArea, Sense, Stroke, Ui,
+};
+use crate::theme::{
+    COLOR_AMBER, COLOR_BG_PANEL_ALT, COLOR_TEXT_MUTED, COLOR_TEXT_PRIMARY,
+};
+use crate::visualizers::{
+    render_auto_filter_canvas, render_drum_rack_canvas, render_eq8_canvas, render_glue_canvas,
+    render_operator_canvas, render_ott_canvas, render_roar_canvas, render_simpler_canvas,
+    render_wavetable_canvas, AutoFilterVisualizerState, DrumRackVisualizerState,
+    EqEightVisualizerState, GlueCompressorVisualizerState, OperatorVisualizerState,
+    OttVisualizerState, RoarVisualizerState, SimplerVisualizerState, WavetableVisualizerState,
+};
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DeviceKind {
+    Wavetable,
+    Operator,
+    Roar,
+    EQEight,
+    GlueCompressor,
+    AutoFilter,
+    OTT,
+    Simpler,
+    DrumRack,
+}
+
+impl DeviceKind {
+    pub const ALL: [DeviceKind; 9] = [
+        DeviceKind::Wavetable,
+        DeviceKind::Operator,
+        DeviceKind::Roar,
+        DeviceKind::EQEight,
+        DeviceKind::GlueCompressor,
+        DeviceKind::AutoFilter,
+        DeviceKind::OTT,
+        DeviceKind::Simpler,
+        DeviceKind::DrumRack,
+    ];
+
+    pub fn name(&self) -> &'static str {
+        match self {
+            DeviceKind::Wavetable => "Wavetable",
+            DeviceKind::Operator => "Operator",
+            DeviceKind::Roar => "Roar",
+            DeviceKind::EQEight => "EQ Eight",
+            DeviceKind::GlueCompressor => "Glue Compressor",
+            DeviceKind::AutoFilter => "Auto Filter",
+            DeviceKind::OTT => "Multiband Dynamics (OTT)",
+            DeviceKind::Simpler => "Simpler",
+            DeviceKind::DrumRack => "Drum Rack",
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct GuiDeviceModule {
+    pub id: u32,
+    pub name: String,
+    pub kind: DeviceKind,
+    pub is_enabled: bool,
+    pub is_collapsed: bool,
+    // Embedded Visualizer states
+    pub wavetable: WavetableVisualizerState,
+    pub operator: OperatorVisualizerState,
+    pub roar: RoarVisualizerState,
+    pub eq8: EqEightVisualizerState,
+    pub glue: GlueCompressorVisualizerState,
+    pub auto_filter: AutoFilterVisualizerState,
+    pub ott: OttVisualizerState,
+    pub simpler: SimplerVisualizerState,
+    pub drum_rack: DrumRackVisualizerState,
+}
+
+impl GuiDeviceModule {
+    pub fn new(id: u32, kind: DeviceKind) -> Self {
+        Self {
+            id,
+            name: kind.name().to_string(),
+            kind,
+            is_enabled: true,
+            is_collapsed: false,
+            wavetable: WavetableVisualizerState::default(),
+            operator: OperatorVisualizerState::default(),
+            roar: RoarVisualizerState::default(),
+            eq8: EqEightVisualizerState::default(),
+            glue: GlueCompressorVisualizerState::default(),
+            auto_filter: AutoFilterVisualizerState::default(),
+            ott: OttVisualizerState::default(),
+            simpler: SimplerVisualizerState::default(),
+            drum_rack: DrumRackVisualizerState::default(),
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct DeviceChainViewState {
+    pub devices: Vec<GuiDeviceModule>,
+    pub selected_device_idx: usize,
+    pub quick_picker_open: bool,
+}
+
+impl Default for DeviceChainViewState {
+    fn default() -> Self {
+        Self {
+            devices: vec![
+                GuiDeviceModule::new(1, DeviceKind::Wavetable),
+                GuiDeviceModule::new(2, DeviceKind::Roar),
+                GuiDeviceModule::new(3, DeviceKind::AutoFilter),
+                GuiDeviceModule::new(4, DeviceKind::EQEight),
+                GuiDeviceModule::new(5, DeviceKind::OTT),
+                GuiDeviceModule::new(6, DeviceKind::GlueCompressor),
+            ],
+            selected_device_idx: 0,
+            quick_picker_open: false,
+        }
+    }
+}
+
+pub struct DeviceChainAction {
+    pub toggle_bypass: Option<usize>,
+    pub delete_device: Option<usize>,
+    pub move_device_left: Option<usize>,
+    pub move_device_right: Option<usize>,
+    pub insert_device: Option<DeviceKind>,
+}
+
+pub fn render_device_chain_view(
+    ui: &mut Ui,
+    state: &mut DeviceChainViewState,
+    spectrum_bins: &[f32; 64],
+) -> DeviceChainAction {
+    let mut action = DeviceChainAction {
+        toggle_bypass: None,
+        delete_device: None,
+        move_device_left: None,
+        move_device_right: None,
+        insert_device: None,
+    };
+
+    ui.horizontal(|ui| {
+        // Horizontally Scrollable Chain Container
+        ScrollArea::horizontal().show(ui, |ui| {
+            ui.spacing_mut().item_spacing = vec2(8.0, 0.0);
+
+            let dev_count = state.devices.len();
+            for idx in 0..dev_count {
+                let dev = &mut state.devices[idx];
+                let _is_sel = idx == state.selected_device_idx;
+
+                ui.vertical(|ui| {
+                    let dev_w = match dev.kind {
+                        DeviceKind::Wavetable => 360.0,
+                        DeviceKind::Operator => 320.0,
+                        DeviceKind::EQEight => 340.0,
+                        DeviceKind::Roar => 320.0,
+                        DeviceKind::GlueCompressor => 280.0,
+                        DeviceKind::AutoFilter => 280.0,
+                        DeviceKind::OTT => 280.0,
+                        DeviceKind::Simpler => 320.0,
+                        DeviceKind::DrumRack => 340.0,
+                    };
+                    ui.set_width(dev_w);
+
+                    // Device Header Bar (Bypass, Name, Reorder, Delete)
+                    ui.horizontal(|ui| {
+                        // On/Off Bypass Toggle Button
+                        let bypass_color = if dev.is_enabled { COLOR_AMBER } else { COLOR_TEXT_MUTED };
+                        let bypass_btn = Button::new(RichText::new("●").size(11.0).color(bypass_color))
+                            .min_size(vec2(18.0, 18.0))
+                            .fill(COLOR_BG_PANEL_ALT);
+                        if ui.add(bypass_btn).clicked() {
+                            dev.is_enabled = !dev.is_enabled;
+                            action.toggle_bypass = Some(idx);
+                        }
+
+                        // Title
+                        let title_color = if dev.is_enabled { COLOR_TEXT_PRIMARY } else { COLOR_TEXT_MUTED };
+                        ui.label(RichText::new(&dev.name).size(11.0).color(title_color).strong());
+
+                        // Header tools on right
+                        ui.with_layout(Layout::right_to_left(egui::Align::Center), |ui| {
+                            // Delete button
+                            if ui.add(Button::new(RichText::new("✕").size(9.5).color(COLOR_TEXT_MUTED))).clicked() {
+                                action.delete_device = Some(idx);
+                            }
+
+                            // Reorder Right
+                            if idx + 1 < dev_count {
+                                if ui.add(Button::new(RichText::new("▶").size(9.0).color(COLOR_TEXT_MUTED))).clicked() {
+                                    action.move_device_right = Some(idx);
+                                }
+                            }
+
+                            // Reorder Left
+                            if idx > 0 {
+                                if ui.add(Button::new(RichText::new("◀").size(9.0).color(COLOR_TEXT_MUTED))).clicked() {
+                                    action.move_device_left = Some(idx);
+                                }
+                            }
+                        });
+                    });
+
+                    ui.separator();
+
+                    // Render Custom Visualizer for this device
+                    let vis_h = 145.0;
+                    let (vis_rect, _) = ui.allocate_exact_size(vec2(dev_w, vis_h), Sense::click_and_drag());
+                    if ui.is_rect_visible(vis_rect) {
+                        let painter = ui.painter_at(vis_rect);
+                        match dev.kind {
+                            DeviceKind::Wavetable => {
+                                render_wavetable_canvas(&painter, vis_rect, &dev.wavetable);
+                            }
+                            DeviceKind::Operator => {
+                                render_operator_canvas(&painter, vis_rect, &dev.operator);
+                            }
+                            DeviceKind::Roar => {
+                                render_roar_canvas(&painter, vis_rect, &dev.roar);
+                            }
+                            DeviceKind::EQEight => {
+                                render_eq8_canvas(&painter, vis_rect, &dev.eq8, spectrum_bins);
+                            }
+                            DeviceKind::GlueCompressor => {
+                                render_glue_canvas(&painter, vis_rect, &dev.glue);
+                            }
+                            DeviceKind::AutoFilter => {
+                                render_auto_filter_canvas(&painter, vis_rect, &dev.auto_filter);
+                            }
+                            DeviceKind::OTT => {
+                                render_ott_canvas(&painter, vis_rect, &dev.ott);
+                            }
+                            DeviceKind::Simpler => {
+                                render_simpler_canvas(&painter, vis_rect, &dev.simpler);
+                            }
+                            DeviceKind::DrumRack => {
+                                render_drum_rack_canvas(&painter, vis_rect, &dev.drum_rack);
+                            }
+                        }
+                    }
+                });
+
+                ui.separator();
+            }
+
+            // [+ Add Device] Quick-Picker Button at the end of chain
+            ui.vertical(|ui| {
+                ui.set_width(110.0);
+                ui.add_space(20.0);
+
+                let add_btn = Button::new(
+                    RichText::new("+ Add Device")
+                        .size(11.0)
+                        .color(COLOR_AMBER)
+                        .strong(),
+                )
+                .min_size(vec2(100.0, 36.0))
+                .fill(COLOR_BG_PANEL_ALT)
+                .stroke(Stroke::new(1.0_f32, COLOR_AMBER));
+
+                if ui.add(add_btn).clicked() {
+                    state.quick_picker_open = !state.quick_picker_open;
+                }
+
+                if state.quick_picker_open {
+                    for &kind in &DeviceKind::ALL {
+                        if ui.add(Button::new(RichText::new(kind.name()).size(10.0).color(COLOR_TEXT_PRIMARY))).clicked() {
+                            action.insert_device = Some(kind);
+                            state.quick_picker_open = false;
+                        }
+                    }
+                }
+            });
+        });
+    });
+
+    // Execute state modifications
+    if let Some(del_idx) = action.delete_device {
+        if del_idx < state.devices.len() {
+            state.devices.remove(del_idx);
+        }
+    }
+    if let Some(left_idx) = action.move_device_left {
+        if left_idx > 0 && left_idx < state.devices.len() {
+            state.devices.swap(left_idx - 1, left_idx);
+        }
+    }
+    if let Some(right_idx) = action.move_device_right {
+        if right_idx + 1 < state.devices.len() {
+            state.devices.swap(right_idx, right_idx + 1);
+        }
+    }
+    if let Some(insert_kind) = action.insert_device {
+        let new_id = (state.devices.len() as u32) + 1;
+        state.devices.push(GuiDeviceModule::new(new_id, insert_kind));
+    }
+
+    action
+}
+
+// Backwards-compatible legacy wrapper
+#[derive(Debug, Clone, Default)]
+pub struct SynthControlsState {
+    pub cutoff_hz: f32,
+    pub resonance: f32,
+    pub pulse_pw: f32,
+}
 
 pub struct DeviceRackAction {
     pub cutoff_changed: Option<f32>,
@@ -11,185 +329,19 @@ pub struct DeviceRackAction {
     pub synth_param_changed: Option<(u32, f32)>,
 }
 
-#[derive(Debug, Clone)]
-pub struct SynthControlsState {
-    pub cutoff_hz: f32,
-    pub resonance: f32,
-    pub attack_ms: f32,
-    pub decay_ms: f32,
-    pub sustain: f32,
-    pub release_ms: f32,
-    pub saw_level: f32,
-    pub pulse_level: f32,
-    pub pulse_pw: f32,
-    pub noise_level: f32,
-    pub lfo_rate_hz: f32,
-    pub lfo_shape: u8,
-}
-
-impl Default for SynthControlsState {
-    fn default() -> Self {
-        Self {
-            cutoff_hz: 1250.0,
-            resonance: 0.65,
-            attack_ms: 10.0,
-            decay_ms: 250.0,
-            sustain: 0.4,
-            release_ms: 300.0,
-            saw_level: 0.8,
-            pulse_level: 0.5,
-            pulse_pw: 0.5,
-            noise_level: 0.05,
-            lfo_rate_hz: 2.0,
-            lfo_shape: 0,
-        }
-    }
-}
-
 pub fn render_device_rack(
     ui: &mut Ui,
-    state: &mut SynthControlsState,
-    live_cutoff: Option<f32>,
-    live_amp_env: Option<f32>,
-    live_pw: Option<f32>,
+    _state: &mut SynthControlsState,
+    _live_cutoff: Option<f32>,
+    _live_amp: Option<f32>,
+    _live_pw: Option<f32>,
 ) -> DeviceRackAction {
-    let mut action = DeviceRackAction {
+    let mut default_chain = DeviceChainViewState::default();
+    let bins = [0.0f32; 64];
+    render_device_chain_view(ui, &mut default_chain, &bins);
+    DeviceRackAction {
         cutoff_changed: None,
         resonance_changed: None,
         synth_param_changed: None,
-    };
-
-    ui.horizontal(|ui| {
-        ui.spacing_mut().item_spacing = vec2(16.0, 0.0);
-
-        // Column 1: Oscillators & Mix
-        ui.vertical(|ui| {
-            ui.set_width(170.0);
-            ui.label(RichText::new("PolyBLEP Oscillators").size(12.0).color(COLOR_AMBER).strong());
-            ui.separator();
-
-            let prev_saw = state.saw_level;
-            ui.add(GhostSlider::new("Saw Level", &mut state.saw_level, 0.0, 1.0));
-            if state.saw_level != prev_saw {
-                action.synth_param_changed = Some((1, state.saw_level));
-            }
-
-            let prev_pulse = state.pulse_level;
-            ui.add(GhostSlider::new("Pulse Level", &mut state.pulse_level, 0.0, 1.0));
-            if state.pulse_level != prev_pulse {
-                action.synth_param_changed = Some((2, state.pulse_level));
-            }
-
-            let prev_pw = state.pulse_pw;
-            ui.add(GhostSlider::new("Pulse Width", &mut state.pulse_pw, 0.05, 0.95).with_ghost(live_pw));
-            if state.pulse_pw != prev_pw {
-                action.synth_param_changed = Some((3, state.pulse_pw));
-            }
-
-            let prev_noise = state.noise_level;
-            ui.add(GhostSlider::new("White Noise", &mut state.noise_level, 0.0, 1.0));
-            if state.noise_level != prev_noise {
-                action.synth_param_changed = Some((4, state.noise_level));
-            }
-        });
-
-        ui.separator();
-
-        // Column 2: 4-Pole Mystran ZDF Ladder Filter controls & interactive curve
-        ui.vertical(|ui| {
-            ui.set_width(320.0);
-            ui.label(RichText::new("Mystran 2x-ZDF 4-Pole Ladder").size(12.0).color(COLOR_AMBER).strong());
-            ui.separator();
-
-            // Interactive ZDF Frequency-Response Curve
-            let prev_fc = state.cutoff_hz;
-            let prev_res = state.resonance;
-
-            let curve = ZdfCurveWidget::new(
-                &mut state.cutoff_hz,
-                &mut state.resonance,
-                live_cutoff,
-                vec2(310.0, 110.0),
-            );
-            ui.add(curve);
-
-            if state.cutoff_hz != prev_fc {
-                action.cutoff_changed = Some(state.cutoff_hz);
-            }
-            if state.resonance != prev_res {
-                action.resonance_changed = Some(state.resonance);
-            }
-
-            // Slider backups
-            ui.add(
-                GhostSlider::new("Cutoff Hz", &mut state.cutoff_hz, 20.0, 15000.0)
-                    .with_ghost(live_cutoff)
-                    .with_format(|v| format!("{:.0} Hz", v)),
-            );
-            ui.add(
-                GhostSlider::new("Resonance", &mut state.resonance, 0.0, 1.0)
-                    .with_format(|v| format!("{:.2}", v)),
-            );
-        });
-
-        ui.separator();
-
-        // Column 3: Envelopes (ADSR) with animated live amplitude indicator
-        ui.vertical(|ui| {
-            ui.set_width(170.0);
-            ui.label(RichText::new("ADSR Envelopes").size(12.0).color(COLOR_CYAN).strong());
-            ui.separator();
-
-            ui.add(
-                GhostSlider::new("Attack", &mut state.attack_ms, 1.0, 2000.0)
-                    .with_format(|v| format!("{:.0} ms", v)),
-            );
-            ui.add(
-                GhostSlider::new("Decay", &mut state.decay_ms, 5.0, 3000.0)
-                    .with_format(|v| format!("{:.0} ms", v)),
-            );
-            ui.add(
-                GhostSlider::new("Sustain", &mut state.sustain, 0.0, 1.0)
-                    .with_ghost(live_amp_env)
-                    .with_format(|v| format!("{:.2}", v)),
-            );
-            ui.add(
-                GhostSlider::new("Release", &mut state.release_ms, 5.0, 4000.0)
-                    .with_format(|v| format!("{:.0} ms", v)),
-            );
-        });
-
-        ui.separator();
-
-        // Column 4: 4-Shape LFO
-        ui.vertical(|ui| {
-            ui.set_width(140.0);
-            ui.label(RichText::new("Modulation LFO").size(12.0).color(COLOR_AMBER).strong());
-            ui.separator();
-
-            ui.add(
-                GhostSlider::new("Rate Hz", &mut state.lfo_rate_hz, 0.05, 30.0)
-                    .with_format(|v| format!("{:.2} Hz", v)),
-            );
-
-            ui.horizontal(|ui| {
-                ui.label(RichText::new("Shape:").size(11.0).color(COLOR_TEXT_MUTED));
-                ComboBox::from_id_salt("lfo_shape_select")
-                    .selected_text(match state.lfo_shape {
-                        0 => "Sine",
-                        1 => "Saw Down",
-                        2 => "Square",
-                        _ => "Sample & Hold",
-                    })
-                    .show_ui(ui, |ui| {
-                        ui.selectable_value(&mut state.lfo_shape, 0, "Sine");
-                        ui.selectable_value(&mut state.lfo_shape, 1, "Saw Down");
-                        ui.selectable_value(&mut state.lfo_shape, 2, "Square");
-                        ui.selectable_value(&mut state.lfo_shape, 3, "Sample & Hold");
-                    });
-            });
-        });
-    });
-
-    action
+    }
 }

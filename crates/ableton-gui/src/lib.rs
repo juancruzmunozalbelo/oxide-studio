@@ -44,7 +44,7 @@ mod tests {
     fn test_ableton_studio_app_headless_creation_and_telemetry() {
         let mut app = AbletonStudioApp::new_mock(44100.0);
         assert_eq!(app.workspace_view, WorkspaceView::SessionMatrix);
-        assert_eq!(app.deck_tab, DeckTab::DeviceRack);
+        assert_eq!(app.deck_tab, DeckTab::ClipView);
         assert_eq!(app.keyboard.mode, KeyboardMode::Piano);
 
         // Advance audio & poll telemetry

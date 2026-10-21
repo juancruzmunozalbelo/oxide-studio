@@ -25,3 +25,7 @@ ableton-timeline = { path = "../ableton-timeline" }
 ableton-project = { path = "../ableton-project" }
 ableton-plugin-scanner = { path = "../ableton-plugin-scanner" }
 ableton-mcp = { path = "../ableton-mcp" }
+
+[[test]]
+name = "e2e_m11_gui_test"
+path = "../../tests/e2e_m11_gui_test.rs"

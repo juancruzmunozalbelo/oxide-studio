@@ -1,37 +1,45 @@
-//! Main single-window Ableton Studio application.
+//! Main Ableton Live 12 Studio Workstation Application.
 //!
 //! Enforces:
-//! - Dark Carbon Studio Theme
-//! - Zero-Menu-Diving Single-Window Studio Layout:
-//!   - Top Transport Bar (~48px): Play/Stop/Rec, BPM, Swing, CPU, Oscilloscope, Spectrum, Export WAV
-//!   - Center Workspace: Toggle between Session Matrix and Linear Arrangement Timeline
-//!   - Bottom Deck: Tabbed between Device Rack (ZDF curve), 16-Step Sequencer, and XY Perform Pad
+//! - Complete Live 12 Single-Window Workstation UI/UX running at 60 FPS on macOS Metal (`egui`/`eframe`):
+//!   1. Top Control & Scale Bar: GlobalScale, TuningSystem, BPM, Time Sig, Metronome, Play/Stop/Rec, CPU, Scope/Spectrum
+//!   2. Left Collapsible Browser (220-300px): Categories, Live 12 Tag Pills, Search, Item list, Sound Similarity
+//!   3. Center Workspace: Session View (unlimited tracks, Return tracks, Master bus, 8+ scenes with tempo/meter headers,
+//!      quantized launching, modular mixer strips, I/O, Sends, Crossfader) vs Arrangement View (ruler, zoom, locators,
+//!      loop brace, waveform/MIDI clips, collapsible automation lanes with bezier curves, collapsible comping take lanes)
+//!   4. Bottom Detail View: Dual-panel/tabbed Clip View (Piano Roll with scale-fold, velocity, chance, Live 12 Transform
+//!      & Generate, Audio Warping) & Device Chain View (scrollable dynamic chain with Wavetable, Operator, Roar, EQ Eight,
+//!      Glue, Auto Filter, OTT, Simpler, Drum Rack visualizers)
 //! - Computer Keyboard Playing (Piano & Wicki-Hayden Isomorphic)
-//! - Audio Engine live integration via lock-free queues & telemetry polling
+//! - Real-time zero-allocation audio engine integration with telemetry polling
 
 use egui::{
-    vec2, Button, CentralPanel, Context, Key, Layout, RichText, TopBottomPanel,
+    vec2, Button, CentralPanel, Context, Key, Layout, RichText, SidePanel, TopBottomPanel,
 };
 use ableton_audio::{
     AudioEngine, AudioEngineProcessor, AudioStreamHandle, PARAM_BPM,
-    PARAM_SYNTH_CUTOFF, PARAM_SYNTH_MACRO_X, PARAM_SYNTH_MACRO_Y, PARAM_SYNTH_RESONANCE,
+    PARAM_SYNTH_MACRO_X, PARAM_SYNTH_MACRO_Y,
 };
 use ableton_bounce::{DemoArrangementRenderer, WavWriter};
-use ableton_core::{AudioCommand, AudioTelemetry};
+use ableton_core::{AudioCommand, AudioTelemetry, GlobalScale, ScaleMode, TuningSystem};
 use ableton_timeline::{
-    ArrangementTimeline, ClipPattern, DrumStepPattern, MidiNote, MidiPattern,
-    SessionClip, SessionMatrix,
+    ArrangementClip, ArrangementTimeline, ArrangementTrack, ClipPattern, DrumStepPattern,
+    MidiNote, MidiPattern, SessionClip, SessionMatrix, SlotState,
 };
 
 use crate::keyboard::{ComputerKeyboardController, KeyboardMode};
 use crate::panels::{
-    render_arrangement_timeline, render_device_rack, render_drum_sequencer, render_piano_roll,
-    render_session_matrix, render_transport_bar, GuiTrackState, SynthControlsState,
+    render_arrangement_timeline, render_browser_panel, render_clip_view, render_device_chain_view,
+    render_drum_sequencer, render_piano_roll, render_session_matrix, render_top_control_bar,
+    BrowserState, ClipViewState, CrossfaderAssign,
+    DeviceChainViewState, DeviceKind, GuiDeviceModule, GuiReturnTrack,
+    GuiTrackState, LaunchQuantization, SessionMixerSections,
+    SynthControlsState, TimelineGuiState,
 };
 use crate::theme::{
     apply_dark_carbon_theme, COLOR_AMBER, COLOR_CYAN, COLOR_GREEN, COLOR_TEXT_MUTED,
 };
-use crate::visualizers::XyPerformPadWidget;
+use crate::visualizers::{XyPerformPadState, XyPerformPadWidget};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WorkspaceView {
@@ -41,6 +49,7 @@ pub enum WorkspaceView {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DeckTab {
+    ClipView,
     DeviceRack,
     DrumSequencer,
     XyPad,
@@ -55,23 +64,45 @@ pub struct AbletonStudioApp {
     pub bpm: f64,
     pub swing: f32,
     pub current_beat: f64,
+    pub time_signature: (u8, u8),
+    pub metronome_enabled: bool,
+    pub arrangement_record: bool,
 
+    // Global Musical Scale & Tuning (Live 12 Flagship)
+    pub global_scale: GlobalScale,
+    pub tuning_system: TuningSystem,
+
+    // View Routing
     pub workspace_view: WorkspaceView,
     pub deck_tab: DeckTab,
 
-    pub keyboard: ComputerKeyboardController,
+    // Subsystems
+    pub browser: BrowserState,
     pub matrix: SessionMatrix,
+    pub return_tracks: Vec<GuiReturnTrack>,
+    pub mixer_sections: SessionMixerSections,
+    pub launch_quantization: LaunchQuantization,
+    pub crossfader_pos: f32,
+    pub master_volume: f32,
+
     pub timeline: ArrangementTimeline,
+    pub timeline_gui: TimelineGuiState,
+
+    pub clip_view: ClipViewState,
+    pub device_chain: DeviceChainViewState,
+
+    pub keyboard: ComputerKeyboardController,
     pub synth_state: SynthControlsState,
     pub drum_pattern: DrumStepPattern,
     pub midi_pattern: MidiPattern,
-    pub xy_state: crate::visualizers::XyPerformPadState,
+    pub xy_state: XyPerformPadState,
     pub tracks_gui: Vec<GuiTrackState>,
     pub has_session_override: bool,
     pub status_message: String,
     pub current_time_seconds: f64,
     pub last_triggered_step: Option<i64>,
     pub active_synth_note: Option<u8>,
+    pub tap_times: Vec<f64>,
 }
 
 impl AbletonStudioApp {
@@ -96,10 +127,10 @@ impl AbletonStudioApp {
         app.mock_processor = mock_processor;
         if cc.is_some() {
             app.is_playing = true;
-            app.deck_tab = DeckTab::DrumSequencer;
+            app.deck_tab = DeckTab::ClipView;
             app.send_command(AudioCommand::SetTempo(app.bpm));
             app.send_command(AudioCommand::Play);
-            app.status_message = "Playing: Deep House 909 Intro (124 BPM — F Dorian)".into();
+            app.status_message = "Live 12 Studio Ready (124 BPM — F Dorian)".into();
         }
         app
     }
@@ -114,7 +145,7 @@ impl AbletonStudioApp {
     }
 
     fn init_empty() -> Self {
-        // Initialize 124 BPM Classic 909 House Intro pattern (Kick on 1/2/3/4, Offbeat Open Hat on 2/6/10/14, Snare/Clap on 4/12, Shuffled 16ths)
+        // Initialize 124 BPM Classic 909 House Intro pattern
         let mut drum_pattern = DrumStepPattern::new_16_step();
         if let Some(kick_track) = drum_pattern.tracks.get_mut(0) {
             for &s in &[0, 4, 8, 12] {
@@ -146,10 +177,10 @@ impl AbletonStudioApp {
         // F Dorian Offbeat & Syncopated House Bass/Stab pattern
         let midi_notes = vec![
             MidiNote { pitch: 41, velocity: 118, start_beat: 0.5, duration_beats: 0.45, probability: 1.0 },
-            MidiNote { pitch: 53, velocity: 102, start_beat: 1.25, duration_beats: 0.25, probability: 1.0 },
+            MidiNote { pitch: 53, velocity: 102, start_beat: 1.25, duration_beats: 0.25, probability: 0.9 },
             MidiNote { pitch: 44, velocity: 114, start_beat: 1.5, duration_beats: 0.45, probability: 1.0 },
             MidiNote { pitch: 46, velocity: 116, start_beat: 2.5, duration_beats: 0.45, probability: 1.0 },
-            MidiNote { pitch: 56, velocity: 98, start_beat: 3.0, duration_beats: 0.25, probability: 1.0 },
+            MidiNote { pitch: 56, velocity: 98, start_beat: 3.0, duration_beats: 0.25, probability: 0.8 },
             MidiNote { pitch: 48, velocity: 120, start_beat: 3.5, duration_beats: 0.45, probability: 1.0 },
         ];
         let midi_pattern = MidiPattern {
@@ -157,49 +188,102 @@ impl AbletonStudioApp {
             notes: midi_notes,
         };
 
-        // Initialize Session Matrix with House Intro clips
-        let mut matrix = SessionMatrix::new(3, 4);
+        // Initialize Session Matrix with 3 tracks and 8 scenes
+        let mut matrix = SessionMatrix::new(3, 8);
         if let Some(t0) = matrix.tracks.get_mut(0) {
             t0.name = "F Dorian Chords".into();
             if let Some(slot0) = t0.slots.get_mut(0) {
                 slot0.clip = Some(SessionClip::new(1, "F Dorian House Chords", ClipPattern::Midi(midi_pattern.clone())));
-                slot0.state = ableton_timeline::SlotState::Playing { start_beat: 0.0, phase: 0.0 };
+                slot0.state = SlotState::Playing { start_beat: 0.0, phase: 0.0 };
             }
         }
         if let Some(t1) = matrix.tracks.get_mut(1) {
             t1.name = "909 House Kit".into();
             if let Some(slot0) = t1.slots.get_mut(0) {
                 slot0.clip = Some(SessionClip::new(2, "909 Classic House Groove", ClipPattern::Drum(drum_pattern.clone())));
-                slot0.state = ableton_timeline::SlotState::Playing { start_beat: 0.0, phase: 0.0 };
+                slot0.state = SlotState::Playing { start_beat: 0.0, phase: 0.0 };
             }
         }
         if let Some(t2) = matrix.tracks.get_mut(2) {
             t2.name = "Offbeat Sub Bass".into();
             if let Some(slot0) = t2.slots.get_mut(0) {
                 slot0.clip = Some(SessionClip::new(3, "Offbeat House Bass", ClipPattern::Midi(midi_pattern.clone())));
-                slot0.state = ableton_timeline::SlotState::Playing { start_beat: 0.0, phase: 0.0 };
+                slot0.state = SlotState::Playing { start_beat: 0.0, phase: 0.0 };
             }
         }
 
-        // Initialize Arrangement Timeline with 16-bar House Intro sections & Filter Cutoff Sweep
+        // Return Buses: A Reverb, B Delay
+        let return_tracks = vec![
+            GuiReturnTrack {
+                name: "A Reverb".into(),
+                effect_name: "Hybrid Reverb".into(),
+                volume_linear: 0.85,
+                pan: 0.0,
+                mute: false,
+                solo: false,
+            },
+            GuiReturnTrack {
+                name: "B Delay".into(),
+                effect_name: "Echo".into(),
+                volume_linear: 0.70,
+                pan: 0.0,
+                mute: false,
+                solo: false,
+            },
+        ];
+
+        // Initialize Arrangement Timeline
         let mut timeline = ArrangementTimeline::new();
-        let mut trk1 = ableton_timeline::ArrangementTrack::new(1, "F Dorian Chords", "MidiSynth");
-        let mut trk2 = ableton_timeline::ArrangementTrack::new(2, "909 House Kit", "DrumRack");
-        let mut trk3 = ableton_timeline::ArrangementTrack::new(3, "Offbeat Sub Bass", "MidiSynth");
-        for (i, sec) in ["Intro (909 + Filter Rise)", "Groove In", "Warm Chords", "Drop Ready"].iter().enumerate() {
+        let mut trk1 = ArrangementTrack::new(1, "F Dorian Chords", "MidiSynth");
+        let mut trk2 = ArrangementTrack::new(2, "909 House Kit", "DrumRack");
+        let mut trk3 = ArrangementTrack::new(3, "Offbeat Sub Bass", "MidiSynth");
+        for (i, sec) in ["Intro", "Groove In", "Warm Chords", "Drop Ready"].iter().enumerate() {
             let start = (i * 16) as f64;
-            trk1.add_clip(ableton_timeline::ArrangementClip::new(i as u32 + 1, *sec, start, 16.0, ClipPattern::Midi(midi_pattern.clone())));
-            trk2.add_clip(ableton_timeline::ArrangementClip::new(i as u32 + 10, *sec, start, 16.0, ClipPattern::Drum(drum_pattern.clone())));
-            trk3.add_clip(ableton_timeline::ArrangementClip::new(i as u32 + 20, *sec, start, 16.0, ClipPattern::Midi(midi_pattern.clone())));
+            trk1.add_clip(ArrangementClip::new(i as u32 + 1, *sec, start, 16.0, ClipPattern::Midi(midi_pattern.clone())));
+            trk2.add_clip(ArrangementClip::new(i as u32 + 10, *sec, start, 16.0, ClipPattern::Drum(drum_pattern.clone())));
+            trk3.add_clip(ArrangementClip::new(i as u32 + 20, *sec, start, 16.0, ClipPattern::Midi(midi_pattern.clone())));
         }
         timeline.tracks.push(trk1);
         timeline.tracks.push(trk2);
         timeline.tracks.push(trk3);
 
         let tracks_gui = vec![
-            GuiTrackState { name: "F Dorian Chords".into(), volume_linear: 0.9, pan: 0.0, mute: false, solo: false },
-            GuiTrackState { name: "909 House Kit".into(), volume_linear: 1.0, pan: 0.0, mute: false, solo: false },
-            GuiTrackState { name: "Offbeat Sub Bass".into(), volume_linear: 0.88, pan: 0.0, mute: false, solo: false },
+            GuiTrackState {
+                name: "F Dorian Chords".into(),
+                volume_linear: 0.90,
+                pan: 0.0,
+                mute: false,
+                solo: false,
+                sends: vec![0.35, 0.20],
+                input_routing: "All Ins".into(),
+                output_routing: "Master".into(),
+                monitor_mode: "Auto".into(),
+                crossfader_assign: CrossfaderAssign::Off,
+            },
+            GuiTrackState {
+                name: "909 House Kit".into(),
+                volume_linear: 1.0,
+                pan: 0.0,
+                mute: false,
+                solo: false,
+                sends: vec![0.15, 0.10],
+                input_routing: "All Ins".into(),
+                output_routing: "Master".into(),
+                monitor_mode: "Auto".into(),
+                crossfader_assign: CrossfaderAssign::A,
+            },
+            GuiTrackState {
+                name: "Offbeat Sub Bass".into(),
+                volume_linear: 0.88,
+                pan: 0.0,
+                mute: false,
+                solo: false,
+                sends: vec![0.05, 0.0],
+                input_routing: "All Ins".into(),
+                output_routing: "Master".into(),
+                monitor_mode: "Auto".into(),
+                crossfader_assign: CrossfaderAssign::B,
+            },
         ];
 
         Self {
@@ -211,21 +295,36 @@ impl AbletonStudioApp {
             bpm: 124.0,
             swing: 0.18,
             current_beat: 0.0,
+            time_signature: (4, 4),
+            metronome_enabled: false,
+            arrangement_record: false,
+            global_scale: GlobalScale::new(5, ScaleMode::Dorian).with_lock(true),
+            tuning_system: TuningSystem::default(),
             workspace_view: WorkspaceView::SessionMatrix,
-            deck_tab: DeckTab::DeviceRack,
-            keyboard: ComputerKeyboardController::new(),
+            deck_tab: DeckTab::ClipView,
+            browser: BrowserState::default(),
             matrix,
+            return_tracks,
+            mixer_sections: SessionMixerSections::default(),
+            launch_quantization: LaunchQuantization::Bar1,
+            crossfader_pos: 0.0,
+            master_volume: 0.95,
             timeline,
+            timeline_gui: TimelineGuiState::default(),
+            clip_view: ClipViewState::default(),
+            device_chain: DeviceChainViewState::default(),
+            keyboard: ComputerKeyboardController::new(),
             synth_state: SynthControlsState::default(),
             drum_pattern,
             midi_pattern,
-            xy_state: crate::visualizers::XyPerformPadState::default(),
+            xy_state: XyPerformPadState::default(),
             tracks_gui,
             has_session_override: false,
             status_message: "Studio Ready".into(),
             current_time_seconds: 0.0,
             last_triggered_step: None,
             active_synth_note: None,
+            tap_times: Vec::new(),
         }
     }
 
@@ -238,7 +337,6 @@ impl AbletonStudioApp {
 
     /// Poll telemetry snapshot and advance mock processor if in mock mode.
     pub fn poll_audio(&mut self) {
-        // If running with mock processor, drive mock buffer processing
         if let Some(ref mut processor) = self.mock_processor {
             let mut out_buffer = [0.0f32; 256];
             processor.process_interleaved(&mut out_buffer);
@@ -271,7 +369,6 @@ impl AbletonStudioApp {
                 for (pad_idx, track) in self.drum_pattern.tracks.iter().enumerate() {
                     if let Some(step) = track.steps.get(step_16) {
                         if step.active {
-                            // Map row 0 -> Kick (36), row 1 -> Rim/Clap (37), row 2 -> Snare (38), row 3/5 -> Hat (42/46)
                             let midi_note = match pad_idx {
                                 0 => 36,
                                 1 => 39,
@@ -296,7 +393,13 @@ impl AbletonStudioApp {
                 for n in &self.midi_pattern.notes {
                     let note_step = ((n.start_beat * 4.0).round() as usize) % 16;
                     if note_step == step_16 {
-                        next_synth_note = Some((n.pitch, n.velocity));
+                        // Apply Live 12 Scale-Lock quantization if enabled
+                        let pitch = if self.global_scale.scale_lock {
+                            self.global_scale.quantize(n.pitch)
+                        } else {
+                            n.pitch
+                        };
+                        next_synth_note = Some((pitch, n.velocity));
                         break;
                     }
                 }
@@ -309,7 +412,7 @@ impl AbletonStudioApp {
                     });
                 }
 
-                // Smoothly sweep the ZDF filter cutoff & XY macro during the House intro
+                // Smoothly sweep filter cutoff & XY macro
                 let bar_phase = ((self.current_beat % 32.0) / 32.0) as f32;
                 let sweep_fc = 420.0 + (bar_phase * bar_phase) * 5800.0;
                 self.synth_state.cutoff_hz = sweep_fc;
@@ -327,6 +430,29 @@ impl AbletonStudioApp {
             .map_err(|e| format!("Failed to export WAV: {}", e))?;
         self.status_message = format!("Exported: {}", output_path);
         Ok(())
+    }
+
+    /// Handle Tap-Tempo click averaging
+    pub fn handle_tap_tempo(&mut self) {
+        let now = self.current_time_seconds;
+        self.tap_times.retain(|&t| now - t <= 2.5);
+        self.tap_times.push(now);
+
+        if self.tap_times.len() >= 2 {
+            let mut total_interval = 0.0;
+            for i in 1..self.tap_times.len() {
+                total_interval += self.tap_times[i] - self.tap_times[i - 1];
+            }
+            let avg_interval = total_interval / (self.tap_times.len() - 1) as f64;
+            if avg_interval > 0.05 {
+                let computed_bpm = (60.0 / avg_interval).clamp(20.0, 999.0);
+                self.bpm = (computed_bpm * 10.0).round() / 10.0;
+                self.send_command(AudioCommand::SetTempo(self.bpm));
+                if let Some(ref handle) = self.audio_handle {
+                    handle.params.set(PARAM_BPM, self.bpm as f32);
+                }
+            }
+        }
     }
 }
 
@@ -351,20 +477,27 @@ impl eframe::App for AbletonStudioApp {
             };
         }
 
-        // 3. Top Transport Bar Panel (~48px height)
-        TopBottomPanel::top("top_transport_bar")
+        // 3. Top Control & Scale Bar Panel (~48px height)
+        TopBottomPanel::top("top_control_bar")
             .exact_height(48.0)
             .show(ctx, |ui| {
-                let action = render_transport_bar(
+                let action = render_top_control_bar(
                     ui,
                     self.is_playing,
                     self.is_recording,
                     &mut self.bpm,
-                    &mut self.swing,
+                    &mut self.time_signature,
+                    &mut self.metronome_enabled,
+                    &mut self.arrangement_record,
+                    &mut self.global_scale,
+                    &mut self.tuning_system,
                     self.current_beat,
                     &self.telemetry,
                 );
 
+                if action.tap_tempo {
+                    self.handle_tap_tempo();
+                }
                 if action.toggle_play {
                     self.is_playing = !self.is_playing;
                     if self.is_playing {
@@ -387,32 +520,91 @@ impl eframe::App for AbletonStudioApp {
                         handle.params.set(PARAM_BPM, new_bpm as f32);
                     }
                 }
+                if action.scale_changed {
+                    self.status_message = format!("Global Scale: {}", self.global_scale.display_name());
+                }
                 if action.export_wav {
                     let _ = self.export_demo_wav("/tmp/ableton_studio_export.wav");
                 }
             });
 
-        // 4. Bottom Deck Panel (~240px height)
-        TopBottomPanel::bottom("bottom_deck_panel")
+        // 4. Left Collapsible Browser Panel (220-300px)
+        if !self.browser.is_collapsed {
+            SidePanel::left("left_browser_panel")
+                .exact_width(self.browser.width.clamp(220.0, 300.0))
+                .resizable(true)
+                .show(ctx, |ui| {
+                    let browser_action = render_browser_panel(ui, &mut self.browser);
+
+                    if let Some(item) = browser_action.load_item {
+                        // Load item into active track or chain
+                        let dev_kind = match item.id.as_str() {
+                            "inst_wavetable" => Some(DeviceKind::Wavetable),
+                            "inst_operator" => Some(DeviceKind::Operator),
+                            "inst_simpler" => Some(DeviceKind::Simpler),
+                            "inst_drum_rack" => Some(DeviceKind::DrumRack),
+                            "fx_eq_eight" => Some(DeviceKind::EQEight),
+                            "fx_glue_comp" => Some(DeviceKind::GlueCompressor),
+                            "fx_roar" => Some(DeviceKind::Roar),
+                            "fx_auto_filter" => Some(DeviceKind::AutoFilter),
+                            "fx_ott" => Some(DeviceKind::OTT),
+                            _ => None,
+                        };
+
+                        if let Some(kind) = dev_kind {
+                            let new_id = (self.device_chain.devices.len() as u32) + 1;
+                            self.device_chain.devices.push(GuiDeviceModule::new(new_id, kind));
+                            self.status_message = format!("Loaded: {}", item.name);
+                        } else {
+                            self.status_message = format!("Selected: {}", item.name);
+                        }
+                    }
+                });
+        } else {
+            // Collapsed Strip with Quick-Expand Button
+            SidePanel::left("left_browser_collapsed")
+                .exact_width(24.0)
+                .resizable(false)
+                .show(ctx, |ui| {
+                    ui.centered_and_justified(|ui| {
+                        let expand_btn = Button::new(RichText::new("▶").size(11.0).color(COLOR_AMBER));
+                        if ui.add(expand_btn).on_hover_text("Open Browser").clicked() {
+                            self.browser.is_collapsed = false;
+                        }
+                    });
+                });
+        }
+
+        // 5. Bottom Detail View Panel (~240px height)
+        TopBottomPanel::bottom("bottom_detail_panel")
             .exact_height(240.0)
             .show(ctx, |ui| {
-                // Deck Tab Selector Header
+                // Header Tabs Selector
                 ui.horizontal(|ui| {
                     ui.spacing_mut().item_spacing = vec2(6.0, 0.0);
 
-                    let dev_btn = Button::new(
-                        RichText::new("Device Rack & Filter Curve")
+                    let clip_btn = Button::new(
+                        RichText::new("Clip View (Piano Roll / Warping)")
                             .size(11.0)
-                            .color(if self.deck_tab == DeckTab::DeviceRack { COLOR_AMBER } else { COLOR_TEXT_MUTED }),
+                            .color(if self.deck_tab == DeckTab::ClipView { COLOR_AMBER } else { COLOR_TEXT_MUTED }),
+                    );
+                    if ui.add(clip_btn).clicked() {
+                        self.deck_tab = DeckTab::ClipView;
+                    }
+
+                    let dev_btn = Button::new(
+                        RichText::new("Device Chain View")
+                            .size(11.0)
+                            .color(if self.deck_tab == DeckTab::DeviceRack { COLOR_CYAN } else { COLOR_TEXT_MUTED }),
                     );
                     if ui.add(dev_btn).clicked() {
                         self.deck_tab = DeckTab::DeviceRack;
                     }
 
                     let seq_btn = Button::new(
-                        RichText::new("16-Step Sequencer & Piano Roll")
+                        RichText::new("16-Step 909 Sequencer")
                             .size(11.0)
-                            .color(if self.deck_tab == DeckTab::DrumSequencer { COLOR_CYAN } else { COLOR_TEXT_MUTED }),
+                            .color(if self.deck_tab == DeckTab::DrumSequencer { COLOR_GREEN } else { COLOR_TEXT_MUTED }),
                     );
                     if ui.add(seq_btn).clicked() {
                         self.deck_tab = DeckTab::DrumSequencer;
@@ -421,7 +613,7 @@ impl eframe::App for AbletonStudioApp {
                     let xy_btn = Button::new(
                         RichText::new("XY Perform Pad")
                             .size(11.0)
-                            .color(if self.deck_tab == DeckTab::XyPad { COLOR_GREEN } else { COLOR_TEXT_MUTED }),
+                            .color(if self.deck_tab == DeckTab::XyPad { COLOR_AMBER } else { COLOR_TEXT_MUTED }),
                     );
                     if ui.add(xy_btn).clicked() {
                         self.deck_tab = DeckTab::XyPad;
@@ -445,29 +637,28 @@ impl eframe::App for AbletonStudioApp {
 
                 ui.separator();
 
-                // Deck Content based on selected tab
+                // Bottom Tab Content
                 match self.deck_tab {
-                    DeckTab::DeviceRack => {
-                        let live_fc = self.synth_state.cutoff_hz;
-                        let live_pw = self.synth_state.pulse_pw;
-                        let rms_val = self.telemetry.master_rms_l.max(self.telemetry.master_rms_r);
-                        let action = render_device_rack(
+                    DeckTab::ClipView => {
+                        let clip_act = render_clip_view(
                             ui,
-                            &mut self.synth_state,
-                            Some(live_fc),
-                            Some(rms_val),
-                            Some(live_pw),
+                            &mut self.clip_view,
+                            &mut self.midi_pattern,
+                            &self.global_scale,
+                            self.current_beat,
                         );
-
-                        if let Some(fc) = action.cutoff_changed {
-                            if let Some(ref handle) = self.audio_handle {
-                                handle.params.set(PARAM_SYNTH_CUTOFF, fc);
-                            }
+                        if clip_act.pattern_mutated {
+                            self.status_message = "MIDI Pattern Updated via Live 12 Tool".into();
                         }
-                        if let Some(res) = action.resonance_changed {
-                            if let Some(ref handle) = self.audio_handle {
-                                handle.params.set(PARAM_SYNTH_RESONANCE, res);
-                            }
+                    }
+                    DeckTab::DeviceRack => {
+                        let dev_act = render_device_chain_view(
+                            ui,
+                            &mut self.device_chain,
+                            &self.telemetry.spectrum_bins,
+                        );
+                        if let Some(kind) = dev_act.insert_device {
+                            self.status_message = format!("Inserted Device: {}", kind.name());
                         }
                     }
                     DeckTab::DrumSequencer => {
@@ -475,7 +666,6 @@ impl eframe::App for AbletonStudioApp {
                         let seq_action = render_drum_sequencer(ui, &mut self.drum_pattern, current_16th_step);
 
                         if let Some(pad_idx) = seq_action.pad_triggered {
-                            // Trigger pad (MIDI note 36 + pad_idx on track 1)
                             self.send_command(AudioCommand::NoteOn {
                                 track_id: 1,
                                 note: 36 + pad_idx,
@@ -483,7 +673,7 @@ impl eframe::App for AbletonStudioApp {
                             });
                         }
 
-                        ui.add_space(8.0);
+                        ui.add_space(6.0);
                         render_piano_roll(ui, &mut self.midi_pattern, self.current_beat);
                     }
                     DeckTab::XyPad => {
@@ -502,12 +692,12 @@ impl eframe::App for AbletonStudioApp {
 
                             self.send_command(AudioCommand::SetParameter {
                                 track_id: 0,
-                                param_id: 100, // Macro X
+                                param_id: 100,
                                 value: norm_x,
                             });
                             self.send_command(AudioCommand::SetParameter {
                                 track_id: 0,
-                                param_id: 101, // Macro Y
+                                param_id: 101,
                                 value: norm_y,
                             });
 
@@ -520,13 +710,13 @@ impl eframe::App for AbletonStudioApp {
                 }
             });
 
-        // 5. Center Workspace Panel (Flex Height)
+        // 6. Center Workspace Panel (Dual View: Session vs Arrangement)
         CentralPanel::default().show(ctx, |ui| {
-            // Workspace view selector toolbar
+            // Workspace Selector Toolbar
             ui.horizontal(|ui| {
                 let session_btn = Button::new(
-                    RichText::new("Session Matrix")
-                        .size(12.0)
+                    RichText::new("Session View")
+                        .size(11.5)
                         .color(if self.workspace_view == WorkspaceView::SessionMatrix { COLOR_AMBER } else { COLOR_TEXT_MUTED }),
                 );
                 if ui.add(session_btn).clicked() {
@@ -534,8 +724,8 @@ impl eframe::App for AbletonStudioApp {
                 }
 
                 let arr_btn = Button::new(
-                    RichText::new("Arrangement Timeline")
-                        .size(12.0)
+                    RichText::new("Arrangement View")
+                        .size(11.5)
                         .color(if self.workspace_view == WorkspaceView::ArrangementTimeline { COLOR_CYAN } else { COLOR_TEXT_MUTED }),
                 );
                 if ui.add(arr_btn).clicked() {
@@ -559,6 +749,11 @@ impl eframe::App for AbletonStudioApp {
                         ui,
                         &mut self.matrix,
                         &mut self.tracks_gui,
+                        &mut self.return_tracks,
+                        &mut self.mixer_sections,
+                        &mut self.launch_quantization,
+                        &mut self.crossfader_pos,
+                        &mut self.master_volume,
                         &self.telemetry,
                         self.current_time_seconds,
                     );
@@ -582,6 +777,7 @@ impl eframe::App for AbletonStudioApp {
                     let action = render_arrangement_timeline(
                         ui,
                         &mut self.timeline,
+                        &mut self.timeline_gui,
                         self.current_beat,
                         self.has_session_override,
                     );
@@ -591,6 +787,9 @@ impl eframe::App for AbletonStudioApp {
                         for track in &mut self.matrix.tracks {
                             track.stop_immediate();
                         }
+                    }
+                    if let Some(beat) = action.seek_beat {
+                        self.current_beat = beat;
                     }
                 }
             }

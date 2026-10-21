@@ -1,9 +1,27 @@
+pub mod auto_filter_vis;
+pub mod drum_rack_vis;
+pub mod eq8_vis;
+pub mod glue_vis;
+pub mod operator_vis;
 pub mod oscilloscope;
+pub mod ott_vis;
+pub mod roar_vis;
+pub mod simpler_vis;
 pub mod spectrum;
+pub mod wavetable_vis;
 pub mod xy_pad;
 pub mod zdf_curve;
 
+pub use auto_filter_vis::{render_auto_filter_canvas, AutoFilterCircuit, AutoFilterVisualizerState, AutoFilterVisualizerWidget};
+pub use drum_rack_vis::{render_drum_rack_canvas, DrumPadState, DrumRackVisualizerState, DrumRackVisualizerWidget};
+pub use eq8_vis::{render_eq8_canvas, EqBand, EqEightVisualizerState, EqEightVisualizerWidget, EqFilterType};
+pub use glue_vis::{render_glue_canvas, GlueCompressorVisualizerState, GlueCompressorVisualizerWidget};
+pub use operator_vis::{render_operator_canvas, OperatorId, OperatorVisualizerState, OperatorVisualizerWidget, OperatorVoiceParams};
 pub use oscilloscope::{render_oscilloscope, OscilloscopeWidget};
+pub use ott_vis::{render_ott_canvas, BandDynamicsState, OttVisualizerState, OttVisualizerWidget};
+pub use roar_vis::{render_roar_canvas, RoarStageMode, RoarVisualizerState, RoarVisualizerWidget};
+pub use simpler_vis::{render_simpler_canvas, SimplerPlayMode, SimplerVisualizerState, SimplerVisualizerWidget};
 pub use spectrum::{render_spectrum, SpectrumWidget};
+pub use wavetable_vis::{render_wavetable_canvas, WavetableVisualizerState, WavetableVisualizerWidget};
 pub use xy_pad::{render_xy_pad, PhosphorPoint, XyPerformPadState, XyPerformPadWidget};
 pub use zdf_curve::{render_zdf_curve, ZdfCurveWidget};
