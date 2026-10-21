@@ -1,3 +1,4 @@
+pub mod ai_chat;
 pub mod browser;
 pub mod clip_view;
 pub mod device_rack;
@@ -7,6 +8,9 @@ pub mod timeline;
 pub mod transport;
 pub mod transport_legacy;
 
+pub use ai_chat::{
+    render_ai_copilot_panel, AiChatMessage, AiCopilotState, MessageRole,
+};
 pub use browser::{
     render_browser_panel, BrowserAction, BrowserCategory, BrowserItem, BrowserState, ALL_TAGS,
 };

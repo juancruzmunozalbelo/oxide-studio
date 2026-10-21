@@ -1009,6 +1009,13 @@
       text: "Extrayendo 4 stems de remix: drums.wav (transientes), bass.wav (<140Hz mono), vocals.wav (formante medio) y synths_other.wav (estéreo residual). Listos en el matrix.",
       tools: ['stems_separate_remix', 'bounce_export_stems'],
       action: () => {}
+    },
+    {
+      keywords: ['als', 'ableton', 'importar', 'exportar', 'live set'],
+      spanish: true,
+      text: "Sincronizando con Ableton Live 12: parseando XML comprimido en gzip (.als) con mapeo 1:1 de pistas, tempo, clips MIDI y cadenas de dispositivos.",
+      tools: ['project_import_als', 'project_export_als'],
+      action: () => {}
     }
   ];
 
@@ -1038,25 +1045,38 @@
     }, 280);
   }
 
-  function appendChatBubble(sender, text, tools = []) {
+  function appendChatBubble(role, text, tools = []) {
     const container = document.getElementById('copilot-chat-history');
     if (!container) return;
 
     const bubble = document.createElement('div');
-    bubble.className = `chat-bubble ${sender}`;
+    bubble.className = `chat-bubble ${role}`;
 
-    if (sender === 'user') {
+    if (role === 'user') {
       bubble.textContent = text;
     } else {
-      let html = `<p>${text}</p>`;
-      if (tools.length > 0) {
-        html += '<div style="margin-top: 6px;">';
+      const p = document.createElement('p');
+      p.textContent = text;
+      bubble.appendChild(p);
+      if (tools && tools.length > 0) {
+        const toolsWrap = document.createElement('div');
+        toolsWrap.className = 'copilot-tools';
         tools.forEach(t => {
-          html += `<span class="mcp-executed-badge">⚡ ${t}()</span>`;
+          const badge = document.createElement('span');
+          badge.className = 'tool-badge mcp-executed-badge';
+          badge.title = 'Click to copy MCP tool name';
+          badge.dataset.tool = t;
+          badge.textContent = `⚡ ${t}`;
+          badge.addEventListener('click', () => {
+            navigator.clipboard?.writeText(t);
+            const orig = badge.textContent;
+            badge.textContent = `✓ Copied: ${t}`;
+            setTimeout(() => { badge.textContent = orig; }, 1200);
+          });
+          toolsWrap.appendChild(badge);
         });
-        html += '</div>';
+        bubble.appendChild(toolsWrap);
       }
-      bubble.innerHTML = html;
     }
 
     container.appendChild(bubble);
@@ -1072,10 +1092,11 @@
     { name: 'project_new', cat: 'project', desc: 'Create a new DAW project with default lead synth and 909 drum rack tracks.', schema: '{"name":"string"}' },
     { name: 'project_load', cat: 'project', desc: 'Load complete DAW project from a JSON project file on disk.', schema: '{"path":"string"}' },
     { name: 'project_save', cat: 'project', desc: 'Persist current DAW state to an atomic JSON project file on disk.', schema: '{"path":"string"}' },
+    { name: 'project_import_als', cat: 'project', desc: 'Import native Ableton Live 12 XML Gzip project (.als) into Oxide Studio.', schema: '{"path":"project.als"}' },
+    { name: 'project_export_als', cat: 'project', desc: 'Export Oxide Studio session to native Ableton Live 12 XML Gzip project (.als).', schema: '{"path":"exported.als"}' },
     { name: 'transport_play', cat: 'project', desc: 'Start real-time audio playback in the audio engine.', schema: '{}' },
     { name: 'transport_stop', cat: 'project', desc: 'Stop audio playback and reset playhead position.', schema: '{}' },
     { name: 'transport_set_bpm', cat: 'project', desc: 'Set global DAW tempo in BPM (20.0 to 999.0).', schema: '{"bpm": 136.0}' },
-    { name: 'transport_set_swing', cat: 'project', desc: 'Set 16th-note swing percentage (0.0 to 1.0).', schema: '{"swing": 0.58}' },
     { name: 'transport_get_telemetry', cat: 'project', desc: 'Query real-time DSP telemetry: RMS, peak dBFS, CPU load.', schema: '{}' },
 
     // 2. Track & Synths
@@ -1124,7 +1145,6 @@
     // 6. Devices & Plugins
     { name: 'device_add_to_track', cat: 'devices', desc: 'Insert any Live 12 instrument or effect into track device chain.', schema: '{"track_id": 0, "device": "Roar"}' },
     { name: 'device_remove_from_track', cat: 'devices', desc: 'Delete device from track chain by index.', schema: '{"track_id": 0, "device_index": 1}' },
-    { name: 'device_reorder', cat: 'devices', desc: 'Reorder devices inside track chain.', schema: '{"track_id": 0, "from_idx": 1, "to_idx": 2}' },
     { name: 'device_set_param', cat: 'devices', desc: 'Set parameter on any device in chain.', schema: '{"track_id": 0, "device_index": 0, "param": "Cutoff", "value": 1200}' },
     { name: 'device_get_chain', cat: 'devices', desc: 'Dump all devices and parameters in track chain.', schema: '{"track_id": 0}' },
     { name: 'plugin_scan', cat: 'devices', desc: 'Out-of-process crash-isolated AUv2 / VST3 / CLAP plugin scan.', schema: '{}' },
@@ -1138,9 +1158,9 @@
     { name: 'groove_pool_list', cat: 'warping', desc: 'List loaded Groove Pool templates (MPC 16th, TR-909 Shuffle, SP-1200).', schema: '{}' },
     { name: 'groove_pool_apply_to_clip', cat: 'warping', desc: 'Apply groove template non-destructively to clip notes.', schema: '{"groove_name": "MPC 16th", "amount": 0.65}' },
     { name: 'take_lane_create', cat: 'warping', desc: 'Add a new comping take lane to arrangement track.', schema: '{"track_id": 0, "name": "Take 2"}' },
-    { name: 'take_lane_comp_region', cat: 'warping', desc: 'Comp region from take lane into main lane with micro-crossfades.', schema: '{"take_lane_index": 0, "start_beat": 0.0, "end_beat": 4.0}' },
+    { name: 'stems_separate_remix', cat: 'warping', desc: '1-Click 4-stem DSP separation into drums, bass, vocals, and synths/other.', schema: '{"audio_path": "master.wav"}' },
     { name: 'bounce_wav', cat: 'warping', desc: 'Export project offline to 16/24/32-bit stereo WAV file.', schema: '{"output_path": "master.wav"}' },
-    { name: 'render_bounce_wav', cat: 'warping', desc: 'Render audio buffer returning RMS, peak, and spectral centroid.', schema: '{}' },
+    { name: 'bounce_export_stems', cat: 'warping', desc: 'Multi-stem track bounce export rendering all tracks as separate stems.', schema: '{"output_dir": "stems/"}' },
     { name: 'analyze_rendered_audio', cat: 'warping', desc: 'Perceptual 4-band spectral analysis ("Agent Ears").', schema: '{"path": "master.wav"}' },
 
     // 8. Live 12 GUI TCP RPC Server Bridge (127.0.0.1:9877)

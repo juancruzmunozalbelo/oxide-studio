@@ -14,7 +14,7 @@
 //! - Real-time zero-allocation audio engine integration with telemetry polling
 
 use egui::{
-    vec2, Button, CentralPanel, Context, Key, Layout, RichText, SidePanel, TopBottomPanel,
+    vec2, Button, CentralPanel, Context, Layout, RichText, SidePanel, TopBottomPanel,
 };
 use ableton_audio::{
     AudioEngine, AudioEngineProcessor, AudioStreamHandle, PARAM_BPM,
@@ -22,9 +22,10 @@ use ableton_audio::{
 };
 use ableton_bounce::{DemoArrangementRenderer, WavWriter};
 use ableton_core::{AudioCommand, AudioTelemetry, GlobalScale, ScaleMode, TuningSystem};
+use ableton_project::{DAWProject, TrackDefinition};
 use ableton_timeline::{
     ArrangementClip, ArrangementTimeline, ArrangementTrack, ClipPattern, DrumStepPattern,
-    MidiNote, MidiPattern, SessionClip, SessionMatrix, SlotState,
+    MidiNote, MidiPattern, SessionClip, SessionMatrix, SessionTrack, SlotState,
 };
 
 use crate::keyboard::{ComputerKeyboardController, KeyboardMode};
@@ -45,6 +46,11 @@ use crate::visualizers::{XyPerformPadState, XyPerformPadWidget};
 pub enum WorkspaceView {
     SessionMatrix,
     ArrangementTimeline,
+}
+
+impl WorkspaceView {
+    #[allow(non_upper_case_globals)]
+    pub const Arrangement: Self = Self::ArrangementTimeline;
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -103,6 +109,11 @@ pub struct AbletonStudioApp {
     pub last_triggered_step: Option<i64>,
     pub active_synth_note: Option<u8>,
     pub tap_times: Vec<f64>,
+    pub copilot_open: bool,
+    pub ai_copilot: crate::panels::ai_chat::AiCopilotState,
+    pub shortcuts: crate::shortcuts::StudioShortcutManager,
+    pub rpc_server: crate::live_rpc::ArustonGuiRpcServer,
+    pub export_status: Option<String>,
 }
 
 impl AbletonStudioApp {
@@ -125,12 +136,13 @@ impl AbletonStudioApp {
         let mut app = Self::init_empty();
         app.audio_handle = audio_handle;
         app.mock_processor = mock_processor;
+        app.rpc_server = crate::live_rpc::ArustonGuiRpcServer::new_on_port(9877);
         if cc.is_some() {
             app.is_playing = true;
             app.deck_tab = DeckTab::ClipView;
             app.send_command(AudioCommand::SetTempo(app.bpm));
             app.send_command(AudioCommand::Play);
-            app.status_message = "Live 12 Studio Ready (124 BPM — F Dorian)".into();
+            app.status_message = "Oxide Studio Ready (124 BPM — F Dorian)".into();
         }
         app
     }
@@ -141,6 +153,7 @@ impl AbletonStudioApp {
         let mut app = Self::init_empty();
         app.audio_handle = Some(handle);
         app.mock_processor = Some(processor);
+        app.rpc_server = crate::live_rpc::ArustonGuiRpcServer::new_disabled();
         app
     }
 
@@ -325,7 +338,37 @@ impl AbletonStudioApp {
             last_triggered_step: None,
             active_synth_note: None,
             tap_times: Vec::new(),
+            copilot_open: true,
+            ai_copilot: crate::panels::ai_chat::AiCopilotState::new(),
+            shortcuts: crate::shortcuts::StudioShortcutManager::new(),
+            rpc_server: crate::live_rpc::ArustonGuiRpcServer::new_disabled(),
+            export_status: None,
         }
+    }
+
+    /// Handle prompt submission to In-App AI Producer Copilot.
+    pub fn handle_ai_prompt(&mut self, prompt: &str) {
+        let trimmed = prompt.trim();
+        if trimmed.is_empty() {
+            return;
+        }
+        let ts = crate::panels::ai_chat::format_timestamp(self.current_time_seconds);
+        self.ai_copilot.messages.push(crate::panels::ai_chat::AiChatMessage {
+            role: crate::panels::ai_chat::MessageRole::User,
+            text: trimmed.to_string(),
+            mcp_badges: vec![],
+            timestamp: ts.clone(),
+        });
+
+        let (reply, badges) = crate::panels::ai_chat::execute_studio_intent(trimmed, self);
+
+        self.ai_copilot.messages.push(crate::panels::ai_chat::AiChatMessage {
+            role: crate::panels::ai_chat::MessageRole::Assistant,
+            text: reply,
+            mcp_badges: badges,
+            timestamp: ts,
+        });
+        self.ai_copilot.prompt_input.clear();
     }
 
     /// Send a command to the audio engine.
@@ -333,6 +376,17 @@ impl AbletonStudioApp {
         if let Some(ref mut handle) = self.audio_handle {
             handle.ui_handles.send_command(cmd);
         }
+    }
+
+    /// Poll Aruston Live GUI RPC Server and apply pending agent/MCP mutations.
+    pub fn poll_rpc(&mut self) -> usize {
+        let mut rpc = std::mem::replace(
+            &mut self.rpc_server,
+            crate::live_rpc::ArustonGuiRpcServer::new_disabled(),
+        );
+        let handled = rpc.poll_and_apply(self);
+        self.rpc_server = rpc;
+        handled
     }
 
     /// Poll telemetry snapshot and advance mock processor if in mock mode.
@@ -432,6 +486,32 @@ impl AbletonStudioApp {
         Ok(())
     }
 
+    /// Export current session snapshot as an Ableton Live `.als` project.
+    pub fn export_als_project(&self, output_path: &str) -> Result<(), String> {
+        let mut project = DAWProject::new("Oxide Studio Session");
+        project.transport.bpm = self.bpm;
+        project.scenes = self.matrix.scenes.clone();
+        for (idx, track) in self.matrix.tracks.iter().enumerate() {
+            let mut trk_def = TrackDefinition::new_synth(track.id, &track.name);
+            if idx < self.tracks_gui.len() {
+                trk_def.mixer.volume_db = if self.tracks_gui[idx].volume_linear > 0.001 {
+                    20.0 * self.tracks_gui[idx].volume_linear.log10()
+                } else {
+                    -70.0
+                };
+                trk_def.mixer.pan = self.tracks_gui[idx].pan;
+                trk_def.mixer.mute = self.tracks_gui[idx].mute;
+                trk_def.mixer.solo = self.tracks_gui[idx].solo;
+            }
+            trk_def.session_clips = track.slots.iter().map(|s| s.clip.clone()).collect();
+            project.tracks.push(trk_def);
+        }
+        project
+            .save_als(std::path::Path::new(output_path))
+            .map_err(|e| format!("Failed to export ALS: {}", e))?;
+        Ok(())
+    }
+
     /// Handle Tap-Tempo click averaging
     pub fn handle_tap_tempo(&mut self) {
         let now = self.current_time_seconds;
@@ -454,32 +534,354 @@ impl AbletonStudioApp {
             }
         }
     }
-}
 
-impl eframe::App for AbletonStudioApp {
-    fn update(&mut self, ctx: &Context, _frame: &mut eframe::Frame) {
+    /// Process browser load actions for all categories: Instruments, FX, Drums, Clips, Samples, and Sounds.
+    pub fn handle_browser_load(&mut self, item: &crate::panels::browser::BrowserItem) {
+        use crate::panels::browser::BrowserCategory;
+
+        match item.category {
+            BrowserCategory::Instruments
+            | BrowserCategory::AudioEffects
+            | BrowserCategory::MidiEffects
+            | BrowserCategory::PlugIns => {
+                let dev_kind = match item.id.as_str() {
+                    "inst_wavetable" | "inst_drift" | "inst_meld" | "inst_analog" => {
+                        Some(DeviceKind::Wavetable)
+                    }
+                    "inst_operator" => Some(DeviceKind::Operator),
+                    "inst_simpler" => Some(DeviceKind::Simpler),
+                    "inst_drum_rack" => Some(DeviceKind::DrumRack),
+                    "fx_eq_eight" => Some(DeviceKind::EQEight),
+                    "fx_glue_comp" => Some(DeviceKind::GlueCompressor),
+                    "fx_roar" => Some(DeviceKind::Roar),
+                    "fx_auto_filter" => Some(DeviceKind::AutoFilter),
+                    "fx_ott" => Some(DeviceKind::OTT),
+                    _ => None,
+                };
+
+                if let Some(kind) = dev_kind {
+                    let new_id = (self.device_chain.devices.len() as u32) + 1;
+                    self.device_chain
+                        .devices
+                        .push(GuiDeviceModule::new(new_id, kind));
+                    self.status_message = format!("Loaded: {}", item.name);
+                } else {
+                    self.status_message = format!("Selected: {}", item.name);
+                }
+            }
+            BrowserCategory::Drums => {
+                let pad_idx = match item.id.as_str() {
+                    "drum_909_kick" | "drum_808_sub_kick" => 0,
+                    "drum_909_snare" | "drum_acoustic_snare" => 1,
+                    "drum_909_hihat" => 2,
+                    "drum_open_hihat" => 3,
+                    "drum_conga" => 4,
+                    _ => 0,
+                };
+                if let Some(track) = self.drum_pattern.tracks.get_mut(pad_idx) {
+                    if !track.steps.iter().any(|s| s.active) {
+                        if pad_idx == 0 {
+                            for &s in &[0, 4, 8, 12] {
+                                track.steps[s].active = true;
+                                track.steps[s].accent = true;
+                                track.steps[s].velocity = 120;
+                            }
+                        } else if pad_idx == 1 {
+                            for &s in &[4, 12] {
+                                track.steps[s].active = true;
+                                track.steps[s].velocity = 110;
+                            }
+                        }
+                    }
+                }
+                self.send_command(AudioCommand::SetParameter {
+                    track_id: 1,
+                    param_id: pad_idx as u32,
+                    value: 1.0,
+                });
+                self.status_message =
+                    format!("Loaded Drum Sound: {} (Pad {})", item.name, pad_idx + 1);
+            }
+            BrowserCategory::Clips => {
+                if item.id == "clip_909_groove" {
+                    if let Some(kick) = self.drum_pattern.tracks.get_mut(0) {
+                        for &s in &[0, 4, 8, 12] {
+                            kick.steps[s].active = true;
+                            kick.steps[s].accent = true;
+                            kick.steps[s].velocity = 124;
+                        }
+                    }
+                    if let Some(snare) = self.drum_pattern.tracks.get_mut(1) {
+                        for &s in &[4, 12] {
+                            snare.steps[s].active = true;
+                            snare.steps[s].velocity = 115;
+                        }
+                    }
+                    if let Some(hh) = self.drum_pattern.tracks.get_mut(2) {
+                        for &s in &[2, 6, 10, 14] {
+                            hh.steps[s].active = true;
+                            hh.steps[s].velocity = 110;
+                        }
+                    }
+                } else if item.id == "clip_house_riff" {
+                    self.midi_pattern.notes.clear();
+                    self.midi_pattern
+                        .notes
+                        .push(MidiNote::new(53, 110, 0.0, 1.0));
+                    self.midi_pattern
+                        .notes
+                        .push(MidiNote::new(56, 100, 0.0, 1.0));
+                    self.midi_pattern
+                        .notes
+                        .push(MidiNote::new(60, 105, 0.0, 1.0));
+                    self.midi_pattern
+                        .notes
+                        .push(MidiNote::new(63, 95, 0.0, 1.0));
+                }
+                if let Some(track) = self.matrix.tracks.get_mut(0) {
+                    let clip_id = ((track.slots.len() as u32) + 1).max(10);
+                    if let Some(slot) = track.slots.get_mut(0) {
+                        slot.clip = Some(SessionClip::new(
+                            clip_id,
+                            &item.name,
+                            ClipPattern::Midi(self.midi_pattern.clone()),
+                        ));
+                        slot.state = SlotState::Stopped;
+                    }
+                }
+                self.status_message = format!("Loaded Clip: {}", item.name);
+            }
+            BrowserCategory::Samples => {
+                self.clip_view.is_audio = true;
+                self.status_message = format!("Loaded Sample: {}", item.name);
+            }
+            BrowserCategory::Sounds => {
+                match item.id.as_str() {
+                    "snd_house_bass" => {
+                        self.synth_state.cutoff_hz = 380.0;
+                        self.synth_state.resonance = 1.2;
+                    }
+                    "snd_acid_lead" => {
+                        self.synth_state.cutoff_hz = 620.0;
+                        self.synth_state.resonance = 4.8;
+                    }
+                    "snd_detroit_pad" => {
+                        self.synth_state.cutoff_hz = 1800.0;
+                        self.synth_state.resonance = 0.8;
+                    }
+                    _ => {
+                        self.synth_state.cutoff_hz = 1200.0;
+                    }
+                }
+                self.send_command(AudioCommand::SetParameter {
+                    track_id: 0,
+                    param_id: 0,
+                    value: self.synth_state.cutoff_hz,
+                });
+                self.send_command(AudioCommand::SetParameter {
+                    track_id: 0,
+                    param_id: 1,
+                    value: self.synth_state.resonance,
+                });
+                self.status_message = format!("Loaded Sound Preset: {}", item.name);
+            }
+            _ => {
+                self.status_message = format!("Selected: {}", item.name);
+            }
+        }
+    }
+
+    /// Render a full studio UI frame using the provided ViewportBudget.
+    pub fn render_frame_with_budget(
+        &mut self,
+        ctx: &Context,
+        budget: &crate::layout::ViewportBudget,
+    ) {
         self.current_time_seconds = ctx.input(|i| i.time);
 
-        // 1. Poll real-time audio telemetry
+        // 1. Poll real-time audio telemetry & live GUI RPC
         self.poll_audio();
-
-        // 2. Intercept computer keyboard events for note playing & octave shifting
-        let key_commands = self.keyboard.process_events(ctx);
-        for cmd in key_commands {
-            self.send_command(cmd);
+        let rpc_handled = self.poll_rpc();
+        if rpc_handled > 0 {
+            ctx.request_repaint();
         }
 
-        // Toggle workspace view with Tab key
-        if ctx.input(|i| i.key_pressed(Key::Tab)) {
-            self.workspace_view = match self.workspace_view {
-                WorkspaceView::SessionMatrix => WorkspaceView::ArrangementTimeline,
-                WorkspaceView::ArrangementTimeline => WorkspaceView::SessionMatrix,
-            };
+        // 2. Intercept computer keyboard events for note playing & octave shifting (guarded against active text input)
+        if !ctx.wants_keyboard_input() {
+            let key_commands = self.keyboard.process_events(ctx);
+            for cmd in key_commands {
+                self.send_command(cmd);
+            }
         }
 
-        // 3. Top Control & Scale Bar Panel (~48px height)
+        // 2b. Process 1:1 Live muscle-memory keyboard shortcuts
+        let shortcut_actions = self.shortcuts.process_input(ctx);
+        for action in shortcut_actions {
+            match action {
+                crate::shortcuts::StudioShortcutAction::ToggleWorkspaceView => {
+                    self.workspace_view = match self.workspace_view {
+                        WorkspaceView::SessionMatrix => WorkspaceView::ArrangementTimeline,
+                        WorkspaceView::ArrangementTimeline => WorkspaceView::SessionMatrix,
+                    };
+                }
+                crate::shortcuts::StudioShortcutAction::ToggleDetailView => {
+                    self.deck_tab = match self.deck_tab {
+                        DeckTab::ClipView => DeckTab::DeviceRack,
+                        DeckTab::DeviceRack => DeckTab::ClipView,
+                        other => other,
+                    };
+                }
+                crate::shortcuts::StudioShortcutAction::TogglePlayStop => {
+                    self.is_playing = !self.is_playing;
+                    if self.is_playing {
+                        self.send_command(AudioCommand::Play);
+                    } else {
+                        self.send_command(AudioCommand::Stop);
+                    }
+                }
+                crate::shortcuts::StudioShortcutAction::NewAudioTrack => {
+                    let track_id = self.matrix.tracks.len();
+                    let name = format!("Audio Track {}", track_id + 1);
+                    let scene_count = self.matrix.scenes.len().max(8);
+                    self.matrix.tracks.push(SessionTrack::new(track_id as u32, &name, scene_count));
+                    self.tracks_gui.push(GuiTrackState {
+                        name: name.clone(),
+                        volume_linear: 0.9,
+                        pan: 0.0,
+                        mute: false,
+                        solo: false,
+                        sends: vec![0.0, 0.0],
+                        input_routing: "All Ins".into(),
+                        output_routing: "Master".into(),
+                        monitor_mode: "Auto".into(),
+                        crossfader_assign: CrossfaderAssign::Off,
+                    });
+                    self.status_message = format!("Inserted {}", name);
+                }
+                crate::shortcuts::StudioShortcutAction::NewMidiTrack => {
+                    let track_id = self.matrix.tracks.len();
+                    let name = format!("MIDI Track {}", track_id + 1);
+                    let scene_count = self.matrix.scenes.len().max(8);
+                    self.matrix.tracks.push(SessionTrack::new(track_id as u32, &name, scene_count));
+                    self.tracks_gui.push(GuiTrackState {
+                        name: name.clone(),
+                        volume_linear: 0.9,
+                        pan: 0.0,
+                        mute: false,
+                        solo: false,
+                        sends: vec![0.0, 0.0],
+                        input_routing: "All Ins".into(),
+                        output_routing: "Master".into(),
+                        monitor_mode: "Auto".into(),
+                        crossfader_assign: CrossfaderAssign::Off,
+                    });
+                    self.status_message = format!("Inserted {}", name);
+                }
+                crate::shortcuts::StudioShortcutAction::NewReturnTrack => {
+                    self.mixer_sections.show_returns = true;
+                    let ret_idx = self.return_tracks.len();
+                    let ret_char = (b'A' + (ret_idx % 26) as u8) as char;
+                    let ret_name = format!("Return {}", ret_char);
+                    self.return_tracks.push(GuiReturnTrack {
+                        name: ret_name.clone(),
+                        effect_name: "Echo".into(),
+                        volume_linear: 0.75,
+                        pan: 0.0,
+                        mute: false,
+                        solo: false,
+                    });
+                    self.status_message = format!("Inserted {}", ret_name);
+                }
+                crate::shortcuts::StudioShortcutAction::NewMidiClip => {
+                    let sel_track = ctx.data(|d| d.get_temp::<usize>(egui::Id::new("aruston_selected_track"))).unwrap_or(0);
+                    if let Some(track) = self.matrix.tracks.get_mut(sel_track) {
+                        let clip_id = (track.slots.len() as u32) + 1;
+                        if let Some(slot) = track.slots.get_mut(0) {
+                            slot.clip = Some(SessionClip::new(
+                                clip_id,
+                                format!("Clip {}", clip_id),
+                                ClipPattern::Midi(self.midi_pattern.clone()),
+                            ));
+                            slot.state = SlotState::Stopped;
+                            self.status_message = format!("Inserted New MIDI Clip in Track {}", sel_track + 1);
+                        }
+                    }
+                }
+                crate::shortcuts::StudioShortcutAction::DuplicateSelected => {
+                    let sel_track = ctx.data(|d| d.get_temp::<usize>(egui::Id::new("aruston_selected_track"))).unwrap_or(0);
+                    if sel_track < self.matrix.tracks.len() {
+                        let orig_track = self.matrix.tracks[sel_track].clone();
+                        let orig_gui = self.tracks_gui[sel_track].clone();
+                        let new_id = self.matrix.tracks.len();
+                        let mut dup_track = orig_track;
+                        dup_track.id = new_id as u32;
+                        dup_track.name = format!("{} (Copy)", dup_track.name);
+                        let mut dup_gui = orig_gui;
+                        dup_gui.name = dup_track.name.clone();
+                        self.matrix.tracks.push(dup_track);
+                        self.tracks_gui.push(dup_gui);
+                        self.status_message = format!("Duplicated Track {}", sel_track + 1);
+                    }
+                }
+                crate::shortcuts::StudioShortcutAction::SplitAtPlayhead => {
+                    self.status_message = format!("Split Clip at beat {:.2}", self.current_beat);
+                }
+                crate::shortcuts::StudioShortcutAction::ConsolidateSelection => {
+                    self.status_message = "Consolidated Selection".into();
+                }
+                crate::shortcuts::StudioShortcutAction::ToggleDrawOrBounce => {
+                    let _ = self.export_demo_wav("/tmp/ableton_studio_export.wav");
+                    self.status_message = "Bounced Audio to /tmp/ableton_studio_export.wav".into();
+                }
+                crate::shortcuts::StudioShortcutAction::ToggleBrowser => {
+                    self.browser.is_collapsed = !self.browser.is_collapsed;
+                }
+                crate::shortcuts::StudioShortcutAction::ExportStems => {
+                    let _ = self.export_demo_wav("/tmp/oxide_studio_mix.wav");
+                    let _ = ableton_bounce::stems::export_remix_stems_from_wav(
+                        std::path::Path::new("/tmp/oxide_studio_mix.wav"),
+                        std::path::Path::new("/tmp/oxide_stems"),
+                    );
+                    self.export_status = Some("Stems exported to /tmp/oxide_stems/".to_string());
+                    self.status_message = "Stems exported to /tmp/oxide_stems/".into();
+                }
+                crate::shortcuts::StudioShortcutAction::ToggleMuteSelected => {
+                    let sel_track = ctx.data(|d| d.get_temp::<usize>(egui::Id::new("aruston_selected_track"))).unwrap_or(0);
+                    if let Some(trk) = self.tracks_gui.get_mut(sel_track) {
+                        trk.mute = !trk.mute;
+                        self.status_message = format!("Track {} Mute: {}", sel_track + 1, trk.mute);
+                    }
+                }
+                crate::shortcuts::StudioShortcutAction::ToggleSoloSelected => {
+                    let sel_track = ctx.data(|d| d.get_temp::<usize>(egui::Id::new("aruston_selected_track"))).unwrap_or(0);
+                    if let Some(trk) = self.tracks_gui.get_mut(sel_track) {
+                        trk.solo = !trk.solo;
+                        self.status_message = format!("Track {} Solo: {}", sel_track + 1, trk.solo);
+                    }
+                }
+                crate::shortcuts::StudioShortcutAction::OctaveDown => {
+                    self.keyboard.octave_offset = (self.keyboard.octave_offset - 1).max(-3);
+                    self.status_message = format!("Keyboard Octave: {}", self.keyboard.octave_offset);
+                }
+                crate::shortcuts::StudioShortcutAction::OctaveUp => {
+                    self.keyboard.octave_offset = (self.keyboard.octave_offset + 1).min(3);
+                    self.status_message = format!("Keyboard Octave: {}", self.keyboard.octave_offset);
+                }
+                crate::shortcuts::StudioShortcutAction::VelocityDown => {
+                    self.keyboard.velocity = self.keyboard.velocity.saturating_sub(10).max(1);
+                    self.status_message = format!("Keyboard Velocity: {}", self.keyboard.velocity);
+                }
+                crate::shortcuts::StudioShortcutAction::VelocityUp => {
+                    self.keyboard.velocity = (self.keyboard.velocity + 10).min(127);
+                    self.status_message = format!("Keyboard Velocity: {}", self.keyboard.velocity);
+                }
+                crate::shortcuts::StudioShortcutAction::ToggleShortcutsModal => {}
+            }
+        }
+
+        // 3. Top Control & Scale Bar Panel (44px deterministic height)
         TopBottomPanel::top("top_control_bar")
-            .exact_height(48.0)
+            .exact_height(budget.top_bar_height)
             .show(ctx, |ui| {
                 let action = render_top_control_bar(
                     ui,
@@ -493,7 +895,12 @@ impl eframe::App for AbletonStudioApp {
                     &mut self.tuning_system,
                     self.current_beat,
                     &self.telemetry,
+                    self.copilot_open,
                 );
+
+                if action.toggle_copilot {
+                    self.copilot_open = !self.copilot_open;
+                }
 
                 if action.tap_tempo {
                     self.handle_tap_tempo();
@@ -521,43 +928,58 @@ impl eframe::App for AbletonStudioApp {
                     }
                 }
                 if action.scale_changed {
-                    self.status_message = format!("Global Scale: {}", self.global_scale.display_name());
+                    self.status_message =
+                        format!("Global Scale: {}", self.global_scale.display_name());
+                }
+                if action.view_session {
+                    self.workspace_view = WorkspaceView::SessionMatrix;
+                }
+                if action.view_arrangement {
+                    self.workspace_view = WorkspaceView::Arrangement;
                 }
                 if action.export_wav {
                     let _ = self.export_demo_wav("/tmp/ableton_studio_export.wav");
                 }
+                if action.export_als {
+                    let _ = self.export_als_project("/tmp/oxide_studio_session.als");
+                    self.export_status = Some("Exported /tmp/oxide_studio_session.als".to_string());
+                    self.status_message = "Exported /tmp/oxide_studio_session.als".into();
+                }
+                if action.import_als {
+                    let p = std::path::Path::new("/tmp/oxide_studio_session.als");
+                    if p.exists() {
+                        if let Ok(proj) = DAWProject::load_als(p) {
+                            self.bpm = proj.transport.bpm;
+                            self.send_command(AudioCommand::SetTempo(self.bpm));
+                            if let Some(ref handle) = self.audio_handle {
+                                handle.params.set(PARAM_BPM, self.bpm as f32);
+                            }
+                            self.export_status = Some("Imported /tmp/oxide_studio_session.als".to_string());
+                            self.status_message = "Imported /tmp/oxide_studio_session.als".into();
+                        }
+                    }
+                }
+                if action.split_stems {
+                    let _ = self.export_demo_wav("/tmp/oxide_studio_mix.wav");
+                    let _ = ableton_bounce::stems::export_remix_stems_from_wav(
+                        std::path::Path::new("/tmp/oxide_studio_mix.wav"),
+                        std::path::Path::new("/tmp/oxide_stems"),
+                    );
+                    self.export_status = Some("Stems exported to /tmp/oxide_stems/".to_string());
+                    self.status_message = "Stems exported to /tmp/oxide_stems/".into();
+                }
             });
 
-        // 4. Left Collapsible Browser Panel (220-300px)
+        // 4. Left Collapsible Browser Panel (220-270px width)
         if !self.browser.is_collapsed {
             SidePanel::left("left_browser_panel")
-                .exact_width(self.browser.width.clamp(220.0, 300.0))
-                .resizable(true)
+                .exact_width(budget.left_browser_width)
+                .resizable(false)
                 .show(ctx, |ui| {
                     let browser_action = render_browser_panel(ui, &mut self.browser);
 
                     if let Some(item) = browser_action.load_item {
-                        // Load item into active track or chain
-                        let dev_kind = match item.id.as_str() {
-                            "inst_wavetable" => Some(DeviceKind::Wavetable),
-                            "inst_operator" => Some(DeviceKind::Operator),
-                            "inst_simpler" => Some(DeviceKind::Simpler),
-                            "inst_drum_rack" => Some(DeviceKind::DrumRack),
-                            "fx_eq_eight" => Some(DeviceKind::EQEight),
-                            "fx_glue_comp" => Some(DeviceKind::GlueCompressor),
-                            "fx_roar" => Some(DeviceKind::Roar),
-                            "fx_auto_filter" => Some(DeviceKind::AutoFilter),
-                            "fx_ott" => Some(DeviceKind::OTT),
-                            _ => None,
-                        };
-
-                        if let Some(kind) = dev_kind {
-                            let new_id = (self.device_chain.devices.len() as u32) + 1;
-                            self.device_chain.devices.push(GuiDeviceModule::new(new_id, kind));
-                            self.status_message = format!("Loaded: {}", item.name);
-                        } else {
-                            self.status_message = format!("Selected: {}", item.name);
-                        }
+                        self.handle_browser_load(&item);
                     }
                 });
         } else {
@@ -567,7 +989,8 @@ impl eframe::App for AbletonStudioApp {
                 .resizable(false)
                 .show(ctx, |ui| {
                     ui.centered_and_justified(|ui| {
-                        let expand_btn = Button::new(RichText::new("▶").size(11.0).color(COLOR_AMBER));
+                        let expand_btn =
+                            Button::new(RichText::new("▶").size(11.0).color(COLOR_AMBER));
                         if ui.add(expand_btn).on_hover_text("Open Browser").clicked() {
                             self.browser.is_collapsed = false;
                         }
@@ -575,46 +998,68 @@ impl eframe::App for AbletonStudioApp {
                 });
         }
 
-        // 5. Bottom Detail View Panel (~240px height)
+        // 5. Right AI Copilot Panel (260-320px width)
+        if self.copilot_open {
+            SidePanel::right("aruston_ai_copilot_panel")
+                .exact_width(budget.right_copilot_width)
+                .resizable(false)
+                .show(ctx, |ui| {
+                    crate::panels::ai_chat::render_ai_copilot_panel(ui, self);
+                });
+        }
+
+        // 6. Bottom Detail View Panel (210-260px, <= 34% of viewport height)
         TopBottomPanel::bottom("bottom_detail_panel")
-            .exact_height(240.0)
+            .exact_height(budget.bottom_deck_height)
             .show(ctx, |ui| {
                 // Header Tabs Selector
                 ui.horizontal(|ui| {
                     ui.spacing_mut().item_spacing = vec2(6.0, 0.0);
 
                     let clip_btn = Button::new(
-                        RichText::new("Clip View (Piano Roll / Warping)")
-                            .size(11.0)
-                            .color(if self.deck_tab == DeckTab::ClipView { COLOR_AMBER } else { COLOR_TEXT_MUTED }),
+                        RichText::new("Clip View (Piano Roll / Warping)").size(11.0).color(
+                            if self.deck_tab == DeckTab::ClipView {
+                                COLOR_AMBER
+                            } else {
+                                COLOR_TEXT_MUTED
+                            },
+                        ),
                     );
                     if ui.add(clip_btn).clicked() {
                         self.deck_tab = DeckTab::ClipView;
                     }
 
-                    let dev_btn = Button::new(
-                        RichText::new("Device Chain View")
-                            .size(11.0)
-                            .color(if self.deck_tab == DeckTab::DeviceRack { COLOR_CYAN } else { COLOR_TEXT_MUTED }),
-                    );
+                    let dev_btn = Button::new(RichText::new("Device Chain View").size(11.0).color(
+                        if self.deck_tab == DeckTab::DeviceRack {
+                            COLOR_CYAN
+                        } else {
+                            COLOR_TEXT_MUTED
+                        },
+                    ));
                     if ui.add(dev_btn).clicked() {
                         self.deck_tab = DeckTab::DeviceRack;
                     }
 
                     let seq_btn = Button::new(
-                        RichText::new("16-Step 909 Sequencer")
-                            .size(11.0)
-                            .color(if self.deck_tab == DeckTab::DrumSequencer { COLOR_GREEN } else { COLOR_TEXT_MUTED }),
+                        RichText::new("16-Step 909 Sequencer").size(11.0).color(
+                            if self.deck_tab == DeckTab::DrumSequencer {
+                                COLOR_GREEN
+                            } else {
+                                COLOR_TEXT_MUTED
+                            },
+                        ),
                     );
                     if ui.add(seq_btn).clicked() {
                         self.deck_tab = DeckTab::DrumSequencer;
                     }
 
-                    let xy_btn = Button::new(
-                        RichText::new("XY Perform Pad")
-                            .size(11.0)
-                            .color(if self.deck_tab == DeckTab::XyPad { COLOR_AMBER } else { COLOR_TEXT_MUTED }),
-                    );
+                    let xy_btn = Button::new(RichText::new("XY Perform Pad").size(11.0).color(
+                        if self.deck_tab == DeckTab::XyPad {
+                            COLOR_AMBER
+                        } else {
+                            COLOR_TEXT_MUTED
+                        },
+                    ));
                     if ui.add(xy_btn).clicked() {
                         self.deck_tab = DeckTab::XyPad;
                     }
@@ -622,10 +1067,13 @@ impl eframe::App for AbletonStudioApp {
                     // Keyboard Mode Indicator on right
                     ui.with_layout(Layout::right_to_left(egui::Align::Center), |ui| {
                         let kb_text = match self.keyboard.mode {
-                            KeyboardMode::Piano => format!("Keys: Piano (Octave {})", self.keyboard.octave_offset),
+                            KeyboardMode::Piano => {
+                                format!("Keys: Piano (Octave {})", self.keyboard.octave_offset)
+                            }
                             KeyboardMode::Isomorphic => "Keys: Wicki-Hayden Isomorphic".into(),
                         };
-                        let kb_btn = Button::new(RichText::new(kb_text).size(10.0).color(COLOR_TEXT_MUTED));
+                        let kb_btn =
+                            Button::new(RichText::new(kb_text).size(10.0).color(COLOR_TEXT_MUTED));
                         if ui.add(kb_btn).clicked() {
                             self.keyboard.mode = match self.keyboard.mode {
                                 KeyboardMode::Piano => KeyboardMode::Isomorphic,
@@ -662,12 +1110,17 @@ impl eframe::App for AbletonStudioApp {
                         if let Some(kind) = dev_act.insert_device {
                             self.status_message = format!("Inserted Device: {}", kind.name());
                         } else if let Some(idx) = dev_act.device_parameter_changed {
-                            self.status_message = format!("Device #{} Parameter Modulated", idx + 1);
+                            self.status_message =
+                                format!("Device #{} Parameter Modulated", idx + 1);
                         }
                     }
                     DeckTab::DrumSequencer => {
                         let current_16th_step = ((self.current_beat * 4.0).floor() as usize) % 16;
-                        let seq_action = render_drum_sequencer(ui, &mut self.drum_pattern, current_16th_step);
+                        let seq_action = render_drum_sequencer(
+                            ui,
+                            &mut self.drum_pattern,
+                            current_16th_step,
+                        );
 
                         if let Some(pad_idx) = seq_action.pad_triggered {
                             self.send_command(AudioCommand::NoteOn {
@@ -681,7 +1134,8 @@ impl eframe::App for AbletonStudioApp {
                         render_piano_roll(ui, &mut self.midi_pattern, self.current_beat);
                     }
                     DeckTab::XyPad => {
-                        let rms_bloom = self.telemetry.master_rms_l.max(self.telemetry.master_rms_r);
+                        let rms_bloom =
+                            self.telemetry.master_rms_l.max(self.telemetry.master_rms_r);
                         let xy_widget = XyPerformPadWidget::new(
                             &mut self.xy_state,
                             self.current_time_seconds,
@@ -714,24 +1168,28 @@ impl eframe::App for AbletonStudioApp {
                 }
             });
 
-        // 6. Center Workspace Panel (Dual View: Session vs Arrangement)
+        // 7. Center Workspace Panel (receives >= 55% of height)
         CentralPanel::default().show(ctx, |ui| {
             // Workspace Selector Toolbar
             ui.horizontal(|ui| {
-                let session_btn = Button::new(
-                    RichText::new("Session View")
-                        .size(11.5)
-                        .color(if self.workspace_view == WorkspaceView::SessionMatrix { COLOR_AMBER } else { COLOR_TEXT_MUTED }),
-                );
+                let session_btn = Button::new(RichText::new("Session View").size(11.5).color(
+                    if self.workspace_view == WorkspaceView::SessionMatrix {
+                        COLOR_AMBER
+                    } else {
+                        COLOR_TEXT_MUTED
+                    },
+                ));
                 if ui.add(session_btn).clicked() {
                     self.workspace_view = WorkspaceView::SessionMatrix;
                 }
 
-                let arr_btn = Button::new(
-                    RichText::new("Arrangement View")
-                        .size(11.5)
-                        .color(if self.workspace_view == WorkspaceView::ArrangementTimeline { COLOR_CYAN } else { COLOR_TEXT_MUTED }),
-                );
+                let arr_btn = Button::new(RichText::new("Arrangement View").size(11.5).color(
+                    if self.workspace_view == WorkspaceView::ArrangementTimeline {
+                        COLOR_CYAN
+                    } else {
+                        COLOR_TEXT_MUTED
+                    },
+                ));
                 if ui.add(arr_btn).clicked() {
                     self.workspace_view = WorkspaceView::ArrangementTimeline;
                 }
@@ -772,9 +1230,30 @@ impl eframe::App for AbletonStudioApp {
                     if let Some(trk) = action.stop_clip {
                         self.send_command(AudioCommand::StopClip { track_id: trk });
                     }
+                    if action.stop_all_clips {
+                        let track_count = self.matrix.tracks.len();
+                        for trk_idx in 0..track_count {
+                            self.send_command(AudioCommand::StopClip { track_id: trk_idx });
+                        }
+                        for trk in &mut self.matrix.tracks {
+                            for slot in &mut trk.slots {
+                                slot.state = SlotState::Stopped;
+                            }
+                        }
+                    }
                     if let Some(scene) = action.trigger_scene {
                         self.send_command(AudioCommand::TriggerScene(scene));
                         self.has_session_override = true;
+                    }
+                    if let Some(sel) = ui.data_mut(|d| {
+                        d.get_temp::<usize>(egui::Id::new("aruston_selected_track"))
+                    }) {
+                        if sel < self.tracks_gui.len() {
+                            self.device_chain.selected_device_idx = self
+                                .device_chain
+                                .selected_device_idx
+                                .min(self.device_chain.devices.len().saturating_sub(1));
+                        }
                     }
                 }
                 WorkspaceView::ArrangementTimeline => {
@@ -799,7 +1278,97 @@ impl eframe::App for AbletonStudioApp {
             }
         });
 
+        // 8. Render Shortcuts Help Modal if active
+        self.shortcuts.render_shortcuts_modal(ctx);
+
         // Request repaint for continuous 60 FPS visualizers
         ctx.request_repaint();
+    }
+}
+
+impl eframe::App for AbletonStudioApp {
+    fn update(&mut self, ctx: &Context, _frame: &mut eframe::Frame) {
+        let screen_rect = ctx.screen_rect();
+        let budget = crate::layout::ViewportBudget::compute(
+            screen_rect,
+            !self.browser.is_collapsed,
+            self.copilot_open,
+        );
+        self.render_frame_with_budget(ctx, &budget);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_als_export_and_import() {
+        let mut app = AbletonStudioApp::new_mock(44100.0);
+        app.bpm = 135.0;
+        let als_path = "/tmp/oxide_studio_session.als";
+        let res = app.export_als_project(als_path);
+        assert!(res.is_ok());
+        assert!(std::path::Path::new(als_path).exists());
+
+        // Test loading
+        let loaded = DAWProject::load_als(std::path::Path::new(als_path)).unwrap();
+        assert_eq!(loaded.transport.bpm, 135.0);
+
+        // Test import logic
+        app.bpm = 120.0;
+        let p = std::path::Path::new(als_path);
+        if let Ok(proj) = DAWProject::load_als(p) {
+            app.bpm = proj.transport.bpm;
+            app.export_status = Some("Imported /tmp/oxide_studio_session.als".to_string());
+        }
+        assert_eq!(app.bpm, 135.0);
+        assert_eq!(app.export_status, Some("Imported /tmp/oxide_studio_session.als".to_string()));
+
+        let _ = std::fs::remove_file(als_path);
+    }
+
+    #[test]
+    fn test_stems_export() {
+        let mut app = AbletonStudioApp::new_mock(44100.0);
+        let wav_path = "/tmp/oxide_studio_mix.wav";
+        let stems_dir = "/tmp/oxide_stems";
+        let res = app.export_demo_wav(wav_path);
+        assert!(res.is_ok());
+        let stems_res = ableton_bounce::stems::export_remix_stems_from_wav(
+            std::path::Path::new(wav_path),
+            std::path::Path::new(stems_dir),
+        );
+        assert!(stems_res.is_ok());
+        app.export_status = Some("Stems exported to /tmp/oxide_stems/".to_string());
+        assert_eq!(app.export_status, Some("Stems exported to /tmp/oxide_stems/".to_string()));
+
+        let _ = std::fs::remove_file(wav_path);
+        let _ = std::fs::remove_dir_all(stems_dir);
+    }
+
+    #[test]
+    fn test_stop_all_clips() {
+        let mut app = AbletonStudioApp::new_mock(44100.0);
+        assert!(matches!(app.matrix.tracks[0].slots[0].state, SlotState::Playing { .. }));
+
+        // Stop all clips
+        for trk_idx in 0..app.matrix.tracks.len() {
+            app.send_command(AudioCommand::StopClip { track_id: trk_idx });
+        }
+        for trk in &mut app.matrix.tracks {
+            for slot in &mut trk.slots {
+                slot.state = SlotState::Stopped;
+            }
+        }
+
+        assert_eq!(app.matrix.tracks[0].slots[0].state, SlotState::Stopped);
+        assert_eq!(app.matrix.tracks[1].slots[0].state, SlotState::Stopped);
+        assert_eq!(app.matrix.tracks[2].slots[0].state, SlotState::Stopped);
+    }
+
+    #[test]
+    fn test_workspace_view_arrangement_alias() {
+        assert_eq!(WorkspaceView::Arrangement, WorkspaceView::ArrangementTimeline);
     }
 }

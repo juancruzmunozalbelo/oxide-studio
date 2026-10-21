@@ -1,14 +1,16 @@
-//! Dual-Target TCP Client Bridge connecting to Ableton Live 12 LOM Remote Script.
+//! Aruston Native Live GUI RPC Bridge (`127.0.0.1:9877`).
 //!
-//! Connects to `127.0.0.1:9877` over newline-delimited JSON-RPC 2.0 with a 500ms timeout.
-//! When Live 12 is online, forwards requests and returns live responses.
-//! When Live 12 is offline (connection refused or timed out), returns structured fallback responses.
+//! Synchronizes MCP tool calls directly with the live open Aruston Studio GUI window
+//! and audio engine over newline-delimited JSON-RPC 2.0 with a 500ms timeout.
+//! When Aruston Studio Live GUI is online, forwards requests and returns live responses.
+//! When Aruston Studio Live GUI is offline (e.g. headless tests / GUI window closed),
+//! seamlessly falls back to the in-process Rust engine state.
 
 use std::io::{BufRead, BufReader, Write};
 use std::net::{SocketAddr, TcpStream};
 use std::time::Duration;
 use serde::{Deserialize, Serialize};
-use serde_json::{json, Value};
+pub use serde_json::{self, json, Value};
 
 pub const DEFAULT_LOM_HOST: &str = "127.0.0.1";
 pub const DEFAULT_LOM_PORT: u16 = 9877;
@@ -41,15 +43,23 @@ impl TcpLomClient {
         }
     }
 
-    /// Check whether Ableton Live 12 LOM Remote Script is actively listening.
+    /// Check whether Aruston Live Studio GUI RPC server is actively listening.
     pub fn is_online(&self) -> bool {
         match self.send_request("ping", json!({})) {
-            Ok(res) => res.get("status").and_then(|s| s.as_str()) == Some("ok"),
+            Ok(res) => {
+                res.get("status").and_then(|s| s.as_str()) == Some("ok")
+                    || res.get("app").and_then(|s| s.as_str()) == Some("Aruston Studio")
+            }
             Err(_) => false,
         }
     }
 
-    /// Send a JSON-RPC 2.0 command over TCP to the AbletonMCP remote script.
+    /// Convenience wrapper for send_request.
+    pub fn call(&self, method: &str, params: Value) -> Result<Value, String> {
+        self.send_request(method, params)
+    }
+
+    /// Send a JSON-RPC 2.0 command over TCP to the Aruston Native Live GUI RPC server.
     pub fn send_request(&self, method: &str, params: Value) -> Result<Value, String> {
         let addr_str = format!("{}:{}", self.host, self.port);
         let addr: SocketAddr = addr_str
@@ -57,7 +67,7 @@ impl TcpLomClient {
             .map_err(|e| format!("Invalid socket address {}: {}", addr_str, e))?;
 
         let stream = TcpStream::connect_timeout(&addr, Duration::from_millis(CONNECT_TIMEOUT_MS))
-            .map_err(|e| format!("Failed to connect to Live 12 on {}: {}", addr_str, e))?;
+            .map_err(|e| format!("Failed to connect to Aruston GUI on {}: {}", addr_str, e))?;
 
         stream
             .set_read_timeout(Some(self.timeout))
@@ -91,14 +101,14 @@ impl TcpLomClient {
             .map_err(|e| format!("Failed to read response line: {}", e))?;
 
         if response_line.trim().is_empty() {
-            return Err("Empty response received from AbletonMCP remote script".into());
+            return Err("Empty response received from Aruston GUI RPC server".into());
         }
 
         let resp: Value = serde_json::from_str(&response_line)
             .map_err(|e| format!("Failed to parse JSON-RPC response: {} (line: {})", e, response_line))?;
 
         if let Some(err) = resp.get("error") {
-            let msg = err.get("message").and_then(|m| m.as_str()).unwrap_or("Unknown LOM error");
+            let msg = err.get("message").and_then(|m| m.as_str()).unwrap_or("Unknown RPC error");
             return Err(format!("LOM Error: {}", msg));
         }
 
@@ -120,6 +130,8 @@ impl TcpLomClient {
             Ok(live_result) => json!({
                 "connected": true,
                 "target": "real_ableton_live_12",
+                "engine": "aruston_native_gui",
+                "mode": "live12_lom_tcp",
                 "result": live_result,
             }),
             Err(_) => {
@@ -127,7 +139,9 @@ impl TcpLomClient {
                 json!({
                     "connected": false,
                     "target": "real_ableton_live_12",
-                    "message": "Real Ableton Live 12 Suite is not running or AbletonMCP remote script is not active on 127.0.0.1:9877. Falling back to ableton-rust engine state.",
+                    "engine": "aruston_native_gui",
+                    "mode": "live12_lom_tcp",
+                    "message": "Aruston Studio Live GUI is not running or RPC is not active on 127.0.0.1:9877. Falling back to in-process Rust engine state.",
                     "fallback_executed": true,
                     "result": fallback,
                 })

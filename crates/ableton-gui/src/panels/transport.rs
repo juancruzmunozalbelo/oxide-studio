@@ -1,12 +1,12 @@
 //! Top control & scale bar (height ~48px).
 //!
 //! Live 12 Complete Workstation Top Bar featuring:
+//! - Brand Badge: ARUSTON Studio Header
+//! - Transport controls: Play, Stop, Record, Draggable BPM, Tap Tempo, Time Sig, Metronome, Key Mode
 //! - Global Scale & Root Key selector with Scale-Lock toggle
-//! - Tuning system selector (12-TET, Just Intonation, 24-EDO, Scala loader)
-//! - Transport controls: Tap Tempo, Draggable BPM, Time Signature, Metronome
-//! - Play, Stop, Record (Session/Arrangement record toggle)
-//! - CPU load gauge in tabular monospace
-//! - Real-time mini oscilloscope and 64-band FFT spectrum
+//! - Segmented View Switcher: Session vs Arrangement
+//! - Pro Studio controls drawer (Swing, Microtonal Tuning, Record Mode)
+//! - Telemetry: Real-time mini oscilloscope (64x24), 64-band FFT spectrum (64x24), CPU load gauge
 //! - One-click WAV export
 
 use egui::{
@@ -26,11 +26,18 @@ pub struct TopControlBarAction {
     pub toggle_record: bool,
     pub tap_tempo: bool,
     pub export_wav: bool,
+    pub export_als: bool,
+    pub import_als: bool,
+    pub split_stems: bool,
     pub bpm_changed: Option<f64>,
     pub scale_changed: bool,
     pub tuning_changed: bool,
+    pub view_session: bool,
+    pub view_arrangement: bool,
+    pub toggle_copilot: bool,
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn render_top_control_bar(
     ui: &mut Ui,
     is_playing: bool,
@@ -43,6 +50,7 @@ pub fn render_top_control_bar(
     tuning: &mut TuningSystem,
     current_beat: f64,
     telemetry: &AudioTelemetry,
+    copilot_open: bool,
 ) -> TopControlBarAction {
     let mut action = TopControlBarAction {
         toggle_play: false,
@@ -50,16 +58,64 @@ pub fn render_top_control_bar(
         toggle_record: false,
         tap_tempo: false,
         export_wav: false,
+        export_als: false,
+        import_als: false,
+        split_stems: false,
         bpm_changed: None,
         scale_changed: false,
         tuning_changed: false,
+        view_session: false,
+        view_arrangement: false,
+        toggle_copilot: false,
     };
 
     ui.horizontal(|ui| {
         ui.spacing_mut().item_spacing = vec2(6.0, 0.0);
 
-        // 1. Tap Tempo & BPM
-        let tap_btn = Button::new(RichText::new("TAP").size(10.5).color(COLOR_AMBER).strong())
+        // 1. Brand Badge: "⚡ OXIDE STUDIO" in ACCENT_AMBER bold (13px)
+        ui.label(
+            RichText::new("⚡ OXIDE STUDIO")
+                .size(13.0)
+                .color(COLOR_AMBER)
+                .strong(),
+        );
+
+        ui.separator();
+
+        // 2. Transport Group: Prominent "▶ PLAY" / "⏹ STOP" button, "128.0 BPM" drag value, and "🎹 Key: Piano" toggle
+        // Play Button
+        let play_color = if is_playing { COLOR_GREEN } else { COLOR_TEXT_PRIMARY };
+        let play_fill = if is_playing { Color32::from_rgb(0x10, 0x36, 0x18) } else { COLOR_BG_PANEL_ALT };
+        let play_btn = Button::new(RichText::new("▶ PLAY").size(11.0).color(play_color).strong())
+            .min_size(vec2(58.0, 26.0))
+            .fill(play_fill)
+            .stroke(Stroke::new(1.0_f32, if is_playing { COLOR_GREEN } else { COLOR_BORDER }));
+        if ui.add(play_btn).clicked() {
+            action.toggle_play = true;
+        }
+
+        // Stop Button
+        let stop_btn = Button::new(RichText::new("⏹ STOP").size(11.0).color(COLOR_TEXT_PRIMARY).strong())
+            .min_size(vec2(54.0, 26.0))
+            .fill(COLOR_BG_PANEL_ALT)
+            .stroke(Stroke::new(1.0_f32, COLOR_BORDER));
+        if ui.add(stop_btn).clicked() {
+            action.stop = true;
+        }
+
+        // Record Button
+        let rec_color = if is_recording { COLOR_RUBY } else { COLOR_TEXT_MUTED };
+        let rec_fill = if is_recording { Color32::from_rgb(0x38, 0x08, 0x10) } else { COLOR_BG_PANEL_ALT };
+        let rec_btn = Button::new(RichText::new("●").size(13.0).color(rec_color))
+            .min_size(vec2(28.0, 26.0))
+            .fill(rec_fill)
+            .stroke(Stroke::new(1.0_f32, if is_recording { COLOR_RUBY } else { COLOR_BORDER }));
+        if ui.add(rec_btn).on_hover_text("Toggle Record").clicked() {
+            action.toggle_record = true;
+        }
+
+        // Tap Tempo
+        let tap_btn = Button::new(RichText::new("TAP").size(10.0).color(COLOR_AMBER).strong())
             .min_size(vec2(32.0, 26.0))
             .fill(COLOR_BG_PANEL_ALT)
             .stroke(Stroke::new(1.0_f32, COLOR_BORDER));
@@ -67,6 +123,7 @@ pub fn render_top_control_bar(
             action.tap_tempo = true;
         }
 
+        // Draggable BPM
         let prev_bpm = *bpm;
         let drag_bpm = ui.add(
             DragValue::new(bpm)
@@ -79,7 +136,6 @@ pub fn render_top_control_bar(
         }
 
         // Time Signature (num / den)
-        ui.label(RichText::new("/").size(11.0).color(COLOR_TEXT_MUTED));
         let mut num = time_sig.0;
         let mut den = time_sig.1;
         ui.add(DragValue::new(&mut num).range(1..=32));
@@ -92,52 +148,32 @@ pub fn render_top_control_bar(
         let metro_color = if *metronome { COLOR_AMBER } else { COLOR_TEXT_MUTED };
         let metro_btn = Button::new(RichText::new("⏱").size(12.0).color(metro_color))
             .min_size(vec2(24.0, 26.0))
-            .fill(if *metronome { COLOR_BG_PANEL_ALT } else { COLOR_BG_SURFACE });
+            .fill(if *metronome { COLOR_BG_PANEL_ALT } else { COLOR_BG_SURFACE })
+            .stroke(Stroke::new(1.0_f32, if *metronome { COLOR_AMBER } else { COLOR_BORDER }));
         if ui.add(metro_btn).on_hover_text("Metronome Click").clicked() {
             *metronome = !*metronome;
         }
 
-        ui.separator();
-
-        // 2. Transport Buttons: Play, Stop, Record, Session/Arrangement Record
-        let play_color = if is_playing { COLOR_GREEN } else { COLOR_TEXT_PRIMARY };
-        let play_btn = Button::new(RichText::new("▶").size(13.0).color(play_color))
-            .min_size(vec2(30.0, 26.0));
-        if ui.add(play_btn).clicked() {
-            action.toggle_play = true;
-        }
-
-        let stop_btn = Button::new(RichText::new("■").size(13.0).color(Color32::WHITE))
-            .min_size(vec2(30.0, 26.0));
-        if ui.add(stop_btn).clicked() {
-            action.stop = true;
-        }
-
-        let rec_color = if is_recording { COLOR_RUBY } else { COLOR_TEXT_MUTED };
-        let rec_btn = Button::new(RichText::new("●").size(13.0).color(rec_color))
-            .min_size(vec2(30.0, 26.0));
-        if ui.add(rec_btn).clicked() {
-            action.toggle_record = true;
-        }
-
-        // Arrangement vs Session Record mode toggle
-        let rec_mode_text = if *arr_record { "ARR REC" } else { "SES REC" };
-        let rec_mode_btn = Button::new(RichText::new(rec_mode_text).size(9.5).color(COLOR_TEXT_MUTED))
-            .min_size(vec2(52.0, 24.0));
-        if ui.add(rec_mode_btn).clicked() {
-            *arr_record = !*arr_record;
+        // Keyboard Mode Toggle: "🎹 Key: Piano"
+        let key_mode_id = egui::Id::new("aruston_key_piano_mode");
+        let mut is_piano_mode = ui.data_mut(|d| *d.get_temp_mut_or(key_mode_id, true));
+        let key_label = if is_piano_mode { "🎹 Key: Piano" } else { "🎹 Key: Iso" };
+        let key_btn = Button::new(RichText::new(key_label).size(10.0).color(if is_piano_mode { COLOR_AMBER } else { COLOR_CYAN }))
+            .min_size(vec2(86.0, 24.0))
+            .fill(COLOR_BG_PANEL_ALT)
+            .stroke(Stroke::new(1.0_f32, COLOR_BORDER));
+        if ui.add(key_btn).on_hover_text("Toggle Computer Keyboard Input Mode (Piano / Wicki-Hayden Isomorphic)").clicked() {
+            is_piano_mode = !is_piano_mode;
+            ui.data_mut(|d| *d.get_temp_mut_or(key_mode_id, true) = is_piano_mode);
         }
 
         ui.separator();
 
-        // 3. Global Scale & Root Key Bar (Live 12 Flagship Feature)
-        ui.label(RichText::new("Scale:").size(11.0).color(COLOR_TEXT_MUTED));
-
-        // Root Note Selector (C, C#, D, D# ... B)
+        // 3. Musical Scale Group: Root + Scale selector ("🎵 F Dorian") + "🔒 Scale" toggle
         let cur_root_name = ROOT_NAMES[(scale.root % 12) as usize];
         ComboBox::from_id_salt("top_bar_root_selector")
-            .selected_text(RichText::new(cur_root_name).size(11.0).color(COLOR_AMBER).strong())
-            .width(42.0)
+            .selected_text(RichText::new(format!("🎵 {}", cur_root_name)).size(11.0).color(COLOR_AMBER).strong())
+            .width(46.0)
             .show_ui(ui, |ui| {
                 for (idx, &name) in ROOT_NAMES.iter().enumerate() {
                     let is_sel = scale.root == idx as u8;
@@ -148,10 +184,9 @@ pub fn render_top_control_bar(
                 }
             });
 
-        // Scale Mode Selector (14 modes)
         ComboBox::from_id_salt("top_bar_scale_mode_selector")
             .selected_text(RichText::new(scale.mode.name()).size(11.0).color(COLOR_AMBER))
-            .width(110.0)
+            .width(96.0)
             .show_ui(ui, |ui| {
                 for &m in &ScaleMode::ALL {
                     let is_sel = scale.mode == m;
@@ -162,69 +197,143 @@ pub fn render_top_control_bar(
                 }
             });
 
-        // Scale-Lock Toggle Button (Lock icon)
         let lock_color = if scale.scale_lock { COLOR_AMBER } else { COLOR_TEXT_MUTED };
-        let lock_text = if scale.scale_lock { "🔒 Fold" } else { "🔓 Chromatic" };
+        let lock_text = if scale.scale_lock { "🔒 Scale" } else { "🔓 Scale" };
         let lock_btn = Button::new(RichText::new(lock_text).size(10.0).color(lock_color))
             .fill(if scale.scale_lock { COLOR_BG_PANEL_ALT } else { COLOR_BG_SURFACE })
             .stroke(Stroke::new(1.0_f32, if scale.scale_lock { COLOR_AMBER } else { COLOR_BORDER }));
 
-        if ui.add(lock_btn).on_hover_text("Scale Lock: Fold piano roll to active scale notes").clicked() {
+        if ui.add(lock_btn).on_hover_text("Scale Lock: Fold piano roll and view to active musical scale").clicked() {
             scale.scale_lock = !scale.scale_lock;
             action.scale_changed = true;
         }
 
-        // Tuning System Selector
-        ComboBox::from_id_salt("top_bar_tuning_system_selector")
-            .selected_text(RichText::new(tuning.tuning_type.name()).size(10.0).color(COLOR_CYAN))
-            .width(115.0)
-            .show_ui(ui, |ui| {
-                for &t in &TuningType::ALL {
-                    let is_sel = tuning.tuning_type == t;
-                    if ui.selectable_label(is_sel, t.name()).clicked() {
-                        tuning.tuning_type = t;
-                        action.tuning_changed = true;
+        ui.separator();
+
+        // 4. Pro Controls (Toggle "⚙ Pro", stored in ui.data_mut)
+        let pro_mode_id = egui::Id::new("aruston_pro_header_mode");
+        let mut pro_mode = ui.data_mut(|d| *d.get_temp_mut_or(pro_mode_id, false));
+
+        let pro_btn = Button::new(
+            RichText::new("⚙ Pro")
+                .size(10.5)
+                .color(if pro_mode { COLOR_AMBER } else { COLOR_TEXT_MUTED })
+                .strong(),
+        )
+        .fill(if pro_mode { COLOR_BG_PANEL_ALT } else { COLOR_BG_SURFACE })
+        .stroke(Stroke::new(1.0_f32, if pro_mode { COLOR_AMBER } else { COLOR_BORDER }));
+
+        if ui.add(pro_btn).on_hover_text("Toggle Pro Studio Controls (Swing, Microtonal Tuning, Record Mode)").clicked() {
+            pro_mode = !pro_mode;
+            ui.data_mut(|d| *d.get_temp_mut_or(pro_mode_id, false) = pro_mode);
+        }
+
+        if pro_mode {
+            // Swing control
+            let swing_id = egui::Id::new("aruston_transport_swing_pct");
+            let mut swing_pct = ui.data_mut(|d| *d.get_temp_mut_or(swing_id, 0.0f32));
+            ui.label(RichText::new("Swing:").size(10.0).color(COLOR_TEXT_MUTED));
+            let swing_drag = ui.add(
+                DragValue::new(&mut swing_pct)
+                    .speed(0.5)
+                    .range(0.0..=100.0)
+                    .suffix("%"),
+            );
+            if swing_drag.changed() {
+                ui.data_mut(|d| *d.get_temp_mut_or(swing_id, 0.0f32) = swing_pct);
+            }
+
+            // Tuning System Selector (12-TET, Just Intonation, 24-EDO, Scala loader)
+            ComboBox::from_id_salt("top_bar_tuning_system_selector")
+                .selected_text(RichText::new(tuning.tuning_type.name()).size(10.0).color(COLOR_CYAN))
+                .width(105.0)
+                .show_ui(ui, |ui| {
+                    for &t in &TuningType::ALL {
+                        let is_sel = tuning.tuning_type == t;
+                        if ui.selectable_label(is_sel, t.name()).clicked() {
+                            tuning.tuning_type = t;
+                            action.tuning_changed = true;
+                        }
                     }
-                }
-            });
+                });
+
+            // Record destination mode toggle: "● SES REC" / "● ARR REC"
+            let rec_mode_text = if *arr_record { "● ARR REC" } else { "● SES REC" };
+            let rec_mode_color = if *arr_record { COLOR_CYAN } else { COLOR_AMBER };
+            let rec_mode_btn = Button::new(RichText::new(rec_mode_text).size(9.5).color(rec_mode_color))
+                .fill(COLOR_BG_PANEL_ALT)
+                .stroke(Stroke::new(1.0_f32, COLOR_BORDER));
+            if ui.add(rec_mode_btn).on_hover_text("Toggle Record Mode: Session Matrix vs Arrangement Timeline").clicked() {
+                *arr_record = !*arr_record;
+            }
+        }
 
         ui.separator();
 
-        // 4. Transport position (Bar.Beat.16th) in Monospace
-        let beat_str = format_musical_beat(current_beat);
-        ui.label(
-            RichText::new(beat_str)
-                .font(FontId::new(12.5, FontFamily::Monospace))
-                .color(COLOR_AMBER),
-        );
+        // 5. View Switcher (Center-Right): Clear, high-contrast segmented buttons "⊞ SESSION" and "▤ ARRANGEMENT"
+        let view_id = egui::Id::new("aruston_workspace_view");
+        let mut active_view = ui.data_mut(|d| *d.get_temp_mut_or(view_id, 0)); // 0 = Session, 1 = Arrangement
 
-        // 5. CPU Load
-        let cpu_str = format!("CPU {:>4.1}%", telemetry.cpu_load);
-        ui.label(
-            RichText::new(cpu_str)
-                .font(FontId::new(10.5, FontFamily::Monospace))
-                .color(if telemetry.cpu_load > 75.0 { COLOR_RUBY } else { COLOR_TEXT_MUTED }),
-        );
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing = vec2(1.0, 0.0);
+            let is_session = active_view == 0;
+            let session_btn = Button::new(
+                RichText::new("⊞ SESSION")
+                    .size(10.5)
+                    .color(if is_session { COLOR_AMBER } else { COLOR_TEXT_MUTED })
+                    .strong(),
+            )
+            .fill(if is_session { COLOR_BG_PANEL_ALT } else { COLOR_BG_SURFACE })
+            .stroke(Stroke::new(1.0_f32, if is_session { COLOR_AMBER } else { COLOR_BORDER }))
+            .min_size(vec2(76.0, 24.0));
 
-        // 6. Mini Oscilloscope & Spectrum
-        let osc_size = vec2(70.0, 24.0);
-        let (osc_rect, _) = ui.allocate_exact_size(osc_size, Sense::hover());
-        if ui.is_rect_visible(osc_rect) {
-            let painter = ui.painter_at(osc_rect);
-            render_oscilloscope(&painter, osc_rect, &telemetry.oscilloscope_slice);
-        }
+            if ui.add(session_btn).on_hover_text("Switch to Session Matrix View").clicked() {
+                active_view = 0;
+                ui.data_mut(|d| *d.get_temp_mut_or(view_id, 0) = 0);
+                action.view_session = true;
+            }
 
-        let spec_size = vec2(70.0, 24.0);
-        let (spec_rect, _) = ui.allocate_exact_size(spec_size, Sense::hover());
-        if ui.is_rect_visible(spec_rect) {
-            let painter = ui.painter_at(spec_rect);
-            render_spectrum(&painter, spec_rect, &telemetry.spectrum_bins);
-        }
+            let is_arr = active_view == 1;
+            let arr_btn = Button::new(
+                RichText::new("▤ ARRANGEMENT")
+                    .size(10.5)
+                    .color(if is_arr { COLOR_CYAN } else { COLOR_TEXT_MUTED })
+                    .strong(),
+            )
+            .fill(if is_arr { COLOR_BG_PANEL_ALT } else { COLOR_BG_SURFACE })
+            .stroke(Stroke::new(1.0_f32, if is_arr { COLOR_CYAN } else { COLOR_BORDER }))
+            .min_size(vec2(98.0, 24.0));
 
-        // 7. Export WAV button on right
+            if ui.add(arr_btn).on_hover_text("Switch to Arrangement Timeline View").clicked() {
+                active_view = 1;
+                ui.data_mut(|d| *d.get_temp_mut_or(view_id, 0) = 1);
+                action.view_arrangement = true;
+            }
+        });
+
+        // 6. Right Telemetry & Export: Live Oscilloscope (64x24), Spectrum (64x24), compact CPU badge, and "⬇ Export WAV" button
         ui.with_layout(Layout::right_to_left(egui::Align::Center), |ui| {
+            ui.spacing_mut().item_spacing = vec2(6.0, 0.0);
+
+            // Prominent 🤖 AI Copilot toggle button
+            let copilot_color = if copilot_open { COLOR_CYAN } else { COLOR_TEXT_MUTED };
+            let copilot_btn = Button::new(
+                RichText::new("🤖 AI Copilot")
+                    .size(10.5)
+                    .color(copilot_color)
+                    .strong(),
+            )
+            .min_size(vec2(86.0, 26.0))
+            .fill(if copilot_open { COLOR_BG_PANEL_ALT } else { COLOR_BG_SURFACE })
+            .stroke(Stroke::new(1.0_f32, if copilot_open { COLOR_CYAN } else { COLOR_BORDER }));
+
+            if ui.add(copilot_btn).on_hover_text("Toggle In-App AI Copilot Studio Assistant (MCP)").clicked() {
+                action.toggle_copilot = true;
+            }
+
+            // One-click WAV export
             let bounce_btn = Button::new(
-                RichText::new("Export WAV")
+                RichText::new("⬇ Export WAV")
                     .size(10.5)
                     .color(COLOR_AMBER)
                     .strong(),
@@ -235,6 +344,83 @@ pub fn render_top_control_bar(
             if ui.add(bounce_btn).clicked() {
                 action.export_wav = true;
             }
+
+            // Export .ALS
+            let export_als_btn = Button::new(
+                RichText::new("💾 .ALS")
+                    .size(10.0)
+                    .color(COLOR_AMBER)
+                    .strong(),
+            )
+            .fill(COLOR_BG_PANEL_ALT)
+            .stroke(Stroke::new(1.0_f32, COLOR_BORDER));
+            if ui.add(export_als_btn).on_hover_text("Export Ableton Live .als Project (/tmp/oxide_studio_session.als)").clicked() {
+                action.export_als = true;
+            }
+
+            // Import .ALS
+            let import_als_btn = Button::new(
+                RichText::new("📂 .ALS")
+                    .size(10.0)
+                    .color(COLOR_CYAN)
+                    .strong(),
+            )
+            .fill(COLOR_BG_PANEL_ALT)
+            .stroke(Stroke::new(1.0_f32, COLOR_BORDER));
+            if ui.add(import_als_btn).on_hover_text("Import Ableton Live .als Project (/tmp/oxide_studio_session.als)").clicked() {
+                action.import_als = true;
+            }
+
+            // Split Stems
+            let stems_btn = Button::new(
+                RichText::new("✂️ Stems")
+                    .size(10.0)
+                    .color(COLOR_AMBER)
+                    .strong(),
+            )
+            .fill(COLOR_BG_PANEL_ALT)
+            .stroke(Stroke::new(1.0_f32, COLOR_BORDER));
+            if ui.add(stems_btn).on_hover_text("Export & Split Remix Stems (/tmp/oxide_stems/)").clicked() {
+                action.split_stems = true;
+            }
+
+            // Compact CPU badge
+            let cpu_color = if telemetry.cpu_load > 75.0 {
+                COLOR_RUBY
+            } else if telemetry.cpu_load > 40.0 {
+                COLOR_AMBER
+            } else {
+                COLOR_GREEN
+            };
+            ui.label(
+                RichText::new(format!("CPU {:>4.1}%", telemetry.cpu_load))
+                    .font(FontId::new(10.0, FontFamily::Monospace))
+                    .color(cpu_color),
+            );
+
+            // Mini Spectrum (64x24)
+            let spec_size = vec2(64.0, 24.0);
+            let (spec_rect, _) = ui.allocate_exact_size(spec_size, Sense::hover());
+            if ui.is_rect_visible(spec_rect) {
+                let painter = ui.painter_at(spec_rect);
+                render_spectrum(&painter, spec_rect, &telemetry.spectrum_bins);
+            }
+
+            // Mini Oscilloscope (64x24)
+            let osc_size = vec2(64.0, 24.0);
+            let (osc_rect, _) = ui.allocate_exact_size(osc_size, Sense::hover());
+            if ui.is_rect_visible(osc_rect) {
+                let painter = ui.painter_at(osc_rect);
+                render_oscilloscope(&painter, osc_rect, &telemetry.oscilloscope_slice);
+            }
+
+            // Transport position (Bar.Beat.16th) in Monospace
+            let beat_str = format_musical_beat(current_beat);
+            ui.label(
+                RichText::new(beat_str)
+                    .font(FontId::new(11.5, FontFamily::Monospace))
+                    .color(COLOR_AMBER),
+            );
         });
     });
 
@@ -247,7 +433,7 @@ pub fn render_transport_bar(
     is_playing: bool,
     is_recording: bool,
     bpm: &mut f64,
-    _swing: &mut f32,
+    swing: &mut f32,
     current_beat: f64,
     telemetry: &AudioTelemetry,
 ) -> crate::panels::transport_legacy::LegacyTransportBarAction {
@@ -256,6 +442,10 @@ pub fn render_transport_bar(
     let mut time_sig = (4, 4);
     let mut metronome = false;
     let mut arr_rec = false;
+
+    // Sync swing to data_mut
+    let swing_id = egui::Id::new("aruston_transport_swing_pct");
+    ui.data_mut(|d| *d.get_temp_mut_or(swing_id, *swing * 100.0) = *swing * 100.0);
 
     let action = render_top_control_bar(
         ui,
@@ -269,7 +459,16 @@ pub fn render_transport_bar(
         &mut tuning,
         current_beat,
         telemetry,
+        false,
     );
+
+    let updated_swing = ui.data_mut(|d| *d.get_temp_mut_or(swing_id, 0.0f32)) / 100.0;
+    let swing_changed = if (updated_swing - *swing).abs() > 0.001 {
+        *swing = updated_swing;
+        Some(updated_swing)
+    } else {
+        None
+    };
 
     crate::panels::transport_legacy::LegacyTransportBarAction {
         toggle_play: action.toggle_play,
@@ -277,6 +476,38 @@ pub fn render_transport_bar(
         toggle_record: action.toggle_record,
         export_wav: action.export_wav,
         bpm_changed: action.bpm_changed,
-        swing_changed: None,
+        swing_changed,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_top_control_bar_action_defaults() {
+        let action = TopControlBarAction {
+            toggle_play: false,
+            stop: false,
+            toggle_record: false,
+            tap_tempo: false,
+            export_wav: false,
+            export_als: false,
+            import_als: false,
+            split_stems: false,
+            bpm_changed: None,
+            scale_changed: false,
+            tuning_changed: false,
+            view_session: false,
+            view_arrangement: false,
+            toggle_copilot: false,
+        };
+        assert!(!action.toggle_play);
+        assert!(!action.export_als);
+        assert!(!action.import_als);
+        assert!(!action.split_stems);
+        assert!(!action.view_session);
+        assert!(!action.view_arrangement);
+        assert!(!action.toggle_copilot);
     }
 }

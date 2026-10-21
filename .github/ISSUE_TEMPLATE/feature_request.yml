@@ -1,0 +1,44 @@
+name: "Feature Request"
+description: "Suggest an idea or electronic music production workflow improvement"
+title: "[FEATURE]: "
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Suggest an electronic music feature or workflow enhancement for Oxide Studio.
+  - type: dropdown
+    id: subgenre
+    attributes:
+      label: Primary Electronic Subgenre Focus
+      description: What style of music directly benefits from this feature?
+      options:
+        - "Techno / Peak-Time / Hardgroove"
+        - "House / Tech House / Deep House"
+        - "Drum & Bass / Jungle"
+        - "RKT / Turreo / Latin Urban"
+        - "Bass Music / Dubstep / Halftime"
+        - "Ambient / IDM / Experimental"
+        - "General DAW / Cross-Genre"
+    validations:
+      required: true
+  - type: textarea
+    id: problem
+    attributes:
+      label: Producer Pain Point in Stock DAWs
+      description: What is cumbersome, slow, or missing in stock Ableton Live or other DAWs today?
+      placeholder: "In stock Live, doing X requires buying a 3rd party plugin or manual multi-step routing..."
+    validations:
+      required: true
+  - type: textarea
+    id: solution
+    attributes:
+      label: Proposed Oxide Studio Solution
+      description: Describe your proposed feature, device, or workflow addition.
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Existing 3rd-Party Plugins / Workarounds Considered
+      description: e.g. Kickstart 2, ShaperBox, Psyscope, Metric AB, StandardCLIP

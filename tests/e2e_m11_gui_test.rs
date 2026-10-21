@@ -267,10 +267,10 @@ fn test_center_session_matrix_view_and_quantization() {
 
     // Modular Mixer Sections
     let mixer_sections = SessionMixerSections::default();
-    assert!(mixer_sections.show_io);
-    assert!(mixer_sections.show_sends);
+    assert!(!mixer_sections.show_io);
+    assert!(!mixer_sections.show_sends);
     assert!(mixer_sections.show_returns);
-    assert!(mixer_sections.show_crossfader);
+    assert!(!mixer_sections.show_crossfader);
 
     // Track states with Crossfader assignments
     let mut trk_state = GuiTrackState::default();

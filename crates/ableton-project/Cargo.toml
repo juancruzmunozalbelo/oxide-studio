@@ -2,6 +2,10 @@
 name = "ableton-project"
 version = "0.1.0"
 edition = "2021"
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
 
 [dependencies]
 ableton-core = { path = "../ableton-core" }
@@ -9,3 +13,5 @@ ableton-dsp = { path = "../ableton-dsp" }
 ableton-timeline = { path = "../ableton-timeline" }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
+flate2 = "1.0"
+quick-xml = { version = "0.37", features = ["serialize"] }

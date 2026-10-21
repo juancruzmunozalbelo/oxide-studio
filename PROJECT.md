@@ -91,6 +91,13 @@ Every feature from the original request and survey is assigned to a milestone:
 | M5 | 60 FPS Single-Window UI/UX | `ableton-gui`, egui/eframe Metal, visualizers, step sequencer, XY pad, keyboards | M1, M2, M3, M4 | DONE |
 | M6 | Final E2E Integration & Audit | E2E suite pass, headless bounce verify, roundtrip test, 60 FPS GUI check | M1, M2, M3, M4, M5 | DONE |
 | M7 | Full-Control MCP Server | `crates/ableton-mcp`, `--mcp` CLI flag, `tests/e2e_mcp_server_test.rs` | M0..M6 | DONE |
+| M8 | Live 12 Flagship Instruments | Wavetable, Operator, Drift, Meld, Analog, Collision, Tension, Electric, Simpler, 128-Pad Drum Rack | M0..M7 | DONE |
+| M9 | Dynamic Chains, FX & MIDI Tools | Dynamic device chains, EQ Eight, Glue, Roar, Auto Filter, OTT, Hybrid Reverb, etc. + MIDI FX/Generators/Transformers + HostedPluginDevice (Issue #14) | M8 | DONE |
+| M10 | Warping, Grooves, Take Lanes & Mixer | 6-mode warping, Groove Pool (.agr), unlimited tracks/returns, sends, take lanes comping, automation overlays | M8, M9 | DONE |
+| M11 | Complete Live 12 Workstation GUI | Top Scale Bar, Left Browser + Sound Similarity, Session/Arrangement + Returns, Bottom Clip View & Device Chain visualizers | M8, M9, M10 | DONE |
+| M12 | Dual-Target MCP & LOM Remote Script | 76-tool MCP server in `crates/ableton-mcp` + `AbletonMCP` Python 3.11 Remote Script on `127.0.0.1:9877` | M8, M9, M10, M11 | DONE |
+| M13 | Comprehensive E2E Verification & Audit | Tiers 1-4 E2E tests, audio validation, py_compile, simulated socket E2E, forensic integrity audit | M8..M12 | DONE |
+
 
 ---
 

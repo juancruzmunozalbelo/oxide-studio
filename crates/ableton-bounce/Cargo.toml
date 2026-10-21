@@ -2,12 +2,18 @@
 name = "ableton-bounce"
 version = "0.1.0"
 edition = "2021"
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
 
 [dependencies]
 ableton-core = { path = "../ableton-core" }
 ableton-dsp = { path = "../ableton-dsp" }
 ableton-drums = { path = "../ableton-drums" }
 ableton-fx = { path = "../ableton-fx" }
+ableton-project = { path = "../ableton-project" }
+ableton-timeline = { path = "../ableton-timeline" }
 serde = { version = "1.0", features = ["derive"], optional = true }
 
 [features]
@@ -58,6 +64,10 @@ path = "../../tests/adversarial_m9_stress_test.rs"
 [[test]]
 name = "e2e_m10_warping_mixer_test"
 path = "../../tests/e2e_m10_warping_mixer_test.rs"
+
+[[test]]
+name = "e2e_stems_test"
+path = "tests/e2e_stems_test.rs"
 
 
 

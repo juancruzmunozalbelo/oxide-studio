@@ -1,6 +1,6 @@
-# Aruston Domain Glossary
+# Oxide Studio Domain Glossary
 
-Canonical domain terminology for **Aruston** (`ableton-rust`), the native Rust electronic music workstation and dual-target Model Context Protocol (MCP) server inspired by reverse-engineering **Ableton Live 12.4.6 Suite** (`OEngine`, `ableton::dsp`, `ableton::devices`, `Live.*` LOM) and **Ableton Learning Synths Playground** (Cycling '74 Max RNBO `0.14.0`).
+Canonical domain terminology for **Oxide Studio** (`oxide-studio` / `ableton-rust`), the native Rust electronic music workstation and dual-target Model Context Protocol (MCP) server inspired by reverse-engineering **Ableton Live 12.4.6 Suite** (`OEngine`, `ableton::dsp`, `ableton::devices`, `Live.*` LOM) and **Ableton Learning Synths Playground** (Cycling '74 Max RNBO `0.14.0`).
 
 ## Core Audio & DSP Terms
 
@@ -38,3 +38,12 @@ Canonical domain terminology for **Aruston** (`ableton-rust`), the native Rust e
 
 - **Aruston MCP Server (`ableton-mcp`)**: JSON-RPC 2.0 `stdio` Model Context Protocol server (`ableton-rust --mcp`) exposing full programmatic control over synthesis, device chains, MIDI/audio clips, mixing, arrangement, offline WAV bounce, spectral audio analysis, and Live 12 LOM bridging.
 - **Live Object Model Bridge (`AbletonMCP`)**: Python 3.11 MIDI Remote Script (`~/Music/Ableton/User Library/Remote Scripts/AbletonMCP/`) running inside official **Ableton Live 12.4.6 Suite** (`CPython 3.11.6`, Boost.Python `Live.*` API) that exposes a localhost JSON-RPC TCP socket (`127.0.0.1:9877`) bridged into `ableton-mcp` under the `lom_*` tool namespace.
+
+## Top Community-Requested Beyond-Stock Electronic Features
+
+- **Bounce-in-Place (`BounceInPlace` / `Cmd+B`)**: Non-destructive 1-click in-place audio rendering mechanism (`ableton-bounce`) replacing stock Ableton's destructive "Freeze & Flatten". Renders selected clips or Group tracks into audio on the main track while preserving underlying MIDI notes, synth patches, and automation in an inactive, zero-CPU source take lane with 1-click revert capability.
+- **DuckShaper (`DuckShaper` / `Pump / LFO Shaper`)**: Native sample-accurate volume and filter ducking envelope processor (`ableton-fx`). Replaces sluggish compressor sidechain pumps with a 2048-point bezier curve evaluated per sample without detector lag. Supports tempo-sync divisions ($1/4, 1/8, 1/16$, dotted/triplet), ghost MIDI re-triggers, audio transient triggers, and a 4th-order Linkwitz-Riley $120\text{ Hz}$ crossover for transparent sub-only ducking.
+- **Club Clipper (`MasterClipper` / `Club Clipper`)**: High-performance hard/soft clipping processor with selectable $2\times, 4\times, 8\times$ linear-phase half-band FIR polyphase oversampling to prevent high-frequency aliasing foldback. Features continuous polynomial knee adjustment ($K \in [0.0, 1.0]$), input drive, ceiling limiter, and real-time shave-meter showing instantaneous crest factor (Peak-to-RMS dB).
+- **PhaseScope (`PhaseScope` / `Kick + Sub-Bass Phase Scope`)**: Real-time dual circular ring buffer oscilloscope and correlation visualizer (`ableton-core` / `ableton-gui`). Superimposes Kick (neon pink `#ff007f`) and Sub-Bass (cyan `#00d2ff`) waveforms in the time domain, computing continuous Pearson phase correlation $\rho \in [-1.0, +1.0]$, and alerts producers to destructive low-end acoustic phase cancellation with on-device phase rotation ($0^\circ..360^\circ$) and micro-delay alignment ($\pm 25\text{ ms}$).
+- **ClubDeck (`ClubDeck` / `Club Readiness & Loudness Analyzer`)**: Master telemetry and reference suite integrating ITU-R BS.1770 / EBU R128 integrated and short-term LUFS metering (with -8 LUFS club and -14 LUFS streaming target markers), $4\times$ oversampled true-peak inter-sample detection, sub-bass mono compatibility audition ($<90\text{ Hz}$), sum-to-mono phase cancellation check, and a 1-click A/B reference track player with automatic loudness matching.
+

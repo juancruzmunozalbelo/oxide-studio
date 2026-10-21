@@ -13,3 +13,12 @@ members = [
     "crates/ableton-gui",
     "crates/ableton-mcp",
 ]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/juancruzmunozalbelo/oxide-studio"
+homepage = "https://juancruzmunozalbelo.github.io/oxide-studio/"
+authors = ["Juan Cruz Muñoz Albelo and Oxide Studio Contributors"]
+description = "Clean-room native electronic music DAW & workstation in Rust"

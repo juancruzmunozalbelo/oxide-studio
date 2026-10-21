@@ -1,0 +1,49 @@
+name: "DSP Device Proposal"
+description: "Propose a new synthesizer, audio effect, filter, or mastering device"
+title: "[DSP]: "
+labels: ["dsp", "device"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Propose a new DSP device, filter model, or synthesizer engine for Oxide Studio.
+  - type: dropdown
+    id: category
+    attributes:
+      label: Device Category
+      options:
+        - "Synthesizer / Instrument"
+        - "Filter / Equalizer"
+        - "Nonlinear Waveshaper / Saturator / Clipper"
+        - "Dynamics (Compressor / Limiter / Transient Shaper)"
+        - "Time / Modulation / Space (Delay, Reverb, Chorus)"
+        - "Mastering / Analysis / Scope"
+        - "MIDI Generator / Transformer"
+    validations:
+      required: true
+  - type: textarea
+    id: mathematical_model
+    attributes:
+      label: Mathematical Model & Algorithms
+      description: Academic papers, differential equations, transfer functions, oversampling FIR specs, or DSP topology.
+      placeholder: "e.g. 2-pole ZDF state variable filter with hyperbolic tangent saturation in feedback loop..."
+    validations:
+      required: true
+  - type: textarea
+    id: parameters
+    attributes:
+      label: Controllable Parameters & Ranges
+      description: List proposed parameters, normalized units, and default values.
+      placeholder: |
+        - cutoff_hz: 20.0 .. 20000.0 Hz (default 1000.0)
+        - resonance: 0.0 .. 1.0 (default 0.2)
+        - oversampling: 1x, 2x, 4x, 8x
+    validations:
+      required: true
+  - type: textarea
+    id: audio_budget
+    attributes:
+      label: Audio Thread Budget & Invariants
+      description: Estimated cycles per sample, memory requirements (pre-allocated tables/delay lines), and real-time guarantees.
+    validations:
+      required: true

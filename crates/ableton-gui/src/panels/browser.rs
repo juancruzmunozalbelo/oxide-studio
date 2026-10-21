@@ -37,6 +37,25 @@ impl BrowserCategory {
         BrowserCategory::Templates,
     ];
 
+    pub fn all() -> &'static [BrowserCategory; 10] {
+        &Self::ALL
+    }
+
+    pub fn icon_label(&self) -> &'static str {
+        match self {
+            BrowserCategory::Sounds => "🎵 Sounds",
+            BrowserCategory::Drums => "🥁 Drums",
+            BrowserCategory::Instruments => "🎹 Instruments",
+            BrowserCategory::AudioEffects => "🎛 Audio FX",
+            BrowserCategory::MidiEffects => "⚡ MIDI FX",
+            BrowserCategory::PlugIns => "🔌 Plug-Ins",
+            BrowserCategory::Clips => "🎞 Clips",
+            BrowserCategory::Samples => "🔊 Samples",
+            BrowserCategory::Grooves => "🌊 Grooves",
+            BrowserCategory::Templates => "📐 Templates",
+        }
+    }
+
     pub fn name(&self) -> &'static str {
         match self {
             BrowserCategory::Sounds => "Sounds",
@@ -121,12 +140,18 @@ pub struct BrowserState {
     pub selected_category: BrowserCategory,
     pub search_query: String,
     pub active_tags: Vec<String>,
+    pub selected_tag: Option<String>,
+    pub show_tags_drawer: bool,
+    pub show_all_categories: bool,
+    pub favorites: std::collections::HashSet<String>,
     pub items: Vec<BrowserItem>,
     pub selected_item_id: Option<String>,
     pub similarity_target_id: Option<String>,
     pub similarity_results: Vec<(BrowserItem, f32)>, // top 10 ranked with similarity score
     pub show_similarity_panel: bool,
 }
+
+pub type BrowserPanelState = BrowserState;
 
 impl Default for BrowserState {
     fn default() -> Self {
@@ -324,6 +349,10 @@ impl Default for BrowserState {
             selected_category: BrowserCategory::Sounds,
             search_query: String::new(),
             active_tags: Vec::new(),
+            selected_tag: None,
+            show_tags_drawer: false,
+            show_all_categories: false,
+            favorites: std::collections::HashSet::new(),
             items,
             selected_item_id: Some("snd_house_bass".into()),
             similarity_target_id: None,
@@ -364,6 +393,7 @@ impl BrowserState {
         } else {
             self.active_tags.push(tag.to_string());
         }
+        self.selected_tag = self.active_tags.first().cloned();
     }
 
     /// Filtered list of items matching search query, active tags, and selected category.
@@ -372,9 +402,10 @@ impl BrowserState {
         self.items
             .iter()
             .filter(|item| {
-                // Category match (or if searching, show matches from all categories)
-                let cat_match = query.is_empty() && item.category == self.selected_category
-                    || !query.is_empty();
+                // Category match: if show_all_categories or searching, match all categories
+                let cat_match = self.show_all_categories
+                    || !query.is_empty()
+                    || item.category == self.selected_category;
 
                 // Search query match
                 let query_match = query.is_empty()
@@ -405,18 +436,18 @@ pub fn render_browser_panel(ui: &mut Ui, state: &mut BrowserState) -> BrowserAct
     };
 
     ui.vertical(|ui| {
-        // Top Browser Header & Collapse Button
+        // Top Browser Header & Collapse Button: "OXIDE LIBRARY"
         ui.horizontal(|ui| {
-            let collapse_btn = Button::new(RichText::new("◀").size(11.0).color(COLOR_TEXT_MUTED));
-            if ui.add(collapse_btn).clicked() {
-                state.is_collapsed = true;
-            }
-
-            ui.label(RichText::new("Live 12 Browser").size(12.0).color(COLOR_AMBER).strong());
+            ui.label(RichText::new("OXIDE LIBRARY").size(12.0).color(COLOR_TEXT_PRIMARY).strong());
 
             ui.with_layout(Layout::right_to_left(egui::Align::Center), |ui| {
+                let collapse_btn = Button::new(RichText::new("«").size(12.0).color(COLOR_TEXT_MUTED));
+                if ui.add(collapse_btn).on_hover_text("Collapse Browser Panel").clicked() {
+                    state.is_collapsed = true;
+                }
+
                 if state.show_similarity_panel {
-                    let back_btn = Button::new(RichText::new("Library").size(10.0).color(COLOR_CYAN));
+                    let back_btn = Button::new(RichText::new("« Library").size(10.0).color(COLOR_CYAN));
                     if ui.add(back_btn).clicked() {
                         state.show_similarity_panel = false;
                     }
@@ -437,14 +468,14 @@ pub fn render_browser_panel(ui: &mut Ui, state: &mut BrowserState) -> BrowserAct
 
             ui.add_space(4.0);
 
-            ScrollArea::vertical().max_height(340.0).show(ui, |ui| {
+            ScrollArea::vertical().id_salt("similarity_scroll").auto_shrink([false, false]).show(ui, |ui| {
                 for (item, score) in &state.similarity_results {
                     let pct = (score * 100.0).round() as u32;
                     let item_clone = item.clone();
 
                     ui.horizontal(|ui| {
                         // Load button
-                        if ui.add(Button::new(RichText::new("+").size(10.0).color(COLOR_GREEN))).clicked() {
+                        if ui.add(Button::new(RichText::new("+ Load").size(9.0).color(COLOR_GREEN))).on_hover_text("Click to load into selected track").clicked() {
                             action.load_item = Some(item_clone.clone());
                         }
 
@@ -459,9 +490,10 @@ pub fn render_browser_panel(ui: &mut Ui, state: &mut BrowserState) -> BrowserAct
                         ui.label(RichText::new(format!("{:>3}%", pct)).font(egui::FontId::monospace(9.5)).color(badge_color));
 
                         // Name
-                        let name_btn = Button::new(RichText::new(&item.name).size(11.0).color(COLOR_TEXT_PRIMARY))
+                        let name_btn = Button::new(RichText::new(&item.name).size(10.5).color(COLOR_TEXT_PRIMARY).strong())
                             .fill(COLOR_BG_PANEL_ALT);
-                        if ui.add(name_btn).double_clicked() {
+                        let res = ui.add(name_btn).on_hover_text("Click to load into selected track");
+                        if res.clicked() || res.double_clicked() {
                             action.load_item = Some(item_clone);
                         }
                     });
@@ -479,105 +511,183 @@ pub fn render_browser_panel(ui: &mut Ui, state: &mut BrowserState) -> BrowserAct
             return;
         }
 
-        // 1. Instant Search Filter Bar
+        // 1. Instant Search Filter Bar with Tags Toggle on same row
         ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing = vec2(4.0, 0.0);
             ui.label(RichText::new("🔍").size(11.0).color(COLOR_TEXT_MUTED));
             ui.add(
                 TextEdit::singleline(&mut state.search_query)
-                    .hint_text("Search library...")
-                    .desired_width(ui.available_width() - 10.0),
+                    .hint_text("Search synths, 909, FX...")
+                    .desired_width(ui.available_width() - 86.0),
             );
+
+            let has_tags = state.selected_tag.is_some() || !state.active_tags.is_empty();
+            let tag_text = if has_tags {
+                "🏷 Tags (Active)"
+            } else {
+                "🏷 Tags"
+            };
+            let tag_color = if has_tags { COLOR_AMBER } else { COLOR_TEXT_MUTED };
+            let tag_btn = Button::new(RichText::new(tag_text).size(9.5).color(tag_color))
+                .fill(if state.show_tags_drawer { COLOR_BG_PANEL_ALT } else { COLOR_BG_SURFACE })
+                .stroke(Stroke::new(1.0_f32, if has_tags { COLOR_AMBER } else { COLOR_BORDER }));
+            if ui.add(tag_btn).on_hover_text("Toggle Tag Filters Drawer").clicked() {
+                state.show_tags_drawer = !state.show_tags_drawer;
+            }
         });
+
+        // 2. Tags Drawer (collapsible wrap grid, only visible when show_tags_drawer is true)
+        if state.show_tags_drawer {
+            ui.add_space(3.0);
+            ui.horizontal_wrapped(|ui| {
+                ui.spacing_mut().item_spacing = vec2(3.0, 3.0);
+                for &tag in &ALL_TAGS {
+                    let is_active = state.active_tags.iter().any(|t| t == tag)
+                        || state.selected_tag.as_deref() == Some(tag);
+                    let (fill, text_color, border_color) = if is_active {
+                        (COLOR_BG_PANEL_ALT, COLOR_AMBER, COLOR_AMBER)
+                    } else {
+                        (COLOR_BG_SURFACE, COLOR_TEXT_MUTED, COLOR_BORDER)
+                    };
+
+                    let pill = Button::new(RichText::new(tag).size(9.0).color(text_color))
+                        .fill(fill)
+                        .stroke(Stroke::new(1.0_f32, border_color));
+
+                    if ui.add(pill).clicked() {
+                        state.toggle_tag(tag);
+                    }
+                }
+            });
+            ui.add_space(2.0);
+        }
 
         ui.add_space(4.0);
-
-        // 2. Tag Filter Pills (Live 12 Horizontal Multi-Select Buttons)
-        ui.label(RichText::new("Tags:").size(10.0).color(COLOR_TEXT_MUTED));
-        ui.horizontal_wrapped(|ui| {
-            ui.spacing_mut().item_spacing = vec2(4.0, 4.0);
-            for &tag in &ALL_TAGS {
-                let is_active = state.active_tags.iter().any(|t| t == tag);
-                let (fill, text_color, border_color) = if is_active {
-                    (COLOR_BG_PANEL_ALT, COLOR_AMBER, COLOR_AMBER)
-                } else {
-                    (COLOR_BG_SURFACE, COLOR_TEXT_MUTED, COLOR_BORDER)
-                };
-
-                let pill = Button::new(RichText::new(tag).size(9.0).color(text_color))
-                    .fill(fill)
-                    .stroke(Stroke::new(1.0_f32, border_color));
-
-                if ui.add(pill).clicked() {
-                    state.toggle_tag(tag);
-                }
-            }
-        });
-
-        ui.add_space(6.0);
         ui.separator();
 
-        // 3. Category Tree Navigation
+        // 3. Category Navigation (Unclipped 2-column egui::Grid, no vertical scroll)
         ui.label(RichText::new("Categories:").size(10.0).color(COLOR_TEXT_MUTED));
-        ScrollArea::vertical().max_height(140.0).show(ui, |ui| {
-            for &cat in &BrowserCategory::ALL {
-                let is_sel = state.selected_category == cat && state.search_query.is_empty();
-                let cat_color = if is_sel { COLOR_AMBER } else { COLOR_TEXT_PRIMARY };
-                let cat_btn = Button::new(RichText::new(format!("📁 {}", cat.name())).size(10.5).color(cat_color))
-                    .fill(if is_sel { COLOR_BG_PANEL_ALT } else { Color32::TRANSPARENT });
 
-                if ui.add(cat_btn).clicked() {
-                    state.selected_category = cat;
-                    state.search_query.clear();
+        let all_cats_sel = state.show_all_categories && state.search_query.is_empty();
+        let all_cats_color = if all_cats_sel { COLOR_AMBER } else { COLOR_TEXT_PRIMARY };
+        let all_cats_btn = Button::new(
+            RichText::new("✨ All Categories")
+                .size(10.0)
+                .color(all_cats_color)
+                .strong(),
+        )
+        .min_size(vec2(ui.available_width(), 22.0))
+        .fill(if all_cats_sel { COLOR_BG_PANEL_ALT } else { COLOR_BG_SURFACE })
+        .stroke(Stroke::new(1.0_f32, if all_cats_sel { COLOR_AMBER } else { COLOR_BORDER }));
+
+        if ui.add(all_cats_btn).clicked() {
+            state.show_all_categories = true;
+            state.search_query.clear();
+        }
+
+        ui.add_space(2.0);
+
+        egui::Grid::new("browser_categories_grid")
+            .num_columns(2)
+            .spacing(vec2(4.0, 3.0))
+            .show(ui, |ui| {
+                let col_width = ((ui.available_width() - 4.0) / 2.0).max(88.0);
+                for chunk in BrowserCategory::all().chunks(2) {
+                    for &cat in chunk {
+                        let is_sel = !state.show_all_categories
+                            && state.selected_category == cat
+                            && state.search_query.is_empty();
+                        let cat_color = if is_sel { COLOR_AMBER } else { COLOR_TEXT_PRIMARY };
+                        let cat_btn = Button::new(RichText::new(cat.icon_label()).size(10.0).color(cat_color))
+                            .min_size(vec2(col_width, 22.0))
+                            .fill(if is_sel { COLOR_BG_PANEL_ALT } else { COLOR_BG_SURFACE })
+                            .stroke(Stroke::new(1.0_f32, if is_sel { COLOR_AMBER } else { COLOR_BORDER }));
+
+                        if ui.add(cat_btn).clicked() {
+                            state.selected_category = cat;
+                            state.show_all_categories = false;
+                            state.search_query.clear();
+                        }
+                    }
+                    ui.end_row();
                 }
-            }
-        });
+            });
 
+        ui.add_space(4.0);
         ui.separator();
 
-        // 4. Item List with Double-Click Load & "Find Similar"
+        // 4. Results List with entire remaining vertical height
         let filtered: Vec<BrowserItem> = state.filtered_items().into_iter().cloned().collect();
-        let count_str = format!("Items ({})", filtered.len());
-        ui.label(RichText::new(count_str).size(10.5).color(COLOR_TEXT_MUTED));
+        let count_str = format!("RESULTS ({})", filtered.len());
+        ui.label(RichText::new(count_str).size(10.0).color(COLOR_TEXT_MUTED).strong());
+        ui.add_space(2.0);
 
-        ScrollArea::vertical().max_height(260.0).show(ui, |ui| {
-            if filtered.is_empty() {
-                ui.label(RichText::new("No matching items found").size(10.0).color(COLOR_TEXT_MUTED));
-            } else {
-                for item in filtered {
-                    let is_sel = state.selected_item_id.as_deref() == Some(&item.id);
-                    let item_clone = item.clone();
+        ScrollArea::vertical()
+            .id_salt("browser_items_scroll")
+            .auto_shrink([false, false])
+            .show(ui, |ui| {
+                if filtered.is_empty() {
+                    ui.label(RichText::new("No matching items found").size(10.0).color(COLOR_TEXT_MUTED));
+                } else {
+                    for item in filtered {
+                        let is_sel = state.selected_item_id.as_deref() == Some(&item.id);
+                        let item_clone = item.clone();
 
-                    ui.horizontal(|ui| {
-                        // Quick-load button
-                        if ui.add(Button::new(RichText::new("+").size(10.0).color(COLOR_GREEN))).clicked() {
-                            action.load_item = Some(item_clone.clone());
-                        }
+                        ui.horizontal(|ui| {
+                            ui.spacing_mut().item_spacing = vec2(3.0, 0.0);
 
-                        // Item name button
-                        let name_color = if is_sel { COLOR_AMBER } else { COLOR_TEXT_PRIMARY };
-                        let name_btn = Button::new(RichText::new(&item.name).size(11.0).color(name_color))
-                            .fill(if is_sel { COLOR_BG_PANEL_ALT } else { Color32::TRANSPARENT });
-
-                        let res = ui.add(name_btn);
-                        if res.clicked() {
-                            state.selected_item_id = Some(item.id.clone());
-                        }
-                        if res.double_clicked() {
-                            action.load_item = Some(item_clone.clone());
-                        }
-
-                        // Similarity search icon (≈)
-                        ui.with_layout(Layout::right_to_left(egui::Align::Center), |ui| {
-                            let sim_btn = Button::new(RichText::new("≈").size(11.0).color(COLOR_CYAN));
-                            if ui.add(sim_btn).on_hover_text("Find Similar Sounds").clicked() {
-                                state.find_similar_sounds(&item.id);
-                                action.find_similar = Some(item.id.clone());
+                            // Favorite star button
+                            let is_fav = state.favorites.contains(&item.id);
+                            let star_text = if is_fav { "★" } else { "☆" };
+                            let star_color = if is_fav { COLOR_AMBER } else { COLOR_TEXT_MUTED };
+                            let star_btn = Button::new(RichText::new(star_text).size(11.0).color(star_color))
+                                .fill(Color32::TRANSPARENT);
+                            if ui.add(star_btn).on_hover_text("Toggle Favorite").clicked() {
+                                if is_fav {
+                                    state.favorites.remove(&item.id);
+                                } else {
+                                    state.favorites.insert(item.id.clone());
+                                }
                             }
+
+                            // Quick-load button "+ Load"
+                            let load_btn = Button::new(RichText::new("+ Load").size(9.0).color(COLOR_GREEN))
+                                .fill(COLOR_BG_SURFACE)
+                                .stroke(Stroke::new(1.0_f32, COLOR_BORDER));
+                            if ui.add(load_btn).on_hover_text("Click to load into selected track").clicked() {
+                                state.selected_item_id = Some(item.id.clone());
+                                action.load_item = Some(item_clone.clone());
+                            }
+
+                            // Item name in bold
+                            let name_color = if is_sel { COLOR_AMBER } else { COLOR_TEXT_PRIMARY };
+                            let name_btn = Button::new(RichText::new(&item.name).size(10.5).color(name_color).strong())
+                                .fill(if is_sel { COLOR_BG_PANEL_ALT } else { Color32::TRANSPARENT });
+                            let res = ui.add(name_btn).on_hover_text("Click to load into selected track");
+                            if res.clicked() || res.double_clicked() {
+                                state.selected_item_id = Some(item.id.clone());
+                                action.load_item = Some(item_clone.clone());
+                            }
+
+                            // Right-aligned elements: Tag badge + Similarity button
+                            ui.with_layout(Layout::right_to_left(egui::Align::Center), |ui| {
+                                // Similarity search icon (≈)
+                                let sim_btn = Button::new(RichText::new("≈").size(11.0).color(COLOR_CYAN))
+                                    .fill(Color32::TRANSPARENT);
+                                if ui.add(sim_btn).on_hover_text("Find Similar Sounds").clicked() {
+                                    state.find_similar_sounds(&item.id);
+                                    action.find_similar = Some(item.id.clone());
+                                }
+
+                                // Subtle tag badge
+                                if let Some(first_tag) = item.tags.first() {
+                                    ui.label(RichText::new(first_tag).size(9.0).color(COLOR_TEXT_MUTED));
+                                }
+                            });
                         });
-                    });
+                    }
                 }
-            }
-        });
+            });
     });
 
     action
@@ -627,5 +737,24 @@ mod tests {
         let ops = state.filtered_items();
         assert_eq!(ops.len(), 1);
         assert_eq!(ops[0].name, "Operator");
+    }
+
+    #[test]
+    fn test_browser_tags_drawer_and_all_categories() {
+        let mut state = BrowserState::default();
+        assert!(!state.show_tags_drawer);
+        assert!(!state.show_all_categories);
+        assert_eq!(BrowserCategory::all().len(), 10);
+
+        // All categories shows all items regardless of category
+        state.show_all_categories = true;
+        let all_items = state.filtered_items();
+        assert_eq!(all_items.len(), state.items.len());
+
+        // Favorites functionality
+        state.favorites.insert("inst_wavetable".into());
+        assert!(state.favorites.contains("inst_wavetable"));
+        state.favorites.remove("inst_wavetable");
+        assert!(!state.favorites.contains("inst_wavetable"));
     }
 }

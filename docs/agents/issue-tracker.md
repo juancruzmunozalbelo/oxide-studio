@@ -1,6 +1,6 @@
 # Issue tracker: GitHub
 
-Issues and specs for this repo (`juancruzmunozalbelo/aruston`) live as GitHub issues. Use the `gh` CLI for all operations.
+Issues and specs for this repo (`juancruzmunozalbelo/oxide-studio`) live as GitHub issues. Use the `gh` CLI for all operations.
 
 ## Conventions
 

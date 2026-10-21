@@ -6,9 +6,15 @@
 //! - Verification of exported audio duration (>= 4.0s), RMS energy (> 0.02), and zero NaN/Inf
 
 pub mod renderer;
+pub mod stems;
 pub mod wav_writer;
 
 pub use renderer::DemoArrangementRenderer;
+pub use stems::{
+    export_all_tracks_as_stems, export_remix_stems, export_remix_stems_from_wav,
+    separate_audio_into_4_stems, separate_audio_streams, separate_interleaved_samples,
+    BounceError, RemixStemsFiles, StemSeparationResult,
+};
 pub use wav_writer::WavWriter;
 
 #[cfg(test)]
