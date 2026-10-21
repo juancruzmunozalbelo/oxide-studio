@@ -52,7 +52,7 @@ impl BrowserCategory {
             BrowserCategory::Clips => "▶ Clips",
             BrowserCategory::Samples => "≈ Samples",
             BrowserCategory::Grooves => "♫ Grooves",
-            BrowserCategory::Templates => "≡ Templates",
+            BrowserCategory::Templates => "# Templates",
         }
     }
 

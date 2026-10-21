@@ -14,7 +14,7 @@
 //! - Real-time zero-allocation audio engine integration with telemetry polling
 
 use egui::{
-    vec2, Button, CentralPanel, Context, Layout, RichText, SidePanel, TopBottomPanel,
+    vec2, Button, CentralPanel, Color32, Context, Layout, RichText, SidePanel, Stroke, TopBottomPanel,
 };
 use ableton_audio::{
     AudioEngine, AudioEngineProcessor, AudioStreamHandle, PARAM_BPM,
@@ -31,14 +31,14 @@ use ableton_timeline::{
 use crate::keyboard::{ComputerKeyboardController, KeyboardMode};
 use crate::panels::{
     render_arrangement_timeline, render_browser_panel, render_clip_view, render_device_chain_view,
-    render_drum_sequencer, render_piano_roll, render_session_matrix, render_top_control_bar,
+    render_drum_sequencer, render_session_matrix, render_top_control_bar,
     BrowserState, ClipViewState, CrossfaderAssign,
     DeviceChainViewState, DeviceKind, GuiDeviceModule, GuiReturnTrack,
     GuiTrackState, LaunchQuantization, SessionMixerSections,
     SynthControlsState, TimelineGuiState,
 };
 use crate::theme::{
-    apply_dark_carbon_theme, COLOR_AMBER, COLOR_CYAN, COLOR_GREEN, COLOR_TEXT_MUTED,
+    apply_dark_carbon_theme, COLOR_AMBER, COLOR_CYAN, COLOR_GREEN, COLOR_TEXT_DIM, COLOR_TEXT_MUTED,
 };
 use crate::visualizers::{XyPerformPadState, XyPerformPadWidget};
 
@@ -1120,7 +1120,237 @@ impl AbletonStudioApp {
                 }
             });
 
-        // 4. Left Collapsible Browser Panel (220-270px width)
+        // 4a. Pinned Full-Width Status / Info Bar at the absolute bottom (18px, isolated TopBottomPanel so deck never collides)
+        let status_bar_h = 18.0_f32;
+        TopBottomPanel::bottom("studio_status_bar")
+            .exact_height(status_bar_h)
+            .frame(
+                egui::Frame::none()
+                    .fill(Color32::from_rgb(0x1e, 0x1e, 0x1e))
+                    .stroke(Stroke::new(1.0_f32, Color32::from_rgb(0x11, 0x11, 0x11)))
+                    .inner_margin(egui::Margin::symmetric(8.0, 1.0)),
+            )
+            .resizable(false)
+            .show(ctx, |ui| {
+                ui.horizontal_centered(|ui| {
+                    ui.spacing_mut().item_spacing = vec2(6.0, 0.0);
+                    ui.label(RichText::new("▶").size(9.0).color(COLOR_AMBER));
+                    ui.label(RichText::new(&self.status_message).size(10.0).color(COLOR_TEXT_MUTED));
+                    ui.with_layout(Layout::right_to_left(egui::Align::Center), |ui| {
+                        let engine_txt = if self.mock_processor.is_some() {
+                            "DSP: Mock 44.1kHz"
+                        } else {
+                            "DSP: CoreAudio 44.1kHz"
+                        };
+                        ui.label(RichText::new(engine_txt).size(9.5).color(COLOR_TEXT_DIM));
+                    });
+                });
+            });
+
+        // 4b. Merged Full-Width Bottom Detail Deck (exact height above status bar, spans 100% window width)
+        let detail_deck_h = (budget.bottom_deck_height - status_bar_h).max(162.0);
+        TopBottomPanel::bottom("bottom_detail_panel")
+            .exact_height(detail_deck_h)
+            .frame(
+                egui::Frame::none()
+                    .fill(crate::theme::COLOR_SURFACE_AREA)
+                    .stroke(Stroke::new(1.0_f32, crate::theme::COLOR_CONTROL_CONTRAST_FRAME))
+                    .inner_margin(egui::Margin::symmetric(6.0, 3.0)),
+            )
+            .resizable(false)
+            .show(ctx, |ui| {
+                // Hard clip guard so child content can never bleed outside the detail deck
+                ui.set_clip_rect(ui.max_rect());
+
+                // A. Draggable StudioHorizontalSplitter at the top edge of bottom deck
+                let splitter_id = egui::Id::new("studio_horizontal_splitter");
+                let (_dragged_h, splitter_resp) = crate::layout::StudioHorizontalSplitter::show_with_state(
+                    ui,
+                    splitter_id,
+                    budget.total_rect.height(),
+                );
+                if splitter_resp.dragged() || splitter_resp.double_clicked() {
+                    ui.ctx().request_repaint();
+                }
+
+                // B. Deck Tabs Selector & Tab Contents
+                ui.vertical(|ui| {
+                    ui.spacing_mut().item_spacing = vec2(4.0, 3.0);
+                    // Header Tabs Selector
+                    ui.horizontal(|ui| {
+                        ui.spacing_mut().item_spacing = vec2(6.0, 0.0);
+
+                        let clip_btn = Button::new(
+                            RichText::new("Clip View (Piano Roll / Warping)").size(10.5).color(
+                                if self.deck_tab == DeckTab::ClipView {
+                                    COLOR_AMBER
+                                } else {
+                                    COLOR_TEXT_MUTED
+                                },
+                            ),
+                        );
+                        if ui.add(clip_btn).clicked() {
+                            self.deck_tab = DeckTab::ClipView;
+                        }
+
+                        let dev_btn = Button::new(RichText::new("Device Chain View").size(10.5).color(
+                            if self.deck_tab == DeckTab::DeviceRack {
+                                COLOR_CYAN
+                            } else {
+                                COLOR_TEXT_MUTED
+                            },
+                        ));
+                        if ui.add(dev_btn).clicked() {
+                            self.deck_tab = DeckTab::DeviceRack;
+                        }
+
+                        let seq_btn = Button::new(
+                            RichText::new("16-Step 909 Sequencer").size(10.5).color(
+                                if self.deck_tab == DeckTab::DrumSequencer {
+                                    COLOR_GREEN
+                                } else {
+                                    COLOR_TEXT_MUTED
+                                },
+                            ),
+                        );
+                        if ui.add(seq_btn).clicked() {
+                            self.deck_tab = DeckTab::DrumSequencer;
+                        }
+
+                        let xy_btn = Button::new(RichText::new("XY Perform Pad").size(10.5).color(
+                            if self.deck_tab == DeckTab::XyPad {
+                                COLOR_AMBER
+                            } else {
+                                COLOR_TEXT_MUTED
+                            },
+                        ));
+                        if ui.add(xy_btn).clicked() {
+                            self.deck_tab = DeckTab::XyPad;
+                        }
+
+                        // Keyboard Mode Indicator on right
+                        ui.with_layout(Layout::right_to_left(egui::Align::Center), |ui| {
+                            let kb_text = match self.keyboard.mode {
+                                KeyboardMode::Piano => {
+                                    format!("Keys: Piano (Octave {})", self.keyboard.octave_offset)
+                                }
+                                KeyboardMode::Isomorphic => "Keys: Wicki-Hayden Isomorphic".into(),
+                            };
+                            let kb_btn =
+                                Button::new(RichText::new(kb_text).size(9.5).color(COLOR_TEXT_MUTED));
+                            if ui.add(kb_btn).clicked() {
+                                self.keyboard.mode = match self.keyboard.mode {
+                                    KeyboardMode::Piano => KeyboardMode::Isomorphic,
+                                    KeyboardMode::Isomorphic => KeyboardMode::Piano,
+                                };
+                            }
+                        });
+                    });
+
+                    ui.separator();
+
+                    // Bottom Tab Content
+                    match self.deck_tab {
+                        DeckTab::ClipView => {
+                            let clip_act = render_clip_view(
+                                ui,
+                                &mut self.clip_view,
+                                &mut self.midi_pattern,
+                                &self.global_scale,
+                                self.current_beat,
+                            );
+                            if let Some((note, vel)) = clip_act.audition_note {
+                                let sel_track = self.selected_track;
+                                self.send_command(AudioCommand::NoteOn {
+                                    track_id: sel_track,
+                                    note,
+                                    velocity: vel,
+                                });
+                            }
+                            if let Some(new_len) = clip_act.loop_length_changed {
+                                self.status_message = format!("Clip Loop Length: {:.0} Beats", new_len);
+                                self.write_back_active_clip();
+                            } else if clip_act.pattern_mutated {
+                                self.status_message = "MIDI Pattern Updated via Live 12 Tool".into();
+                                self.write_back_active_clip();
+                            } else if clip_act.warp_marker_moved {
+                                self.status_message = "Audio Warp Marker Adjusted".into();
+                            }
+                        }
+                        DeckTab::DeviceRack => {
+                            let dev_act = render_device_chain_view(
+                                ui,
+                                &mut self.device_chain,
+                                &self.telemetry.spectrum_bins,
+                            );
+                            if self.selected_track < self.track_device_chains.len() {
+                                self.track_device_chains[self.selected_track] = self.device_chain.clone();
+                            }
+                            if let Some(kind) = dev_act.insert_device {
+                                self.status_message = format!("Inserted Device: {}", kind.name());
+                            } else if let Some(idx) = dev_act.device_parameter_changed {
+                                self.status_message =
+                                    format!("Device #{} Parameter Modulated", idx + 1);
+                            }
+                        }
+                        DeckTab::DrumSequencer => {
+                            let current_16th_step = ((self.current_beat * 4.0).floor() as usize) % 16;
+                            let seq_action = render_drum_sequencer(
+                                ui,
+                                &mut self.drum_pattern,
+                                current_16th_step,
+                            );
+
+                            if let Some(pad_idx) = seq_action.pad_triggered {
+                                self.send_command(AudioCommand::NoteOn {
+                                    track_id: 1,
+                                    note: 36 + pad_idx,
+                                    velocity: 110,
+                                });
+                            }
+
+                            if seq_action.pattern_mutated || seq_action.step_toggled.is_some() {
+                                self.write_back_active_clip();
+                            }
+                        }
+                        DeckTab::XyPad => {
+                            let rms_bloom =
+                                self.telemetry.master_rms_l.max(self.telemetry.master_rms_r);
+                            let xy_h = ui.available_height().clamp(130.0, 210.0);
+                            let xy_widget = XyPerformPadWidget::new(
+                                &mut self.xy_state,
+                                self.current_time_seconds,
+                                rms_bloom,
+                                vec2(ui.available_width().min(420.0), xy_h),
+                            );
+                            let response = xy_widget.show(ui);
+
+                            if response.changed() {
+                                let norm_x = self.xy_state.x;
+                                let norm_y = self.xy_state.y;
+
+                                self.send_command(AudioCommand::SetParameter {
+                                    track_id: 0,
+                                    param_id: 100,
+                                    value: norm_x,
+                                });
+                                self.send_command(AudioCommand::SetParameter {
+                                    track_id: 0,
+                                    param_id: 101,
+                                    value: norm_y,
+                                });
+
+                                if let Some(ref handle) = self.audio_handle {
+                                    handle.params.set(PARAM_SYNTH_MACRO_X, norm_x);
+                                    handle.params.set(PARAM_SYNTH_MACRO_Y, norm_y);
+                                }
+                            }
+                        }
+                    }
+                });
+            });
+
+        // 5. Left Collapsible Browser Panel (220-270px width)
         if !self.browser.is_collapsed {
             SidePanel::left("left_browser_panel")
                 .exact_width(budget.left_browser_width)
@@ -1148,7 +1378,7 @@ impl AbletonStudioApp {
                 });
         }
 
-        // 5. Right AI Copilot Panel (260-320px width)
+        // 6. Right AI Copilot Panel (260-320px width)
         if self.copilot_open {
             SidePanel::right("aruston_ai_copilot_panel")
                 .exact_width(budget.right_copilot_width)
@@ -1157,185 +1387,6 @@ impl AbletonStudioApp {
                     crate::panels::ai_chat::render_ai_copilot_panel(ui, self);
                 });
         }
-
-        // 6. Bottom Detail View Panel (210-260px, <= 34% of viewport height)
-        TopBottomPanel::bottom("bottom_detail_panel")
-            .exact_height(budget.bottom_deck_height)
-            .show(ctx, |ui| {
-                // Header Tabs Selector
-                ui.horizontal(|ui| {
-                    ui.spacing_mut().item_spacing = vec2(6.0, 0.0);
-
-                    let clip_btn = Button::new(
-                        RichText::new("Clip View (Piano Roll / Warping)").size(11.0).color(
-                            if self.deck_tab == DeckTab::ClipView {
-                                COLOR_AMBER
-                            } else {
-                                COLOR_TEXT_MUTED
-                            },
-                        ),
-                    );
-                    if ui.add(clip_btn).clicked() {
-                        self.deck_tab = DeckTab::ClipView;
-                    }
-
-                    let dev_btn = Button::new(RichText::new("Device Chain View").size(11.0).color(
-                        if self.deck_tab == DeckTab::DeviceRack {
-                            COLOR_CYAN
-                        } else {
-                            COLOR_TEXT_MUTED
-                        },
-                    ));
-                    if ui.add(dev_btn).clicked() {
-                        self.deck_tab = DeckTab::DeviceRack;
-                    }
-
-                    let seq_btn = Button::new(
-                        RichText::new("16-Step 909 Sequencer").size(11.0).color(
-                            if self.deck_tab == DeckTab::DrumSequencer {
-                                COLOR_GREEN
-                            } else {
-                                COLOR_TEXT_MUTED
-                            },
-                        ),
-                    );
-                    if ui.add(seq_btn).clicked() {
-                        self.deck_tab = DeckTab::DrumSequencer;
-                    }
-
-                    let xy_btn = Button::new(RichText::new("XY Perform Pad").size(11.0).color(
-                        if self.deck_tab == DeckTab::XyPad {
-                            COLOR_AMBER
-                        } else {
-                            COLOR_TEXT_MUTED
-                        },
-                    ));
-                    if ui.add(xy_btn).clicked() {
-                        self.deck_tab = DeckTab::XyPad;
-                    }
-
-                    // Keyboard Mode Indicator on right
-                    ui.with_layout(Layout::right_to_left(egui::Align::Center), |ui| {
-                        let kb_text = match self.keyboard.mode {
-                            KeyboardMode::Piano => {
-                                format!("Keys: Piano (Octave {})", self.keyboard.octave_offset)
-                            }
-                            KeyboardMode::Isomorphic => "Keys: Wicki-Hayden Isomorphic".into(),
-                        };
-                        let kb_btn =
-                            Button::new(RichText::new(kb_text).size(10.0).color(COLOR_TEXT_MUTED));
-                        if ui.add(kb_btn).clicked() {
-                            self.keyboard.mode = match self.keyboard.mode {
-                                KeyboardMode::Piano => KeyboardMode::Isomorphic,
-                                KeyboardMode::Isomorphic => KeyboardMode::Piano,
-                            };
-                        }
-                    });
-                });
-
-                ui.separator();
-
-                // Bottom Tab Content
-                match self.deck_tab {
-                    DeckTab::ClipView => {
-                        let clip_act = render_clip_view(
-                            ui,
-                            &mut self.clip_view,
-                            &mut self.midi_pattern,
-                            &self.global_scale,
-                            self.current_beat,
-                        );
-                        if let Some((note, vel)) = clip_act.audition_note {
-                            let sel_track = self.selected_track;
-                            self.send_command(AudioCommand::NoteOn {
-                                track_id: sel_track,
-                                note,
-                                velocity: vel,
-                            });
-                        }
-                        if let Some(new_len) = clip_act.loop_length_changed {
-                            self.status_message = format!("Clip Loop Length: {:.0} Beats", new_len);
-                            self.write_back_active_clip();
-                        } else if clip_act.pattern_mutated {
-                            self.status_message = "MIDI Pattern Updated via Live 12 Tool".into();
-                            self.write_back_active_clip();
-                        } else if clip_act.warp_marker_moved {
-                            self.status_message = "Audio Warp Marker Adjusted".into();
-                        }
-                    }
-                    DeckTab::DeviceRack => {
-                        let dev_act = render_device_chain_view(
-                            ui,
-                            &mut self.device_chain,
-                            &self.telemetry.spectrum_bins,
-                        );
-                        if self.selected_track < self.track_device_chains.len() {
-                            self.track_device_chains[self.selected_track] = self.device_chain.clone();
-                        }
-                        if let Some(kind) = dev_act.insert_device {
-                            self.status_message = format!("Inserted Device: {}", kind.name());
-                        } else if let Some(idx) = dev_act.device_parameter_changed {
-                            self.status_message =
-                                format!("Device #{} Parameter Modulated", idx + 1);
-                        }
-                    }
-                    DeckTab::DrumSequencer => {
-                        let current_16th_step = ((self.current_beat * 4.0).floor() as usize) % 16;
-                        let seq_action = render_drum_sequencer(
-                            ui,
-                            &mut self.drum_pattern,
-                            current_16th_step,
-                        );
-
-                        if let Some(pad_idx) = seq_action.pad_triggered {
-                            self.send_command(AudioCommand::NoteOn {
-                                track_id: 1,
-                                note: 36 + pad_idx,
-                                velocity: 110,
-                            });
-                        }
-
-                        if seq_action.pattern_mutated || seq_action.step_toggled.is_some() {
-                            self.write_back_active_clip();
-                        }
-
-                        ui.add_space(6.0);
-                        render_piano_roll(ui, &mut self.midi_pattern, self.current_beat);
-                    }
-                    DeckTab::XyPad => {
-                        let rms_bloom =
-                            self.telemetry.master_rms_l.max(self.telemetry.master_rms_r);
-                        let xy_widget = XyPerformPadWidget::new(
-                            &mut self.xy_state,
-                            self.current_time_seconds,
-                            rms_bloom,
-                            vec2(ui.available_width().min(420.0), 180.0),
-                        );
-                        let response = xy_widget.show(ui);
-
-                        if response.changed() {
-                            let norm_x = self.xy_state.x;
-                            let norm_y = self.xy_state.y;
-
-                            self.send_command(AudioCommand::SetParameter {
-                                track_id: 0,
-                                param_id: 100,
-                                value: norm_x,
-                            });
-                            self.send_command(AudioCommand::SetParameter {
-                                track_id: 0,
-                                param_id: 101,
-                                value: norm_y,
-                            });
-
-                            if let Some(ref handle) = self.audio_handle {
-                                handle.params.set(PARAM_SYNTH_MACRO_X, norm_x);
-                                handle.params.set(PARAM_SYNTH_MACRO_Y, norm_y);
-                            }
-                        }
-                    }
-                }
-            });
 
         // 7. Center Workspace Panel (receives >= 55% of height)
         CentralPanel::default().show(ctx, |ui| {
@@ -1468,10 +1519,16 @@ impl AbletonStudioApp {
 impl eframe::App for AbletonStudioApp {
     fn update(&mut self, ctx: &Context, _frame: &mut eframe::Frame) {
         let screen_rect = ctx.screen_rect();
-        let budget = crate::layout::ViewportBudget::compute(
+        let splitter_id = egui::Id::new("studio_horizontal_splitter");
+        let splitter_override = ctx.data_mut(|d| {
+            d.get_temp::<crate::layout::StudioSplitterState>(splitter_id)
+                .and_then(|s| if s.is_overridden { Some(s.bottom_deck_height) } else { None })
+        });
+        let budget = crate::layout::ViewportBudget::compute_with_deck_height(
             screen_rect,
             !self.browser.is_collapsed,
             self.copilot_open,
+            splitter_override,
         );
         self.render_frame_with_budget(ctx, &budget);
     }

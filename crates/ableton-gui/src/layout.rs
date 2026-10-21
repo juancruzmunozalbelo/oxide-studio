@@ -187,6 +187,15 @@ impl ViewportBudget {
         let max_y = self.total_rect.bottom() - self.bottom_deck_height;
         Rect::from_min_max(pos2(min_x, min_y), pos2(max_x.max(min_x), max_y.max(min_y)))
     }
+
+    /// Full-width bottom detail deck rect in root window coordinates.
+    pub fn bottom_deck_rect(&self) -> Rect {
+        let min_x = self.total_rect.left();
+        let min_y = self.total_rect.bottom() - self.bottom_deck_height;
+        let max_x = self.total_rect.right();
+        let max_y = self.total_rect.bottom();
+        Rect::from_min_max(pos2(min_x, min_y), pos2(max_x, max_y))
+    }
 }
 
 /// Budget allocation for Session View center workspace.
@@ -574,5 +583,42 @@ mod tests {
 
         assert_eq!(current_h, 240.0);
         assert!(!overridden);
+    }
+
+    #[test]
+    fn test_bottom_deck_rect_full_width_invariants() {
+        let resolutions = [
+            ("960x600", vec2(960.0, 600.0)),
+            ("1280x800", vec2(1280.0, 800.0)),
+            ("1440x900", vec2(1440.0, 900.0)),
+            ("1920x1080", vec2(1920.0, 1080.0)),
+        ];
+
+        for (name, size) in resolutions {
+            let screen_rect = Rect::from_min_size(pos2(0.0, 0.0), size);
+            let budget = ViewportBudget::compute(screen_rect, true, true);
+            let deck_rect = budget.bottom_deck_rect();
+
+            // Invariant 1: Deck spans 100% of window width from left to right
+            assert_eq!(
+                deck_rect.width(),
+                size.x,
+                "{}: bottom deck width ({}) must match screen width ({})",
+                name,
+                deck_rect.width(),
+                size.x
+            );
+            assert_eq!(deck_rect.left(), 0.0);
+            assert_eq!(deck_rect.right(), size.x);
+
+            // Invariant 2: Deck height matches budget
+            assert_eq!(deck_rect.height(), budget.bottom_deck_height);
+
+            // Invariant 3: Deck bottom matches screen bottom
+            assert_eq!(deck_rect.bottom(), size.y);
+
+            // Invariant 4: Deck top aligns with center workspace bottom
+            assert_eq!(deck_rect.top(), budget.center_rect().bottom());
+        }
     }
 }

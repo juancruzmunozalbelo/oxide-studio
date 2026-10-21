@@ -9,7 +9,7 @@ use ableton_timeline::{
     ArrangementTimeline, AutomationPoint, ClipPattern,
 };
 use crate::theme::{
-    COLOR_AMBER, COLOR_BG_PANEL_ALT, COLOR_BG_SURFACE, COLOR_BG_VOID, COLOR_BORDER, COLOR_CYAN,
+    COLOR_AMBER, COLOR_BG_PANEL_ALT, COLOR_BG_SURFACE, COLOR_BORDER, COLOR_CYAN,
     COLOR_GREEN, COLOR_TEXT_MUTED, COLOR_TEXT_PRIMARY,
 };
 
@@ -98,7 +98,7 @@ pub fn render_arrangement_timeline(
 
             // Loop Toggle & Controls
             let loop_col = if gui_state.loop_enabled { COLOR_AMBER } else { COLOR_TEXT_MUTED };
-            let loop_btn = Button::new(RichText::new("⇄ Loop").size(10.5).color(loop_col))
+            let loop_btn = Button::new(RichText::new("• Loop").size(10.5).color(loop_col))
                 .fill(if gui_state.loop_enabled { COLOR_BG_PANEL_ALT } else { COLOR_BG_SURFACE });
             if ui.add(loop_btn).clicked() {
                 gui_state.loop_enabled = !gui_state.loop_enabled;
@@ -147,7 +147,7 @@ pub fn render_arrangement_timeline(
         let pixels_per_beat = gui_state.zoom_pixels_per_beat;
         let track_header_w = 120.0;
         let track_start_x = rect.left() + track_header_w;
-        let ruler_height = 24.0;
+        let ruler_height = 28.0;
 
         let track_h = 44.0;
 
@@ -201,56 +201,59 @@ pub fn render_arrangement_timeline(
         if ui.is_rect_visible(rect) {
             let painter = ui.painter_at(rect);
 
-            // Canvas background
-            painter.rect_filled(rect, 2.0, COLOR_BG_VOID);
-            painter.rect_stroke(rect, 2.0, Stroke::new(1.0_f32, COLOR_BORDER));
+            // Canvas background (Live 12 SurfaceArea #242424)
+            painter.rect_filled(rect, 0.0, COLOR_BG_SURFACE);
+            painter.rect_stroke(rect, 0.0, Stroke::new(1.0_f32, COLOR_BORDER));
 
-            // Ruler Header Background
+            // Ruler Header Background (Two-Tier: Top 13px Locator Lane, Bottom 15px Bar Number Lane)
             let ruler_rect = Rect::from_min_max(
                 pos2(rect.left(), rect.top()),
                 pos2(rect.right(), rect.top() + ruler_height),
             );
             painter.rect_filled(ruler_rect, 0.0, COLOR_BG_PANEL_ALT);
             painter.line_segment(
+                [pos2(rect.left(), rect.top() + 13.0), pos2(rect.right(), rect.top() + 13.0)],
+                Stroke::new(1.0_f32, Color32::from_rgb(0x24, 0x24, 0x24)),
+            );
+            painter.line_segment(
                 [pos2(rect.left(), rect.top() + ruler_height), pos2(rect.right(), rect.top() + ruler_height)],
                 Stroke::new(1.0_f32, COLOR_BORDER),
             );
 
-            // Bar tick lines & Locators across timeline
+            // Locators in Upper Tier (y = top + 1.0 .. top + 12.0 — never collides with Bar numbers!)
+            for (loc_beat, name) in &gui_state.locators {
+                let lx = track_start_x + *loc_beat as f32 * pixels_per_beat;
+                if lx <= rect.right() {
+                    let flag_rect = Rect::from_min_size(pos2(lx, rect.top() + 1.0), vec2(54.0, 11.0));
+                    painter.rect_filled(flag_rect, 1.0, Color32::from_rgb(0x1e, 0x1e, 0x1e));
+                    painter.text(
+                        pos2(flag_rect.left() + 3.0, flag_rect.center().y),
+                        egui::Align2::LEFT_CENTER,
+                        format!("▶ {}", name),
+                        FontId::monospace(7.5),
+                        COLOR_CYAN,
+                    );
+                }
+            }
+
+            // Bar tick lines & Bar numbers in Lower Tier (y = top + 14.5)
             let total_bars = ((rect.width() - track_header_w) / (pixels_per_beat * 4.0)).ceil() as usize;
             for bar in 0..=total_bars {
                 let beat = bar as f32 * 4.0;
                 let x = track_start_x + beat * pixels_per_beat;
                 if x <= rect.right() {
-                    // Bar tick in ruler
                     painter.line_segment(
-                        [pos2(x, rect.top()), pos2(x, rect.bottom())],
-                        Stroke::new(1.0_f32, Color32::from_rgb(0x18, 0x1d, 0x28)),
+                        [pos2(x, rect.top() + 13.0), pos2(x, rect.bottom())],
+                        Stroke::new(1.0_f32, Color32::from_rgb(0x1a, 0x1a, 0x1a)),
                     );
 
                     let bar_label = format!("{}.1", bar + 1);
                     painter.text(
-                        pos2(x + 4.0, rect.top() + 6.0),
+                        pos2(x + 4.0, rect.top() + 14.5),
                         egui::Align2::LEFT_TOP,
                         bar_label,
-                        FontId::new(9.5, FontFamily::Monospace),
+                        FontId::new(9.0, FontFamily::Monospace),
                         COLOR_TEXT_MUTED,
-                    );
-                }
-            }
-
-            // Locators (e.g. Intro, Groove, Drop)
-            for (loc_beat, name) in &gui_state.locators {
-                let lx = track_start_x + *loc_beat as f32 * pixels_per_beat;
-                if lx <= rect.right() {
-                    let flag_rect = Rect::from_min_size(pos2(lx, rect.top() + 2.0), vec2(40.0, 10.0));
-                    painter.rect_filled(flag_rect, 1.0, Color32::from_rgb(0x28, 0x32, 0x48));
-                    painter.text(
-                        flag_rect.center(),
-                        egui::Align2::CENTER_CENTER,
-                        name,
-                        FontId::monospace(7.5),
-                        COLOR_CYAN,
                     );
                 }
             }

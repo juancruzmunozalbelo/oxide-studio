@@ -170,7 +170,7 @@ impl StudioShortcutManager {
         let mut is_open = self.show_shortcuts_modal;
         let mut close_clicked = false;
 
-        Window::new("⌨ Ableton Live 1:1 Keyboard Shortcuts")
+        Window::new("⚡ Ableton Live 1:1 Keyboard Shortcuts")
             .open(&mut is_open)
             .collapsible(false)
             .resizable(false)

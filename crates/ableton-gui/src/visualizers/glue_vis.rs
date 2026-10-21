@@ -134,8 +134,8 @@ pub fn render_glue_canvas(painter: &Painter, rect: Rect, state: &GlueCompressorV
     painter.text(
         pos2(params_rect.left() + 8.0, params_rect.top() + 6.0),
         egui::Align2::LEFT_TOP,
-        "Cytomic SSL",
-        egui::FontId::monospace(10.5),
+        "SSL",
+        egui::FontId::monospace(9.5),
         COLOR_CYAN,
     );
 
@@ -147,13 +147,16 @@ pub fn render_glue_canvas(painter: &Painter, rect: Rect, state: &GlueCompressorV
     ];
 
     for (idx, line) in params_info.iter().enumerate() {
-        painter.text(
-            pos2(params_rect.left() + 8.0, params_rect.top() + 24.0 + idx as f32 * 14.0),
-            egui::Align2::LEFT_TOP,
-            line,
-            egui::FontId::monospace(9.0),
-            COLOR_TEXT_PRIMARY,
-        );
+        let y = params_rect.top() + 20.0 + idx as f32 * 11.0;
+        if y + 10.0 <= params_rect.bottom() {
+            painter.text(
+                pos2(params_rect.left() + 8.0, y),
+                egui::Align2::LEFT_TOP,
+                line,
+                egui::FontId::monospace(8.5),
+                COLOR_TEXT_PRIMARY,
+            );
+        }
     }
 
     // Soft Clip Indicator LED

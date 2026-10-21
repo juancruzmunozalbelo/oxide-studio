@@ -586,17 +586,17 @@ fn test_e2e_full_studio_app_headless_integration() {
     assert_eq!(app.telemetry.spectrum_bins.len(), 64);
 
     // One-Click WAV Export
-    let out_path = "/tmp/test_m11_gui_export.wav";
-    let export_res = app.export_demo_wav(out_path);
+    let out_path = format!("/tmp/test_m11_gui_export_{}.wav", std::process::id());
+    let export_res = app.export_demo_wav(&out_path);
     assert!(export_res.is_ok(), "Headless demo WAV export must succeed");
 
-    let wav_bytes = std::fs::read(out_path).expect("Exported WAV file must exist on disk");
+    let wav_bytes = std::fs::read(&out_path).expect("Exported WAV file must exist on disk");
     assert!(wav_bytes.len() > 44, "Exported WAV must be larger than 44-byte WAV header");
     assert_eq!(&wav_bytes[0..4], b"RIFF");
     assert_eq!(&wav_bytes[8..12], b"WAVE");
     assert_eq!(&wav_bytes[12..16], b"fmt ");
 
-    let _ = std::fs::remove_file(out_path);
+    let _ = std::fs::remove_file(&out_path);
 }
 
 // ============================================================================

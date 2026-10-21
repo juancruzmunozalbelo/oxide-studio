@@ -372,3 +372,75 @@ fn test_f24_full_studio_app_headless_integration_and_telemetry() {
         let _ = fs::remove_file(temp_wav);
     }
 }
+
+// =========================================================================
+// Feature 25: Anti-Breakage Layout Guard Across Splitter Extremes
+// =========================================================================
+
+#[test]
+fn test_f25_anti_breakage_layout_guard_across_splitter_extremes() {
+    use ableton_gui::app::{DeckTab, WorkspaceView};
+    use egui::{Context, RawInput};
+
+    let resolutions = [
+        vec2(1280.0, 800.0),
+        vec2(1440.0, 900.0),
+        vec2(1920.0, 1080.0),
+    ];
+    let tabs = [
+        DeckTab::ClipView,
+        DeckTab::DeviceRack,
+        DeckTab::DrumSequencer,
+        DeckTab::XyPad,
+    ];
+
+    for size in resolutions {
+        let screen_rect = Rect::from_min_size(pos2(0.0, 0.0), size);
+        let (min_deck_h, max_deck_h) = ViewportBudget::safe_deck_bounds(size.y);
+        let default_budget = ViewportBudget::compute(screen_rect, true, true);
+        let default_deck_h = default_budget.bottom_deck_height;
+
+        for deck_h in [min_deck_h, default_deck_h, max_deck_h] {
+            let budget = ViewportBudget::compute_with_deck_height(
+                screen_rect,
+                true,
+                true,
+                Some(deck_h),
+            );
+
+            for &tab in &tabs {
+                let ctx = Context::default();
+                ableton_gui::theme::apply_dark_carbon_theme(&ctx);
+
+                let mut app = AbletonStudioApp::new_mock(44100.0);
+                app.workspace_view = WorkspaceView::SessionMatrix;
+                app.deck_tab = tab;
+                app.copilot_open = true;
+
+                let raw_input = RawInput {
+                    screen_rect: Some(screen_rect),
+                    ..Default::default()
+                };
+
+                let output = ctx.run(raw_input, |ctx| {
+                    app.render_frame_with_budget(ctx, &budget);
+                });
+
+                let report = ableton_gui::layout_guard::audit_rendered_frame(screen_rect, &output.shapes);
+                assert!(
+                    report.is_clean(),
+                    "Layout report not clean at size={:?} deck_h={:.1} tab={:?}: \
+                     overflows={:?}, clipped={:?}, collisions={:?}, tofu={:?}",
+                    size,
+                    deck_h,
+                    tab,
+                    report.viewport_overflows,
+                    report.clipped_texts,
+                    report.text_collisions,
+                    report.unsupported_glyphs,
+                );
+            }
+        }
+    }
+}
+

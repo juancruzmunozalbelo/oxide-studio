@@ -14,12 +14,14 @@ use egui::{
     Stroke, Ui,
 };
 use ableton_core::{AudioTelemetry, GlobalScale, ScaleMode, TuningSystem, TuningType, ROOT_NAMES};
+pub use crate::panels::ai_chat::StudioLocale;
 use crate::theme::{
     format_bpm, format_musical_beat, COLOR_AMBER, COLOR_BG_PANEL_ALT, COLOR_BG_SURFACE,
     COLOR_BORDER, COLOR_CYAN, COLOR_GREEN, COLOR_RUBY, COLOR_TEXT_MUTED, COLOR_TEXT_PRIMARY,
 };
 use crate::visualizers::{render_oscilloscope, render_spectrum};
 
+#[derive(Debug, Clone, PartialEq, Default)]
 pub struct TopControlBarAction {
     pub toggle_play: bool,
     pub stop: bool,
@@ -35,6 +37,7 @@ pub struct TopControlBarAction {
     pub view_session: bool,
     pub view_arrangement: bool,
     pub toggle_copilot: bool,
+    pub locale_changed: Option<StudioLocale>,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -67,10 +70,11 @@ pub fn render_top_control_bar(
         view_session: false,
         view_arrangement: false,
         toggle_copilot: false,
+        locale_changed: None,
     };
 
     let avail_w = ui.available_width();
-    let is_compact = avail_w < 1100.0;
+    let is_compact = avail_w < 1360.0;
 
     ui.horizontal(|ui| {
         ui.spacing_mut().item_spacing = vec2(if is_compact { 4.0 } else { 5.0 }, 0.0);
@@ -282,6 +286,9 @@ pub fn render_top_control_bar(
         ui.with_layout(Layout::right_to_left(egui::Align::Center), |ui| {
             ui.spacing_mut().item_spacing = vec2(4.0, 0.0);
 
+            let locale_id = egui::Id::new("oxide_studio_locale");
+            let mut locale = ui.data_mut(|d| *d.get_temp_mut_or(locale_id, StudioLocale::En));
+
             // Prominent ⚡ AI Copilot toggle button
             let copilot_color = if copilot_open { COLOR_CYAN } else { COLOR_TEXT_MUTED };
             let copilot_btn = Button::new(
@@ -294,14 +301,46 @@ pub fn render_top_control_bar(
             .fill(if copilot_open { COLOR_BG_PANEL_ALT } else { COLOR_BG_SURFACE })
             .stroke(Stroke::new(1.0_f32, if copilot_open { COLOR_CYAN } else { COLOR_BORDER }));
 
-            if ui.add(copilot_btn).on_hover_text("Toggle In-App AI Copilot Studio Assistant (MCP)").clicked() {
+            if ui.add(copilot_btn).on_hover_text(if locale == StudioLocale::Es { "Abrir/Cerrar Asistente AI Copilot" } else { "Toggle In-App AI Copilot Studio Assistant (MCP)" }).clicked() {
                 action.toggle_copilot = true;
             }
 
+            // Segmented [EN | ES] Studio Locale Toggle (clean 44px total width)
+            let is_en = locale == StudioLocale::En;
+            let es_btn = Button::new(
+                RichText::new("ES")
+                    .size(9.0)
+                    .color(if !is_en { COLOR_AMBER } else { COLOR_TEXT_MUTED })
+                    .strong(),
+            )
+            .min_size(vec2(22.0, 22.0))
+            .fill(if !is_en { COLOR_BG_PANEL_ALT } else { COLOR_BG_PANEL_ALT.gamma_multiply(0.5) })
+            .stroke(Stroke::new(1.0_f32, if !is_en { COLOR_AMBER } else { COLOR_BORDER }));
+            if ui.add(es_btn).on_hover_text("Cambiar idioma de estudio a Español").clicked() && is_en {
+                locale = StudioLocale::Es;
+                ui.data_mut(|d| *d.get_temp_mut_or(locale_id, StudioLocale::Es) = StudioLocale::Es);
+                action.locale_changed = Some(locale);
+            }
+
+            let en_btn = Button::new(
+                RichText::new("EN")
+                    .size(9.0)
+                    .color(if is_en { COLOR_AMBER } else { COLOR_TEXT_MUTED })
+                    .strong(),
+            )
+            .min_size(vec2(22.0, 22.0))
+            .fill(if is_en { COLOR_BG_PANEL_ALT } else { COLOR_BG_PANEL_ALT.gamma_multiply(0.5) })
+            .stroke(Stroke::new(1.0_f32, if is_en { COLOR_AMBER } else { COLOR_BORDER }));
+            if ui.add(en_btn).on_hover_text("Switch studio language to English").clicked() && !is_en {
+                locale = StudioLocale::En;
+                ui.data_mut(|d| *d.get_temp_mut_or(locale_id, StudioLocale::En) = StudioLocale::En);
+                action.locale_changed = Some(locale);
+            }
+
             if is_compact {
-                // Responsive overflow: fold export, stems, and ALS buttons into compact "Export ▾" dropdown
+                // Responsive overflow: fold export, stems, and ALS buttons into compact "Export" dropdown
                 ComboBox::from_id_salt("transport_export_overflow_menu")
-                    .selected_text(RichText::new("Export ▾").size(10.0).color(COLOR_AMBER).strong())
+                    .selected_text(RichText::new("Export").size(10.0).color(COLOR_AMBER).strong())
                     .width(64.0)
                     .show_ui(ui, |ui| {
                         if ui.selectable_label(false, "WAV (Master Bounce)").clicked() {
@@ -492,6 +531,7 @@ mod tests {
             view_session: false,
             view_arrangement: false,
             toggle_copilot: false,
+            locale_changed: None,
         };
         assert!(!action.toggle_play);
         assert!(!action.export_als);
@@ -500,6 +540,45 @@ mod tests {
         assert!(!action.view_session);
         assert!(!action.view_arrangement);
         assert!(!action.toggle_copilot);
+        assert_eq!(action.locale_changed, None);
+
+        let default_action = TopControlBarAction::default();
+        assert_eq!(default_action, action);
+    }
+
+    #[test]
+    fn test_top_control_bar_bilingual_locale_toggle() {
+        let ctx = egui::Context::default();
+        let raw_input = egui::RawInput::default();
+        let telemetry = AudioTelemetry::default();
+        let mut bpm = 124.0;
+        let mut time_sig = (4, 4);
+        let mut metronome = false;
+        let mut arr_rec = false;
+        let mut scale = GlobalScale::default();
+        let mut tuning = TuningSystem::default();
+
+        let _ = ctx.run(raw_input, |ctx| {
+            egui::TopBottomPanel::top("top_panel_bilingual_test")
+                .exact_height(44.0)
+                .show(ctx, |ui| {
+                    let action = render_top_control_bar(
+                        ui,
+                        false,
+                        false,
+                        &mut bpm,
+                        &mut time_sig,
+                        &mut metronome,
+                        &mut arr_rec,
+                        &mut scale,
+                        &mut tuning,
+                        0.0,
+                        &telemetry,
+                        false,
+                    );
+                    assert_eq!(action.locale_changed, None);
+                });
+        });
     }
 
     #[test]

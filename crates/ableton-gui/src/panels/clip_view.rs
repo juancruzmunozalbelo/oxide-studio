@@ -6,14 +6,14 @@
 //! - Dynamic Bar Span: zero clipped notes up to 16.0+ beats with 1, 2, 4, 8 Bar loop selector
 //! - Direct Note Manipulation: Move (time & pitch) and right-edge 7px handle Resize (duration), snapped to grid
 //! - Key Gutter Audition: click & drag piano keys to audition note with active amber highlight
-//! - Scale Fold & Octave Navigation: Scale-Fold toggle, [▲ Oct] / [▼ Oct] buttons, mouse-wheel pitch scroll
+//! - Scale Fold & Octave Navigation: Scale-Fold toggle, [+ Oct] / [- Oct] buttons, mouse-wheel pitch scroll
 //! - Live 12 Transform Tools: Quantize, Connect, Ornament, Recombine, Span, Strum, Time Warp
 //! - Live 12 Generate Tools: Seed, Shape, Stacks, Rhythm, Euclidean
 //! - Audio Clip Warping Panel: Waveform display with draggable Warp Markers, 6 modes (Beats, Tones,
 //!   Texture, RePitch, Complex, ComplexPro), pitch transposition (-48..+48 st), and clip gain dB.
 
 use egui::{
-    pos2, vec2, Button, Color32, ComboBox, DragValue, FontId, Rect, RichText,
+    pos2, vec2, Button, Color32, ComboBox, DragValue, FontId, Frame, Margin, Rect, RichText,
     Sense, Slider, Stroke, Ui,
 };
 use ableton_core::GlobalScale;
@@ -24,7 +24,7 @@ use ableton_timeline::{
     MidiNote, MidiPattern,
 };
 use crate::theme::{
-    COLOR_AMBER, COLOR_BG_PANEL_ALT, COLOR_BG_SURFACE, COLOR_BG_VOID, COLOR_BORDER, COLOR_CYAN,
+    COLOR_AMBER, COLOR_BG_PANEL_ALT, COLOR_BG_SURFACE, COLOR_BORDER, COLOR_CYAN,
     COLOR_GREEN, COLOR_TEXT_DIM, COLOR_TEXT_MUTED, COLOR_TEXT_PRIMARY,
 };
 
@@ -160,46 +160,57 @@ pub fn render_clip_view(
         loop_length_changed: None,
     };
 
-    let total_avail_h = ui.available_height().max(160.0);
+    let total_avail_h = (ui.available_height() - 2.0).max(60.0);
 
-    ui.horizontal(|ui| {
-        // --- 1. Left Column: Live 12 Inspector (Fixed ~220px wide) ---
-        ui.allocate_ui_with_layout(
-            vec2(220.0, total_avail_h),
-            egui::Layout::top_down(egui::Align::Min),
-            |ui| {
-                ui.set_width(220.0);
-                render_clip_inspector(ui, state, midi_pattern, global_scale, &mut action);
-            },
-        );
+    Frame::none()
+        .fill(Color32::from_rgb(0x3e, 0x3e, 0x3e)) // DetailViewBackground #3e3e3e
+        .show(ui, |ui| {
+            ui.horizontal(|ui| {
+                ui.spacing_mut().item_spacing = vec2(4.0, 2.0);
+                // --- 1. Left Column: Live 12 Inspector on SurfaceBackground #363636 ---
+                Frame::none()
+                    .fill(Color32::from_rgb(0x36, 0x36, 0x36)) // SurfaceBackground #363636
+                    .inner_margin(Margin::symmetric(6.0, 2.0))
+                    .show(ui, |ui| {
+                        ui.allocate_ui_with_layout(
+                            vec2(216.0, (total_avail_h - 4.0).max(50.0)),
+                            egui::Layout::top_down(egui::Align::Min),
+                            |ui| {
+                                render_clip_inspector(ui, state, midi_pattern, global_scale, &mut action);
+                            },
+                        );
+                    });
 
-        ui.separator();
+                // Crisp 1px #111111 vertical divider (ControlContrastFrame)
+                let (divider_rect, _) = ui.allocate_exact_size(vec2(1.0, total_avail_h), Sense::hover());
+                ui.painter().rect_filled(divider_rect, 0.0, Color32::from_rgb(0x11, 0x11, 0x11));
 
-        // --- 2. Right Column: Live Interactive Canvas (Piano Roll or Audio Waveform) ---
-        let canvas_w = ui.available_width().max(300.0);
-        ui.allocate_ui_with_layout(
-            vec2(canvas_w, total_avail_h),
-            egui::Layout::top_down(egui::Align::Min),
-            |ui| {
-                if state.is_audio || state.sub_tab == ClipViewSubTab::Warping {
-                    render_audio_warp_canvas(ui, state, &mut action);
-                } else {
-                    if render_interactive_piano_roll(
-                        ui,
-                        midi_pattern,
-                        state,
-                        global_scale,
-                        current_beat,
-                    ) {
-                        action.pattern_mutated = true;
-                    }
-                    if let Some(audition) = state.last_audition_note.take() {
-                        action.audition_note = Some(audition);
-                    }
-                }
-            },
-        );
-    });
+                // --- 2. Right Column: Live Interactive Canvas (Piano Roll or Audio Waveform) ---
+                let canvas_w = ui.available_width().max(300.0);
+                ui.allocate_ui_with_layout(
+                    vec2(canvas_w, total_avail_h),
+                    egui::Layout::top_down(egui::Align::Min),
+                    |ui| {
+                        if state.is_audio || state.sub_tab == ClipViewSubTab::Warping {
+                            render_audio_warp_canvas(ui, state, &mut action);
+                        } else {
+                            if render_interactive_piano_roll(
+                                ui,
+                                midi_pattern,
+                                state,
+                                global_scale,
+                                current_beat,
+                            ) {
+                                action.pattern_mutated = true;
+                            }
+                            if let Some(audition) = state.last_audition_note.take() {
+                                action.audition_note = Some(audition);
+                            }
+                        }
+                    },
+                );
+            });
+        });
 
     action
 }
@@ -212,7 +223,9 @@ pub fn render_clip_inspector(
     global_scale: &GlobalScale,
     action: &mut ClipViewAction,
 ) {
-    ui.spacing_mut().item_spacing = vec2(4.0, 4.0);
+    let is_compact_h = ui.available_height() < 160.0;
+    ui.spacing_mut().item_spacing = vec2(3.0, if is_compact_h { 1.0 } else { 2.0 });
+    ui.spacing_mut().button_padding = vec2(4.0, if is_compact_h { 1.0 } else { 2.0 });
 
     // Inspector Tab Selector Bar (4 compact buttons)
     ui.horizontal(|ui| {
@@ -290,18 +303,16 @@ pub fn render_clip_inspector(
                 }
             });
 
-            // 3. Scale-Fold Toggle
+            // 3. Scale-Fold & Octave / Pitch Scroll Navigation (compact single row)
             ui.horizontal(|ui| {
+                ui.spacing_mut().item_spacing = vec2(3.0, 0.0);
                 let fold_col = if state.scale_folded { COLOR_AMBER } else { COLOR_TEXT_MUTED };
-                let fold_text = if state.scale_folded { "★ Scale-Folded" } else { "☆ Chromatic" };
-                if ui.add(Button::new(RichText::new(fold_text).size(9.5).color(fold_col))).clicked() {
+                let fold_text = if state.scale_folded { "★ Fold" } else { "☆ Fold" };
+                if ui.add(Button::new(RichText::new(fold_text).size(9.0).color(fold_col))).on_hover_text("Toggle Scale Fold").clicked() {
                     state.scale_folded = !state.scale_folded;
                 }
-            });
 
-            // 4. Octave / Pitch Scroll Navigation
-            ui.horizontal(|ui| {
-                ui.label(RichText::new("Pitch:").size(9.0).color(COLOR_TEXT_MUTED));
+                ui.label(RichText::new("Oct:").size(9.0).color(COLOR_TEXT_MUTED));
                 let oct_step = if state.scale_folded { 7 } else { 12 };
                 if ui.add(Button::new(RichText::new("+ Oct").size(9.0).color(COLOR_TEXT_PRIMARY))).clicked() {
                     state.pitch_scroll_offset = (state.pitch_scroll_offset + oct_step).min(36);
@@ -309,21 +320,24 @@ pub fn render_clip_inspector(
                 if ui.add(Button::new(RichText::new("- Oct").size(9.0).color(COLOR_TEXT_PRIMARY))).clicked() {
                     state.pitch_scroll_offset = (state.pitch_scroll_offset - oct_step).max(-36);
                 }
-                if state.pitch_scroll_offset != 0 {
-                    if ui.add(Button::new(RichText::new("Rst").size(8.5).color(COLOR_TEXT_MUTED))).clicked() {
-                        state.pitch_scroll_offset = 0;
-                    }
+                if state.pitch_scroll_offset != 0
+                    && ui.add(Button::new(RichText::new("Rst").size(8.5).color(COLOR_TEXT_MUTED))).clicked()
+                {
+                    state.pitch_scroll_offset = 0;
                 }
             });
 
-            ui.separator();
-
-            // 5. Pattern Telemetry & Help
-            let notes_max_end = midi_pattern.notes.iter().map(|n| n.end_beat()).fold(4.0, f64::max);
-            let total_beats = (state.loop_length_bars as f64 * 4.0).max(notes_max_end).max(midi_pattern.length_beats).max(4.0) as f32;
-            ui.label(RichText::new(format!("Len: {:.0}b ({} bars)", total_beats, (total_beats / 4.0).ceil() as usize)).size(9.0).color(COLOR_TEXT_MUTED));
-            ui.label(RichText::new(format!("Notes: {} | Sel: {}", midi_pattern.notes.len(), state.selected_note_idx.map(|i| format!("#{}", i + 1)).unwrap_or_else(|| "-".into()))).size(9.0).color(COLOR_TEXT_MUTED));
-            ui.label(RichText::new("• Click Key: audition\n• Drag note / 7px edge\n• Del/Right-click: remove").size(8.5).color(COLOR_TEXT_DIM));
+            if ui.available_height() >= 24.0 {
+                ui.separator();
+                // 4. Pattern Telemetry & Help
+                let notes_max_end = midi_pattern.notes.iter().map(|n| n.end_beat()).fold(4.0, f64::max);
+                let total_beats = (state.loop_length_bars as f64 * 4.0).max(notes_max_end).max(midi_pattern.length_beats).max(4.0) as f32;
+                let sel_txt = state.selected_note_idx.map(|i| format!("#{}", i + 1)).unwrap_or_else(|| "-".into());
+                ui.label(RichText::new(format!("Len: {:.0}b ({}B) | Notes: {} | Sel: {}", total_beats, (total_beats / 4.0).ceil() as usize, midi_pattern.notes.len(), sel_txt)).size(8.5).color(COLOR_TEXT_MUTED));
+                if ui.available_height() >= 14.0 {
+                    ui.label(RichText::new("• Click Key: audition • Drag/7px: edit").size(8.0).color(COLOR_TEXT_DIM));
+                }
+            }
         }
 
         ClipViewSubTab::Transform => {
@@ -343,7 +357,7 @@ pub fn render_clip_inspector(
             ui.horizontal(|ui| {
                 ui.label(RichText::new("Strum:").size(9.0).color(COLOR_TEXT_MUTED));
                 ui.add(Slider::new(&mut state.strum_spread_ms, 5.0..=100.0).show_value(false));
-                let dir_lbl = if state.strum_direction_up { "▲" } else { "▼" };
+                let dir_lbl = if state.strum_direction_up { "Up" } else { "Down" };
                 if ui.add(Button::new(RichText::new(dir_lbl).size(9.0).color(COLOR_CYAN))).clicked() {
                     state.strum_direction_up = !state.strum_direction_up;
                 }
@@ -491,7 +505,7 @@ pub fn render_audio_warp_canvas(
     action: &mut ClipViewAction,
 ) {
     let available_w = ui.available_width().max(300.0);
-    let total_h = ui.available_height().clamp(155.0, 260.0);
+    let total_h = (ui.available_height() - 2.0).max(50.0);
     let (canvas_rect, mut response) =
         ui.allocate_exact_size(vec2(available_w, total_h), Sense::click_and_drag());
 
@@ -637,18 +651,18 @@ pub fn render_interactive_piano_roll(
     current_beat: f64,
 ) -> bool {
     let available_w = ui.available_width().max(380.0);
-    let total_h = ui.available_height().clamp(155.0, 260.0);
+    let total_h = (ui.available_height() - 2.0).max(50.0);
     let (roll_rect, response) = ui.allocate_exact_size(vec2(available_w, total_h), Sense::click_and_drag());
 
     let mut pattern_mutated = false;
 
     if ui.is_rect_visible(roll_rect) {
         let painter = ui.painter_at(roll_rect);
-        painter.rect_filled(roll_rect, 2.0, COLOR_BG_VOID);
-        painter.rect_stroke(roll_rect, 2.0, Stroke::new(1.0_f32, COLOR_BORDER));
+        painter.rect_filled(roll_rect, 0.0, Color32::from_rgb(0x24, 0x24, 0x24)); // SurfaceArea #242424
+        painter.rect_stroke(roll_rect, 0.0, Stroke::new(1.0_f32, Color32::from_rgb(0x11, 0x11, 0x11))); // ControlContrastFrame #111111
 
         let ruler_h = 18.0_f32;
-        let lanes_h = 36.0_f32;
+        let lanes_h = if total_h < 130.0 { 24.0_f32 } else { 36.0_f32 };
         let gutter_w = 48.0_f32;
 
         let grid_top = roll_rect.top() + ruler_h;
@@ -945,14 +959,14 @@ pub fn render_interactive_piano_roll(
         // --- 9. Render Top Timeline Ruler & Loop Brace ---
         let ruler_rect = Rect::from_min_max(roll_rect.min, pos2(roll_rect.right(), grid_top));
         let gutter_ruler_rect = Rect::from_min_max(ruler_rect.min, pos2(grid_left, grid_top));
-        painter.rect_filled(gutter_ruler_rect, 0.0, COLOR_BG_PANEL_ALT);
+        painter.rect_filled(gutter_ruler_rect, 0.0, Color32::from_rgb(0x36, 0x36, 0x36)); // SurfaceBackground #363636
         painter.text(gutter_ruler_rect.center(), egui::Align2::CENTER_CENTER, "KEY", FontId::monospace(7.5), COLOR_TEXT_DIM);
-        painter.line_segment([gutter_ruler_rect.left_bottom(), gutter_ruler_rect.right_bottom()], Stroke::new(1.0_f32, COLOR_BORDER));
-        painter.line_segment([gutter_ruler_rect.right_top(), gutter_ruler_rect.right_bottom()], Stroke::new(1.0_f32, COLOR_BORDER));
+        painter.line_segment([gutter_ruler_rect.left_bottom(), gutter_ruler_rect.right_bottom()], Stroke::new(1.0_f32, Color32::from_rgb(0x11, 0x11, 0x11)));
+        painter.line_segment([gutter_ruler_rect.right_top(), gutter_ruler_rect.right_bottom()], Stroke::new(1.0_f32, Color32::from_rgb(0x11, 0x11, 0x11)));
 
         let time_ruler_rect = Rect::from_min_max(pos2(grid_left, roll_rect.top()), pos2(roll_rect.right(), grid_top));
-        painter.rect_filled(time_ruler_rect, 0.0, Color32::from_rgb(0x11, 0x14, 0x1c));
-        painter.line_segment([time_ruler_rect.left_bottom(), time_ruler_rect.right_bottom()], Stroke::new(1.0_f32, COLOR_BORDER));
+        painter.rect_filled(time_ruler_rect, 0.0, Color32::from_rgb(0x36, 0x36, 0x36)); // SurfaceBackground #363636
+        painter.line_segment([time_ruler_rect.left_bottom(), time_ruler_rect.right_bottom()], Stroke::new(1.0_f32, Color32::from_rgb(0x11, 0x11, 0x11)));
 
         // Loop brace bar at top of ruler
         let loop_end_beat = (state.loop_length_bars as f32 * 4.0).min(total_beats);
@@ -969,20 +983,20 @@ pub fn render_interactive_piano_roll(
             if b % 4 == 0 {
                 let bar = (b / 4) + 1;
                 painter.text(pos2(bx + 3.0, ruler_rect.center().y), egui::Align2::LEFT_CENTER, format!("Bar {}", bar), FontId::monospace(8.5), COLOR_TEXT_PRIMARY);
-                painter.line_segment([pos2(bx, grid_top), pos2(bx, grid_bottom)], Stroke::new(1.0_f32, Color32::from_rgb(0x2a, 0x2f, 0x3a)));
+                painter.line_segment([pos2(bx, grid_top), pos2(bx, grid_bottom)], Stroke::new(1.0_f32, Color32::from_rgb(0x46, 0x46, 0x46)));
             } else {
                 let bar = (b / 4) + 1;
                 let beat_in_bar = (b % 4) + 1;
                 painter.text(pos2(bx + 3.0, ruler_rect.center().y), egui::Align2::LEFT_CENTER, format!("{}.{}", bar, beat_in_bar), FontId::monospace(8.0), COLOR_TEXT_MUTED);
-                painter.line_segment([pos2(bx, grid_top), pos2(bx, grid_bottom)], Stroke::new(1.0_f32, Color32::from_rgb(0x2a, 0x2f, 0x3a)));
+                painter.line_segment([pos2(bx, grid_top), pos2(bx, grid_bottom)], Stroke::new(0.5_f32, Color32::from_rgb(0x11, 0x11, 0x11)));
             }
 
             for step in 1..4 {
                 let sub_b = beat_f + step as f32 * 0.25;
                 if sub_b < total_beats {
                     let sub_x = grid_left + (sub_b / total_beats) * grid_w;
-                    painter.line_segment([pos2(sub_x, grid_top), pos2(sub_x, grid_bottom)], Stroke::new(1.0_f32, Color32::from_rgb(0x18, 0x1b, 0x22)));
-                    painter.line_segment([pos2(sub_x, ruler_rect.bottom() - 3.0), pos2(sub_x, ruler_rect.bottom())], Stroke::new(1.0_f32, Color32::from_rgb(0x2a, 0x2f, 0x3a)));
+                    painter.line_segment([pos2(sub_x, grid_top), pos2(sub_x, grid_bottom)], Stroke::new(0.5_f32, Color32::from_rgb(0x1e, 0x1e, 0x1e)));
+                    painter.line_segment([pos2(sub_x, ruler_rect.bottom() - 3.0), pos2(sub_x, ruler_rect.bottom())], Stroke::new(1.0_f32, Color32::from_rgb(0x2a, 0x2a, 0x2a)));
                 }
             }
         }
@@ -996,44 +1010,46 @@ pub fn render_interactive_piano_roll(
 
             let key_rect = Rect::from_min_size(pos2(roll_rect.left(), ry), vec2(gutter_w, row_h));
             let key_bg = if is_audition {
-                COLOR_AMBER
+                Color32::from_rgb(0xff, 0xad, 0x56) // ChosenDefault #ffad56
             } else if is_root {
-                Color32::from_rgb(0x32, 0x27, 0x12)
+                Color32::from_rgb(0xa0, 0x85, 0x55) // Root key highlight
             } else if black {
-                Color32::from_rgb(0x12, 0x14, 0x1c)
+                Color32::from_rgb(0x46, 0x46, 0x46) // PianoBlackKey #464646
             } else {
-                Color32::from_rgb(0x20, 0x25, 0x32)
+                Color32::from_rgb(0x86, 0x86, 0x86) // PianoWhiteKey #868686
             };
             painter.rect_filled(key_rect, 0.0, key_bg);
-            painter.line_segment([pos2(key_rect.left(), key_rect.bottom()), pos2(key_rect.right(), key_rect.bottom())], Stroke::new(0.5_f32, Color32::from_rgb(0x1a, 0x1e, 0x28)));
-            painter.line_segment([pos2(key_rect.right(), key_rect.top()), pos2(key_rect.right(), key_rect.bottom())], Stroke::new(1.0_f32, COLOR_BORDER));
+            painter.line_segment([pos2(key_rect.left(), key_rect.bottom()), pos2(key_rect.right(), key_rect.bottom())], Stroke::new(0.5_f32, Color32::from_rgb(0x11, 0x11, 0x11)));
+            painter.line_segment([pos2(key_rect.right(), key_rect.top()), pos2(key_rect.right(), key_rect.bottom())], Stroke::new(1.0_f32, Color32::from_rgb(0x11, 0x11, 0x11)));
 
             if is_root && !is_audition {
-                painter.rect_filled(Rect::from_min_size(key_rect.min, vec2(3.0, row_h)), 0.0, COLOR_AMBER);
+                painter.rect_filled(Rect::from_min_size(key_rect.min, vec2(3.0, row_h)), 0.0, Color32::from_rgb(0xff, 0xad, 0x56));
             }
 
             let note_name = midi_to_note_name(pitch);
-            let text_col = if is_audition {
-                Color32::from_rgb(0x1a, 0x12, 0x00)
-            } else if is_root {
-                COLOR_AMBER
-            } else if black {
-                COLOR_TEXT_MUTED
+            let text_col = if is_audition || is_root || !black {
+                Color32::from_rgb(0x07, 0x07, 0x07)
             } else {
-                COLOR_TEXT_PRIMARY
+                Color32::from_rgb(0xd0, 0xd0, 0xd0)
             };
             painter.text(pos2(key_rect.right() - 4.0, key_rect.center().y), egui::Align2::RIGHT_CENTER, note_name, FontId::monospace(8.5), text_col);
 
             let grid_row_rect = Rect::from_min_size(pos2(grid_left, ry), vec2(grid_w, row_h));
             let grid_bg = if is_root {
-                Color32::from_rgb(0x18, 0x1c, 0x22)
+                Color32::from_rgb(0x35, 0x2e, 0x24) // Root row subtle warm highlight #352e24
+            } else if scale.is_in_scale(pitch) {
+                if black {
+                    Color32::from_rgb(0x28, 0x25, 0x32) // In-scale row tint #b595fc on black key
+                } else {
+                    Color32::from_rgb(0x2f, 0x2b, 0x3a) // In-scale row tint #b595fc on white key
+                }
             } else if black {
-                Color32::from_rgb(0x0c, 0x0e, 0x13)
+                Color32::from_rgb(0x1e, 0x1e, 0x1e)
             } else {
-                Color32::from_rgb(0x10, 0x13, 0x1a)
+                Color32::from_rgb(0x24, 0x24, 0x24)
             };
             painter.rect_filled(grid_row_rect, 0.0, grid_bg);
-            painter.line_segment([grid_row_rect.left_bottom(), grid_row_rect.right_bottom()], Stroke::new(0.5_f32, Color32::from_rgb(0x1c, 0x20, 0x2c)));
+            painter.line_segment([grid_row_rect.left_bottom(), grid_row_rect.right_bottom()], Stroke::new(0.5_f32, Color32::from_rgb(0x11, 0x11, 0x11)));
         }
 
         // --- 11. Render MIDI Notes with 7px Right-Edge Handle Indicator ---
@@ -1058,7 +1074,7 @@ pub fn render_interactive_piano_roll(
 
                 if nw >= 18.0 {
                     let note_str = midi_to_note_name(note.pitch);
-                    let label_col = if is_sel { Color32::from_rgb(0x1a, 0x12, 0x00) } else { Color32::from_rgb(0x08, 0x09, 0x0d) };
+                    let label_col = Color32::from_rgb(0x07, 0x07, 0x07); // SelectionForeground / Note Text #070707
                     painter.text(n_rect.center(), egui::Align2::CENTER_CENTER, note_str, FontId::monospace(8.0), label_col);
                 }
             }
@@ -1066,21 +1082,27 @@ pub fn render_interactive_piano_roll(
 
         // --- 12. Render Velocity & Chance Stalks Lane (Strictly Aligned) ---
         let gutter_lane_rect = Rect::from_min_max(pos2(roll_rect.left(), grid_bottom), pos2(grid_left, roll_rect.bottom()));
-        painter.rect_filled(gutter_lane_rect, 0.0, COLOR_BG_PANEL_ALT);
-        painter.line_segment([pos2(gutter_lane_rect.left(), mid_lane_y), pos2(gutter_lane_rect.right(), mid_lane_y)], Stroke::new(0.5_f32, COLOR_BORDER));
-        painter.line_segment([gutter_lane_rect.right_top(), gutter_lane_rect.right_bottom()], Stroke::new(1.0_f32, COLOR_BORDER));
-        painter.text(pos2(gutter_lane_rect.center().x, lanes_grid_rect.top() + 9.5), egui::Align2::CENTER_CENTER, "VEL", FontId::monospace(8.5), COLOR_AMBER);
-        painter.text(pos2(gutter_lane_rect.center().x, lanes_grid_rect.top() + 27.5), egui::Align2::CENTER_CENTER, "CHANCE", FontId::monospace(7.5), COLOR_CYAN);
+        painter.rect_filled(gutter_lane_rect, 0.0, Color32::from_rgb(0x36, 0x36, 0x36)); // SurfaceBackground #363636
+        painter.line_segment([pos2(gutter_lane_rect.left(), mid_lane_y), pos2(gutter_lane_rect.right(), mid_lane_y)], Stroke::new(0.5_f32, Color32::from_rgb(0x11, 0x11, 0x11)));
+        painter.line_segment([gutter_lane_rect.right_top(), gutter_lane_rect.right_bottom()], Stroke::new(1.0_f32, Color32::from_rgb(0x11, 0x11, 0x11)));
+        let vel_y = lanes_grid_rect.top() + (lanes_h * 0.28);
+        let chance_y = lanes_grid_rect.top() + (lanes_h * 0.72);
+        painter.text(pos2(gutter_lane_rect.center().x, vel_y), egui::Align2::CENTER_CENTER, "VEL", FontId::monospace(8.0), COLOR_AMBER);
+        if lanes_h >= 28.0 {
+            painter.text(pos2(gutter_lane_rect.center().x, chance_y), egui::Align2::CENTER_CENTER, "CHANCE", FontId::monospace(7.5), COLOR_CYAN);
+        } else {
+            painter.text(pos2(gutter_lane_rect.center().x, chance_y), egui::Align2::CENTER_CENTER, "%", FontId::monospace(7.5), COLOR_CYAN);
+        }
 
-        painter.rect_filled(lanes_grid_rect, 0.0, COLOR_BG_VOID);
-        painter.line_segment([pos2(grid_left, grid_bottom), pos2(roll_rect.right(), grid_bottom)], Stroke::new(1.0_f32, COLOR_BORDER));
-        painter.line_segment([pos2(grid_left, mid_lane_y), pos2(roll_rect.right(), mid_lane_y)], Stroke::new(0.5_f32, Color32::from_rgb(0x18, 0x1d, 0x28)));
+        painter.rect_filled(lanes_grid_rect, 0.0, Color32::from_rgb(0x1e, 0x1e, 0x1e)); // ControlBackground #1e1e1e
+        painter.line_segment([pos2(grid_left, grid_bottom), pos2(roll_rect.right(), grid_bottom)], Stroke::new(1.0_f32, Color32::from_rgb(0x11, 0x11, 0x11)));
+        painter.line_segment([pos2(grid_left, mid_lane_y), pos2(roll_rect.right(), mid_lane_y)], Stroke::new(0.5_f32, Color32::from_rgb(0x2a, 0x2a, 0x2a)));
 
         for b in 0..=num_beats {
             let beat_f = b as f32;
             if beat_f > total_beats { break; }
             let bx = grid_left + (beat_f / total_beats) * grid_w;
-            painter.line_segment([pos2(bx, grid_bottom), pos2(bx, roll_rect.bottom())], Stroke::new(0.5_f32, Color32::from_rgb(0x18, 0x1d, 0x28)));
+            painter.line_segment([pos2(bx, grid_bottom), pos2(bx, roll_rect.bottom())], Stroke::new(0.5_f32, Color32::from_rgb(0x2a, 0x2a, 0x2a)));
         }
 
         for (idx, note) in midi_pattern.notes.iter().enumerate() {
@@ -1341,5 +1363,51 @@ mod tests {
         assert_eq!(state.quantize_grid, 0.5);
         state.quantize_grid = 0.125; // 1/32
         assert_eq!(state.quantize_grid, 0.125);
+    }
+
+    #[test]
+    fn test_live12_clip_view_colors_and_zero_tofu_labels() {
+        let ctx = egui::Context::default();
+        let mut state = ClipViewState::default();
+        let mut pattern = MidiPattern::new(16.0);
+        pattern.add_note(MidiNote::new(60, 100, 0.0, 4.0));
+        let scale = GlobalScale {
+            root: 5,
+            mode: ableton_core::ScaleMode::Dorian,
+            scale_lock: true,
+        };
+
+        // Render in Transform subtab (tests Strum direction button "Up" / "Down")
+        state.sub_tab = ClipViewSubTab::Transform;
+        let _ = ctx.run(egui::RawInput::default(), |ctx| {
+            egui::CentralPanel::default().show(ctx, |ui| {
+                let _ = render_clip_view(ui, &mut state, &mut pattern, &scale, 0.0);
+            });
+        });
+
+        // Strum direction toggle
+        assert!(state.strum_direction_up);
+        let lbl_up = if state.strum_direction_up { "Up" } else { "Down" };
+        assert_eq!(lbl_up, "Up");
+        state.strum_direction_up = false;
+        let lbl_down = if state.strum_direction_up { "Up" } else { "Down" };
+        assert_eq!(lbl_down, "Down");
+
+        // Verify Live 12 color tokens used in Piano Roll
+        let white_key_col = Color32::from_rgb(0x86, 0x86, 0x86); // PianoWhiteKey
+        let black_key_col = Color32::from_rgb(0x46, 0x46, 0x46); // PianoBlackKey
+        let root_row_col = Color32::from_rgb(0x35, 0x2e, 0x24);  // Root row highlight
+        let note_text_col = Color32::from_rgb(0x07, 0x07, 0x07); // Note text
+        let detail_bg_col = Color32::from_rgb(0x3e, 0x3e, 0x3e); // DetailViewBackground
+        let surface_bg_col = Color32::from_rgb(0x36, 0x36, 0x36); // SurfaceBackground
+        let frame_border_col = Color32::from_rgb(0x11, 0x11, 0x11); // ControlContrastFrame
+
+        assert_eq!(white_key_col, Color32::from_rgb(134, 134, 134));
+        assert_eq!(black_key_col, Color32::from_rgb(70, 70, 70));
+        assert_eq!(root_row_col, Color32::from_rgb(53, 46, 36));
+        assert_eq!(note_text_col, Color32::from_rgb(7, 7, 7));
+        assert_eq!(detail_bg_col, Color32::from_rgb(62, 62, 62));
+        assert_eq!(surface_bg_col, Color32::from_rgb(54, 54, 54));
+        assert_eq!(frame_border_col, Color32::from_rgb(17, 17, 17));
     }
 }

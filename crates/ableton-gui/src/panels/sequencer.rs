@@ -450,29 +450,32 @@ pub fn render_drum_sequencer_with_state(
     let mut action = SequencerAction::default();
 
     let total_width = ui.available_width();
-    let groove_bar_width = 148.0_f32;
-    let main_width = (total_width - groove_bar_width - 16.0).max(360.0);
+    let total_height = ui.available_height().max(136.0);
+    let groove_bar_width = 188.0_f32;
+    let main_width = (total_width - groove_bar_width - 14.0).max(360.0);
 
     ui.horizontal(|ui| {
+        ui.spacing_mut().item_spacing = vec2(4.0, 2.0);
         // --- Left Main Column: 8 Visible Voice Rows & Header ---
         ui.allocate_ui_with_layout(
-            vec2(main_width, ui.available_height()),
+            vec2(main_width, total_height),
             egui::Layout::top_down(egui::Align::Min),
             |ui| {
+                ui.spacing_mut().item_spacing = vec2(3.0, 2.0);
                 // Header Toolbar: Title, Bank Selectors, Step counter
                 ui.horizontal(|ui| {
                     ui.label(
                         RichText::new("TR-909 PRO SEQUENCER")
-                            .size(12.0)
+                            .size(11.0)
                             .color(COLOR_AMBER)
                             .strong(),
                     );
 
-                    ui.add_space(8.0);
+                    ui.add_space(6.0);
 
                     // Bank A Toggle
                     let bank_a_active = state.bank == DrumBank::BankA;
-                    let bank_a_text = RichText::new("Bank A (1-8)").size(10.5).color(
+                    let bank_a_text = RichText::new("Bank A (1-8)").size(9.5).color(
                         if bank_a_active {
                             COLOR_AMBER
                         } else {
@@ -480,6 +483,7 @@ pub fn render_drum_sequencer_with_state(
                         },
                     );
                     let bank_a_btn = Button::new(bank_a_text)
+                        .min_size(vec2(72.0, 18.0))
                         .fill(if bank_a_active {
                             Color32::from_rgb(0x22, 0x1c, 0x10)
                         } else {
@@ -499,7 +503,7 @@ pub fn render_drum_sequencer_with_state(
 
                     // Bank B Toggle
                     let bank_b_active = state.bank == DrumBank::BankB;
-                    let bank_b_text = RichText::new("Bank B (9-16)").size(10.5).color(
+                    let bank_b_text = RichText::new("Bank B (9-16)").size(9.5).color(
                         if bank_b_active {
                             COLOR_AMBER
                         } else {
@@ -507,6 +511,7 @@ pub fn render_drum_sequencer_with_state(
                         },
                     );
                     let bank_b_btn = Button::new(bank_b_text)
+                        .min_size(vec2(72.0, 18.0))
                         .fill(if bank_b_active {
                             Color32::from_rgb(0x22, 0x1c, 0x10)
                         } else {
@@ -527,25 +532,40 @@ pub fn render_drum_sequencer_with_state(
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         ui.label(
                             RichText::new(format!("Step: {:02} / 16", current_step + 1))
-                                .font(FontId::new(11.0, FontFamily::Monospace))
+                                .font(FontId::new(10.5, FontFamily::Monospace))
                                 .color(COLOR_GREEN),
                         );
                     });
                 });
 
-                ui.separator();
-
-                // 8 Visible Voice Rows
+                // 8 Visible Voice Rows — Proportional Anti-Breakage Auto-Fit
+                ui.spacing_mut().item_spacing.y = 1.5;
                 let (pad_start, pad_end) = match state.bank {
                     DrumBank::BankA => (0, 8),
                     DrumBank::BankB => (8, 16),
                 };
 
+                let rem_rows_h = ui.available_height().max(90.0);
+                let step_h = crate::layout_guard::FlexFitGrid::compute_row_height(
+                    rem_rows_h,
+                    8,
+                    1.5,
+                    2.0,
+                    11.0,
+                    20.0,
+                );
+
                 // Responsive step button width calculation
-                let left_controls_w = 122.0_f32; // Audition (74px) + M (20px) + S (20px) + spacing
-                let avail_step_w = (main_width - left_controls_w - 18.0).max(288.0);
-                let step_w = ((avail_step_w - 15.0 * 2.0) / 16.0).floor().clamp(18.0, 56.0);
-                let step_h = 21.0_f32;
+                let left_controls_w = 124.0_f32; // Audition (76px) + M (18px) + S (18px) + spacing
+                let avail_step_w = (main_width - left_controls_w - 8.0).max(272.0);
+                let step_w = crate::layout_guard::FlexFitGrid::compute_col_width(
+                    avail_step_w,
+                    16,
+                    3.0,
+                    2.0,
+                    16.0,
+                    56.0,
+                );
 
                 for pad_idx in pad_start..pad_end {
                     let pad_name = if pad_idx < 8 {
@@ -559,18 +579,19 @@ pub fn render_drum_sequencer_with_state(
                     let is_soloed = state.soloed_pads[pad_idx];
 
                     ui.horizontal(|ui| {
-                        // Pad Audition Button (► Name)
-                        let audition_label = format!("► {}. {}", pad_idx + 1, pad_name);
+                        ui.spacing_mut().item_spacing = vec2(3.0, 0.0);
+                        // Pad Audition Button (▶ Name — verified egui glyph U+25B6)
+                        let audition_label = format!("▶ {}. {}", pad_idx + 1, pad_name);
                         let pad_btn = Button::new(
                             RichText::new(audition_label)
-                                .size(9.5)
+                                .size(8.5)
                                 .color(if is_audible {
                                     COLOR_TEXT_PRIMARY
                                 } else {
                                     COLOR_TEXT_MUTED
                                 }),
                         )
-                        .min_size(vec2(74.0, step_h))
+                        .min_size(vec2(76.0, step_h))
                         .fill(if is_soloed {
                             Color32::from_rgb(0x0e, 0x25, 0x33)
                         } else {
@@ -592,7 +613,7 @@ pub fn render_drum_sequencer_with_state(
                         // Mute [M] Button
                         let mute_btn = Button::new(
                             RichText::new("M")
-                                .size(9.5)
+                                .size(8.5)
                                 .strong()
                                 .color(if is_muted {
                                     COLOR_RUBY
@@ -600,7 +621,7 @@ pub fn render_drum_sequencer_with_state(
                                     COLOR_TEXT_MUTED
                                 }),
                         )
-                        .min_size(vec2(20.0, step_h))
+                        .min_size(vec2(18.0, step_h))
                         .fill(if is_muted {
                             Color32::from_rgb(0x38, 0x10, 0x16)
                         } else {
@@ -623,7 +644,7 @@ pub fn render_drum_sequencer_with_state(
                         // Solo [S] Button
                         let solo_btn = Button::new(
                             RichText::new("S")
-                                .size(9.5)
+                                .size(8.5)
                                 .strong()
                                 .color(if is_soloed {
                                     COLOR_CYAN
@@ -631,7 +652,7 @@ pub fn render_drum_sequencer_with_state(
                                     COLOR_TEXT_MUTED
                                 }),
                         )
-                        .min_size(vec2(20.0, step_h))
+                        .min_size(vec2(18.0, step_h))
                         .fill(if is_soloed {
                             Color32::from_rgb(0x0a, 0x26, 0x36)
                         } else {
@@ -684,7 +705,7 @@ pub fn render_drum_sequencer_with_state(
                                     } else if (step_idx / 4) % 2 == 0 {
                                         COLOR_BG_SURFACE
                                     } else {
-                                        Color32::from_rgb(0x13, 0x17, 0x22)
+                                        Color32::from_rgb(0x2e, 0x2e, 0x2e)
                                     };
 
                                     let final_bg = if is_audible {
@@ -698,17 +719,20 @@ pub fn render_drum_sequencer_with_state(
                                         )
                                     };
 
-                                    painter.rect_filled(rect, 2.5, final_bg);
+                                    painter.rect_filled(rect, 1.5, final_bg);
 
-                                    // Amber Accent Glow & Marker
+                                    // Amber Accent Geometric Marker (Vector triangle, zero font dependency)
                                     if is_active && is_accent {
-                                        painter.text(
-                                            pos2(rect.right() - 5.0, rect.top() + 1.0),
-                                            Align2::RIGHT_TOP,
-                                            "▲",
-                                            FontId::new(7.0, FontFamily::Monospace),
-                                            Color32::WHITE,
-                                        );
+                                        let tri_pts = vec![
+                                            pos2(rect.right() - 2.0, rect.top() + 2.0),
+                                            pos2(rect.right() - 7.0, rect.top() + 2.0),
+                                            pos2(rect.right() - 2.0, rect.top() + 7.0),
+                                        ];
+                                        painter.add(egui::Shape::convex_polygon(
+                                            tri_pts,
+                                            Color32::from_rgb(0x07, 0x07, 0x07),
+                                            Stroke::NONE,
+                                        ));
                                     }
 
                                     // Velocity Gauge (Level bar at bottom of button)
@@ -716,11 +740,11 @@ pub fn render_drum_sequencer_with_state(
                                         let vel_norm = (velocity as f32 / 127.0).clamp(0.05, 1.0);
                                         let gauge_w = (rect.width() - 4.0) * vel_norm;
                                         let gauge_rect = Rect::from_min_size(
-                                            pos2(rect.left() + 2.0, rect.bottom() - 3.5),
+                                            pos2(rect.left() + 2.0, rect.bottom() - 3.0),
                                             vec2(gauge_w, 2.0),
                                         );
                                         let gauge_color = if is_accent {
-                                            Color32::WHITE
+                                            Color32::from_rgb(0x07, 0x07, 0x07)
                                         } else {
                                             COLOR_AMBER
                                         };
@@ -744,13 +768,13 @@ pub fn render_drum_sequencer_with_state(
                                     } else {
                                         1.0_f32
                                     };
-                                    painter.rect_stroke(rect, 2.5, Stroke::new(stroke_w, border_color));
+                                    painter.rect_stroke(rect, 1.5, Stroke::new(stroke_w, border_color));
 
                                     // Top playhead marker on current step
                                     if is_current {
                                         let marker_rect = Rect::from_min_size(
                                             pos2(rect.left(), rect.top()),
-                                            vec2(rect.width(), 2.5),
+                                            vec2(rect.width(), 2.0),
                                         );
                                         painter.rect_filled(marker_rect, 1.0, COLOR_GREEN);
                                     }
@@ -761,7 +785,7 @@ pub fn render_drum_sequencer_with_state(
                                             rect.center(),
                                             Align2::CENTER_CENTER,
                                             format!("{}", step_idx + 1),
-                                            FontId::new(8.5, FontFamily::Monospace),
+                                            FontId::new(8.0, FontFamily::Monospace),
                                             COLOR_TEXT_MUTED,
                                         );
                                     }
@@ -804,37 +828,37 @@ pub fn render_drum_sequencer_with_state(
 
         ui.separator();
 
-        // --- Right Column: Groove & Pattern Quick Bar ---
+        // --- Right Column: Groove & Pattern Quick Bar (Compact 2x2 Grid, Zero Overflow) ---
         ui.allocate_ui_with_layout(
-            vec2(groove_bar_width, ui.available_height()),
-            egui::Layout::top_down(egui::Align::Center),
+            vec2(groove_bar_width, total_height),
+            egui::Layout::top_down(egui::Align::Min),
             |ui| {
+                ui.spacing_mut().item_spacing = vec2(3.0, 2.0);
+                ui.spacing_mut().slider_width = 44.0;
+
                 ui.label(
                     RichText::new("GROOVE & PATTERN")
-                        .size(11.0)
+                        .size(9.5)
                         .color(COLOR_AMBER)
                         .strong(),
                 );
 
-                ui.add_space(4.0);
-
-                // Swing % Slider
+                // Combined Swing & Humanize Sliders
                 ui.horizontal(|ui| {
-                    ui.label(RichText::new("Swing").size(9.5).color(COLOR_TEXT_PRIMARY));
+                    ui.label(RichText::new("Swg").size(8.5).color(COLOR_TEXT_PRIMARY));
                     let slider = Slider::new(&mut state.swing_percent, 0.0..=75.0)
                         .suffix("%")
+                        .max_decimals(0)
                         .show_value(true);
                     if ui.add(slider).changed() {
                         action.swing_changed = Some(state.swing_percent);
                         action.pattern_mutated = true;
                     }
-                });
 
-                // Velocity Humanize % Slider
-                ui.horizontal(|ui| {
-                    ui.label(RichText::new("Humanize").size(9.5).color(COLOR_TEXT_PRIMARY));
+                    ui.label(RichText::new("Hum").size(8.5).color(COLOR_TEXT_PRIMARY));
                     let slider = Slider::new(&mut state.humanize_percent, 0.0..=100.0)
                         .suffix("%")
+                        .max_decimals(0)
                         .show_value(true);
                     if ui.add(slider).changed() {
                         action.humanize_changed = Some(state.humanize_percent);
@@ -842,80 +866,79 @@ pub fn render_drum_sequencer_with_state(
                     }
                 });
 
-                ui.add_space(4.0);
-                ui.separator();
-                ui.add_space(4.0);
+                // Compact 2x2 Quick-Action Pattern Grid + Clear Row
+                let half_w = ((groove_bar_width - 10.0) * 0.5).floor();
+                let full_w = groove_bar_width - 6.0;
 
-                // Quick-Action Pattern Buttons
-                let button_w = groove_bar_width - 8.0;
+                ui.horizontal(|ui| {
+                    // 4-on-the-Floor
+                    let btn_4floor = Button::new(
+                        RichText::new("4-Floor")
+                            .size(8.5)
+                            .color(COLOR_TEXT_PRIMARY),
+                    )
+                    .min_size(vec2(half_w, 16.0))
+                    .fill(COLOR_BG_PANEL_ALT)
+                    .stroke(Stroke::new(1.0_f32, COLOR_BORDER));
+                    if ui.add(btn_4floor).clicked() {
+                        state.apply_four_on_the_floor(drum_pattern);
+                        action.pattern_mutated = true;
+                    }
 
-                // 4-on-the-Floor
-                let btn_4floor = Button::new(
-                    RichText::new("4-on-the-Floor")
-                        .size(10.0)
-                        .color(COLOR_TEXT_PRIMARY),
-                )
-                .min_size(vec2(button_w, 20.0))
-                .fill(COLOR_BG_PANEL_ALT)
-                .stroke(Stroke::new(1.0_f32, COLOR_BORDER));
-                if ui.add(btn_4floor).clicked() {
-                    state.apply_four_on_the_floor(drum_pattern);
-                    action.pattern_mutated = true;
-                }
+                    // RKT Tresillo
+                    let btn_rkt = Button::new(
+                        RichText::new("RKT Tresillo")
+                            .size(8.5)
+                            .color(COLOR_AMBER)
+                            .strong(),
+                    )
+                    .min_size(vec2(half_w, 16.0))
+                    .fill(Color32::from_rgb(0x20, 0x18, 0x0a))
+                    .stroke(Stroke::new(1.0_f32, COLOR_AMBER));
+                    if ui.add(btn_rkt).clicked() {
+                        state.apply_rkt_tresillo(drum_pattern);
+                        action.pattern_mutated = true;
+                    }
+                });
 
-                // RKT Tresillo
-                let btn_rkt = Button::new(
-                    RichText::new("RKT Tresillo")
-                        .size(10.0)
-                        .color(COLOR_AMBER)
-                        .strong(),
-                )
-                .min_size(vec2(button_w, 20.0))
-                .fill(Color32::from_rgb(0x20, 0x18, 0x0a))
-                .stroke(Stroke::new(1.0_f32, COLOR_AMBER));
-                if ui.add(btn_rkt).clicked() {
-                    state.apply_rkt_tresillo(drum_pattern);
-                    action.pattern_mutated = true;
-                }
+                ui.horizontal(|ui| {
+                    // Techno 16ths
+                    let btn_techno = Button::new(
+                        RichText::new("Techno 16th")
+                            .size(8.5)
+                            .color(COLOR_CYAN)
+                            .strong(),
+                    )
+                    .min_size(vec2(half_w, 16.0))
+                    .fill(Color32::from_rgb(0x0a, 0x1e, 0x28))
+                    .stroke(Stroke::new(1.0_f32, COLOR_CYAN));
+                    if ui.add(btn_techno).clicked() {
+                        state.apply_techno_16ths(drum_pattern);
+                        action.pattern_mutated = true;
+                    }
 
-                // Techno 16ths
-                let btn_techno = Button::new(
-                    RichText::new("Techno 16ths")
-                        .size(10.0)
-                        .color(COLOR_CYAN)
-                        .strong(),
-                )
-                .min_size(vec2(button_w, 20.0))
-                .fill(Color32::from_rgb(0x0a, 0x1e, 0x28))
-                .stroke(Stroke::new(1.0_f32, COLOR_CYAN));
-                if ui.add(btn_techno).clicked() {
-                    state.apply_techno_16ths(drum_pattern);
-                    action.pattern_mutated = true;
-                }
-
-                ui.add_space(2.0);
-
-                // Randomize
-                let btn_rand = Button::new(
-                    RichText::new("🎲 Randomize")
-                        .size(10.0)
-                        .color(COLOR_GREEN),
-                )
-                .min_size(vec2(button_w, 20.0))
-                .fill(COLOR_BG_PANEL_ALT)
-                .stroke(Stroke::new(1.0_f32, COLOR_BORDER));
-                if ui.add(btn_rand).clicked() {
-                    state.randomize_pattern(drum_pattern);
-                    action.pattern_mutated = true;
-                }
+                    // Randomize (Verified ★ glyph, zero tofu)
+                    let btn_rand = Button::new(
+                        RichText::new("★ Random")
+                            .size(8.5)
+                            .color(COLOR_GREEN),
+                    )
+                    .min_size(vec2(half_w, 16.0))
+                    .fill(COLOR_BG_PANEL_ALT)
+                    .stroke(Stroke::new(1.0_f32, COLOR_BORDER));
+                    if ui.add(btn_rand).clicked() {
+                        state.randomize_pattern(drum_pattern);
+                        action.pattern_mutated = true;
+                    }
+                });
 
                 // Clear Bank
                 let btn_clear = Button::new(
-                    RichText::new("Clear Bank")
-                        .size(9.5)
+                    RichText::new("Clear Active Bank")
+                        .size(8.5)
                         .color(COLOR_TEXT_MUTED),
                 )
-                .min_size(vec2(button_w, 18.0))
+                .min_size(vec2(full_w, 15.0))
                 .fill(COLOR_BG_VOID)
                 .stroke(Stroke::new(1.0_f32, COLOR_DIVIDER));
                 if ui.add(btn_clear).clicked() {

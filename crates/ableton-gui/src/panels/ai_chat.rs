@@ -41,19 +41,75 @@ pub struct AiChatMessage {
     pub timestamp: String,
 }
 
+/// Studio language locale for UI labels, AI system prompts, and responses.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum StudioLocale {
+    #[default]
+    En,
+    Es,
+}
+
+impl StudioLocale {
+    pub const ALL: [StudioLocale; 2] = [StudioLocale::En, StudioLocale::Es];
+
+    pub fn code(&self) -> &'static str {
+        match self {
+            StudioLocale::En => "EN",
+            StudioLocale::Es => "ES",
+        }
+    }
+
+    pub fn name(&self) -> &'static str {
+        match self {
+            StudioLocale::En => "English",
+            StudioLocale::Es => "Español",
+        }
+    }
+
+    pub fn initial_message(&self) -> &'static str {
+        match self {
+            StudioLocale::En => "Oxide Studio Assistant ready. Real-time LOM & DSP telemetry bridge connected. Enter a command for parameter automation, MIDI synthesis, stem separation, or spectral mix analysis.",
+            StudioLocale::Es => "Asistente de Oxide Studio listo. Puente de telemetría LOM y DSP en tiempo real conectado. Ingresá un comando para automatización de parámetros, síntesis MIDI, separación de stems o análisis espectral.",
+        }
+    }
+
+    pub fn quick_chips(&self) -> [(&'static str, &'static str); 5] {
+        match self {
+            StudioLocale::En => [
+                ("Sub-Bass Alignment", "sub-bass alignment kick 48hz"),
+                ("Resonant 303 Bass", "resonant 303 bass filter"),
+                ("136 BPM Techno Drop", "136 bpm techno drop"),
+                ("Syncopated Tresillo", "syncopated tresillo groove"),
+                ("High-Pass + OTT", "high-pass filter clear mud ott"),
+            ],
+            StudioLocale::Es => [
+                ("Alineación Sub-Bass", "alineacion sub-bass kick 48hz"),
+                ("Bajo 303 Resonante", "bajo 303 resonante filtro"),
+                ("Drop Techno 136 BPM", "drop techno 136 bpm"),
+                ("Tresillo Sincopado", "tresillo sincopado groove"),
+                ("Paso-Alto + OTT", "filtro paso-alto limpiar barro ott"),
+            ],
+        }
+    }
+}
+
 /// Supported LLM provider backends for the In-App AI Producer Copilot.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AiProvider {
     Gemini,
     Anthropic,
     OpenAi,
+    MiniMax,
+    Custom,
 }
 
 impl AiProvider {
-    pub const ALL: [AiProvider; 3] = [
+    pub const ALL: [AiProvider; 5] = [
         AiProvider::Gemini,
         AiProvider::Anthropic,
         AiProvider::OpenAi,
+        AiProvider::MiniMax,
+        AiProvider::Custom,
     ];
 
     pub fn name(&self) -> &'static str {
@@ -61,6 +117,8 @@ impl AiProvider {
             AiProvider::Gemini => "Gemini",
             AiProvider::Anthropic => "Claude",
             AiProvider::OpenAi => "OpenAI",
+            AiProvider::MiniMax => "MiniMax",
+            AiProvider::Custom => "Custom",
         }
     }
 
@@ -69,6 +127,28 @@ impl AiProvider {
             AiProvider::Gemini => "GEMINI_API_KEY",
             AiProvider::Anthropic => "ANTHROPIC_API_KEY",
             AiProvider::OpenAi => "OPENAI_API_KEY",
+            AiProvider::MiniMax => "MINIMAX_API_KEY",
+            AiProvider::Custom => "CUSTOM_API_KEY",
+        }
+    }
+
+    pub fn default_base_url(&self) -> &'static str {
+        match self {
+            AiProvider::Gemini => "https://generativelanguage.googleapis.com",
+            AiProvider::Anthropic => "https://api.anthropic.com/v1",
+            AiProvider::OpenAi => "https://api.openai.com/v1",
+            AiProvider::MiniMax => "https://api.minimax.io/v1",
+            AiProvider::Custom => "",
+        }
+    }
+
+    pub fn default_model(&self) -> &'static str {
+        match self {
+            AiProvider::Gemini => "gemini-2.5-flash",
+            AiProvider::Anthropic => "claude-3-5-sonnet",
+            AiProvider::OpenAi => "gpt-4o",
+            AiProvider::MiniMax => "MiniMax-M2.7",
+            AiProvider::Custom => "custom-model",
         }
     }
 }
@@ -85,8 +165,11 @@ pub struct AiCopilotState {
     pub synth_drive: f32,
     pub provider: AiProvider,
     pub api_key: String,
+    pub custom_model: String,
+    pub custom_base_url: String,
     pub show_key_settings: bool,
     pub key_status_msg: Option<String>,
+    pub locale: StudioLocale,
 }
 
 impl Default for AiCopilotState {
@@ -106,6 +189,68 @@ impl AiCopilotState {
             .join("copilot_keys.env")
     }
 
+    /// Load custom AI configuration (key, model, base url) from local file or env.
+    pub fn load_local_config() -> (String, String, String) {
+        let mut key = String::new();
+        let mut model = String::new();
+        let mut url = String::new();
+
+        let path = Self::local_key_file_path();
+        if let Ok(contents) = std::fs::read_to_string(&path) {
+            for line in contents.lines() {
+                let line = line.trim();
+                if let Some(rest) = line.strip_prefix("MODEL=") {
+                    if model.is_empty() {
+                        model = rest.trim().trim_matches('"').trim_matches('\'').to_string();
+                    }
+                } else if let Some(rest) = line.strip_prefix("BASE_URL=") {
+                    if url.is_empty() {
+                        url = rest.trim().trim_matches('"').trim_matches('\'').to_string();
+                    }
+                } else if let Some(rest) = line.strip_prefix("API_KEY=") {
+                    if key.is_empty() {
+                        key = rest.trim().trim_matches('"').trim_matches('\'').to_string();
+                    }
+                } else if let Some(rest) = line.strip_prefix("MINIMAX_API_KEY=") {
+                    if key.is_empty() {
+                        key = rest.trim().trim_matches('"').trim_matches('\'').to_string();
+                    }
+                } else if let Some(rest) = line.strip_prefix("CUSTOM_API_KEY=") {
+                    if key.is_empty() {
+                        key = rest.trim().trim_matches('"').trim_matches('\'').to_string();
+                    }
+                }
+            }
+        }
+
+        if key.is_empty() {
+            if let Ok(val) = std::env::var("CUSTOM_API_KEY") {
+                key = val.trim().to_string();
+            } else if let Ok(val) = std::env::var("MINIMAX_API_KEY") {
+                key = val.trim().to_string();
+            } else if let Ok(val) = std::env::var("GEMINI_API_KEY") {
+                key = val.trim().to_string();
+            } else if let Ok(val) = std::env::var("OPENAI_API_KEY") {
+                key = val.trim().to_string();
+            } else if let Ok(val) = std::env::var("ANTHROPIC_API_KEY") {
+                key = val.trim().to_string();
+            }
+        }
+
+        if model.is_empty() {
+            if let Ok(val) = std::env::var("AI_MODEL") {
+                model = val.trim().to_string();
+            }
+        }
+        if url.is_empty() {
+            if let Ok(val) = std::env::var("AI_BASE_URL") {
+                url = val.trim().to_string();
+            }
+        }
+
+        (key, model, url)
+    }
+
     /// Load API key from environment variables or `~/.config/oxide-studio/copilot_keys.env`.
     pub fn load_local_api_key(provider: AiProvider) -> Option<String> {
         if let Ok(val) = std::env::var(provider.env_var_name()) {
@@ -115,7 +260,7 @@ impl AiCopilotState {
             }
         }
         let path = Self::local_key_file_path();
-        if let Ok(contents) = std::fs::read_to_string(path) {
+        if let Ok(contents) = std::fs::read_to_string(&path) {
             let prefix = format!("{}=", provider.env_var_name());
             for line in contents.lines() {
                 let line = line.trim();
@@ -126,11 +271,20 @@ impl AiCopilotState {
                     }
                 }
             }
+            for line in contents.lines() {
+                let line = line.trim();
+                if let Some(rest) = line.strip_prefix("API_KEY=") {
+                    let val = rest.trim().trim_matches('"').trim_matches('\'').to_string();
+                    if !val.is_empty() {
+                        return Some(val);
+                    }
+                }
+            }
         }
         None
     }
 
-    /// Save the current provider's API key to `~/.config/oxide-studio/copilot_keys.env` (chmod 600 on Unix).
+    /// Save the current provider's API key, custom model, and base URL to `~/.config/oxide-studio/copilot_keys.env` (chmod 600 on Unix).
     pub fn save_local_api_key(&mut self) -> std::io::Result<()> {
         let path = Self::local_key_file_path();
         if let Some(parent) = path.parent() {
@@ -146,12 +300,29 @@ impl AiCopilotState {
             Vec::new()
         };
 
-        let key_name = self.provider.env_var_name();
-        let prefix = format!("{}=", key_name);
-        lines.retain(|l| !l.trim().starts_with(&prefix));
         let clean_key = self.api_key.trim().to_string();
+        let clean_model = self.custom_model.trim().to_string();
+        let clean_url = self.custom_base_url.trim().to_string();
+        let key_name = self.provider.env_var_name();
+        let prefix_prov = format!("{}=", key_name);
+
+        lines.retain(|l| {
+            let t = l.trim();
+            !t.starts_with(&prefix_prov)
+                && !t.starts_with("API_KEY=")
+                && !t.starts_with("MODEL=")
+                && !t.starts_with("BASE_URL=")
+        });
+
         if !clean_key.is_empty() {
+            lines.push(format!("API_KEY={}", clean_key));
             lines.push(format!("{}={}", key_name, clean_key));
+        }
+        if !clean_model.is_empty() {
+            lines.push(format!("MODEL={}", clean_model));
+        }
+        if !clean_url.is_empty() {
+            lines.push(format!("BASE_URL={}", clean_url));
         }
 
         let body = lines.join("\n") + "\n";
@@ -163,10 +334,25 @@ impl AiCopilotState {
             let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600));
         }
 
+        let is_es = self.locale == StudioLocale::Es;
         self.key_status_msg = Some(if clean_key.is_empty() {
-            "Key local borrada (~/.config/oxide-studio)".to_string()
+            if is_es {
+                "Configuración local borrada (~/.config/oxide-studio)".to_string()
+            } else {
+                "Local configuration cleared (~/.config/oxide-studio)".to_string()
+            }
         } else {
-            format!("Key {} guardada local (fuera de Git)", self.provider.name())
+            if is_es {
+                format!(
+                    "Configuración guardada localmente (modelo: {})",
+                    if clean_model.is_empty() { "default" } else { &clean_model }
+                )
+            } else {
+                format!(
+                    "Configuration saved locally (model: {})",
+                    if clean_model.is_empty() { "default" } else { &clean_model }
+                )
+            }
         });
         Ok(())
     }
@@ -183,13 +369,24 @@ impl AiCopilotState {
         }
     }
 
-    /// Initialize with welcome greeting in natural Rioplatense Spanish for electronic music producers.
+    /// Initialize with welcome greeting in professional engineering English.
     pub fn new() -> Self {
+        Self::with_locale(StudioLocale::En)
+    }
+
+    /// Initialize with designated StudioLocale (En or Es).
+    pub fn with_locale(locale: StudioLocale) -> Self {
         let default_provider = AiProvider::Gemini;
-        let loaded_key = Self::load_local_api_key(default_provider).unwrap_or_default();
+        let (loaded_key, loaded_model, loaded_url) = Self::load_local_config();
+        let final_key = if !loaded_key.is_empty() {
+            loaded_key
+        } else {
+            Self::load_local_api_key(default_provider).unwrap_or_default()
+        };
+
         let welcome = AiChatMessage {
             role: MessageRole::Assistant,
-            text: "¡Buenas! Soy tu Copilot productor en Oxide Studio, conectado vía MCP. Puedo afinar el kick en sub, armar drops de techno, meter secuencias de RKT / Turreo o hacer chillar el 303 en vivo. Tocá [⚙ API Key] arriba si querés cargar tu propia key local (nunca se sube a GitHub). ¿Qué armamos hoy?".into(),
+            text: locale.initial_message().to_string(),
             mcp_badges: vec![
                 "studio_telemetry_live".into(),
                 "lom_bridge_active".into(),
@@ -206,9 +403,22 @@ impl AiCopilotState {
             synth_env_mod: 0.50,
             synth_drive: 0.20,
             provider: default_provider,
-            api_key: loaded_key,
+            api_key: final_key,
+            custom_model: if loaded_model.is_empty() { "MiniMax-M2.7".to_string() } else { loaded_model },
+            custom_base_url: if loaded_url.is_empty() { "https://api.minimax.io/v1".to_string() } else { loaded_url },
             show_key_settings: false,
             key_status_msg: None,
+            locale,
+        }
+    }
+
+    /// Switch locale, updating welcome message if conversation has not yet started.
+    pub fn set_locale(&mut self, new_locale: StudioLocale) {
+        if self.locale != new_locale {
+            self.locale = new_locale;
+            if self.messages.len() == 1 && self.messages[0].role == MessageRole::Assistant {
+                self.messages[0].text = new_locale.initial_message().to_string();
+            }
         }
     }
 }
@@ -218,11 +428,17 @@ impl AiCopilotState {
 /// executes real state mutations on `app`, and returns the assistant response and MCP tool badges.
 pub fn execute_studio_intent(prompt: &str, app: &mut AbletonStudioApp) -> (String, Vec<String>) {
     let p = prompt.to_lowercase();
+    let is_es = app.ai_copilot.locale == StudioLocale::Es;
 
-    // 1. Kick Fattening / Tuning Intent
-    let is_kick_fat = (p.contains("kick") && (p.contains("gord") || p.contains("fat") || p.contains("heav") || p.contains("peso") || p.contains("engord")))
+    // 1. Kick Fattening / Sub-Bass Tuning Intent
+    let is_kick_fat = (p.contains("kick") && (p.contains("gord") || p.contains("fat") || p.contains("heav") || p.contains("peso") || p.contains("engord") || p.contains("sub") || p.contains("align") || p.contains("alinea")))
         || p.contains("engorda")
-        || p.contains("engordar");
+        || p.contains("engordar")
+        || p.contains("sub-bass")
+        || p.contains("sub bass")
+        || p.contains("alineación sub-bass")
+        || p.contains("alineacion sub-bass")
+        || p.contains("sub-bass alignment");
 
     if is_kick_fat {
         // - Tunes 909 kick fundamental down to 48.0 Hz
@@ -287,7 +503,11 @@ pub fn execute_studio_intent(prompt: &str, app: &mut AbletonStudioApp) -> (Strin
             "analyze_rendered_audio".to_string(),
         ];
 
-        let reply = "¡De una! Te afiné el Kick 909 a 48.0 Hz para darle peso en sub, le mandé +6.5 dB de saturación analógica en el shaper y estiré el decay a 480 ms. Clavé los 4 golpes en el piso (pasos 0, 4, 8, 12) y arranqué el transport. Sub (20-60Hz) subió a -6.2 dBFS con pegada demoledora.".to_string();
+        let reply = if is_es {
+            "Kick 909 a 48.0 Hz alineado en sub-graves. Saturación analógica incrementada en +6.5 dB, decaimiento a 480 ms y patrón 4-on-the-floor (pasos 0, 4, 8, 12) activado con sub (20-60 Hz) calibrado a -6.2 dBFS.".to_string()
+        } else {
+            "Kick 909 a 48.0 Hz fundamental alignment configured. Analog drive boosted +6.5 dB, decay extended to 480 ms, 4-on-the-floor pattern (steps 0, 4, 8, 12) active, and sub band (20-60 Hz) calibrated to -6.2 dBFS.".to_string()
+        };
         return (reply, badges);
     }
 
@@ -301,7 +521,11 @@ pub fn execute_studio_intent(prompt: &str, app: &mut AbletonStudioApp) -> (Strin
         || p.contains("bajo acido")
         || p.contains("bajo ácido")
         || p.contains("make it acid")
-        || p.contains("acid bass");
+        || p.contains("acid bass")
+        || p.contains("resonant 303")
+        || p.contains("bajo 303")
+        || p.contains("resonante")
+        || p.contains("resonant");
 
     if is_acid {
         // Sets cutoff_hz = 620.0, resonance = 4.8, env_mod = 0.88, drive = 0.72
@@ -331,7 +555,11 @@ pub fn execute_studio_intent(prompt: &str, app: &mut AbletonStudioApp) -> (Strin
             "device_set_param".to_string(),
         ];
 
-        let reply = "¡Pica lindo! Filtro seteado en 620 Hz con resonancia picante a 4.80, modulación de envolvente a 0.88 y saturador al 72%. El ZDF ladder está chillando como una TB-303 original.".to_string();
+        let reply = if is_es {
+            "Filtro Ladder ZDF configurado a 620 Hz con resonancia en 4.80, modulación de envolvente a 0.88 y saturador al 72%. Emulación TB-303 activa con respuesta acentuada.".to_string()
+        } else {
+            "ZDF ladder filter configured at 620 Hz with 4.80 resonance, envelope modulation at 0.88, and analog drive at 72%. TB-303 resonant profile engaged.".to_string()
+        };
         return (reply, badges);
     }
 
@@ -341,8 +569,9 @@ pub fn execute_studio_intent(prompt: &str, app: &mut AbletonStudioApp) -> (Strin
         || p.contains("arma un drop")
         || p.contains("subi el tempo")
         || p.contains("subí el tempo")
+        || p.contains("136 bpm")
         || (p.contains("techno") && (p.contains("drop") || p.contains("bpm")))
-        || (p.contains("bpm") && (p.contains("subi") || p.contains("subí") || p.contains("set") || p.contains("cambia")));
+        || (p.contains("bpm") && (p.contains("subi") || p.contains("subí") || p.contains("set") || p.contains("cambia") || p.contains("drop")));
 
     if is_techno {
         let parsed_bpm = parse_bpm_from_str(prompt).unwrap_or(136.0);
@@ -391,16 +620,22 @@ pub fn execute_studio_intent(prompt: &str, app: &mut AbletonStudioApp) -> (Strin
             "generate_drum_groove_clip".to_string(),
         ];
 
-        let reply = format!("¡BPM clavado en {:.1}! Te armé el drop de techno con claps cortantes en 4 y 12 y hats en semicorcheas imparables para detonar la pista.", parsed_bpm);
+        let reply = if is_es {
+            format!("Tempo fijado en {:.1} BPM. Drop de techno configurado con claps en pasos 4 y 12 y semicorcheas continuas en hi-hat cerrado para propulsión rítmica.", parsed_bpm)
+        } else {
+            format!("Tempo locked at {:.1} BPM. Techno drop arrangement configured with claps on steps 4 & 12 and continuous 16th-note closed hi-hat drive.", parsed_bpm)
+        };
         return (reply, badges);
     }
 
-    // 4. RKT / Cachengue / Turreo / Dembow Intent
+    // 4. RKT / Cachengue / Turreo / Dembow / Tresillo Intent
     let is_rkt = p.contains("rkt")
         || p.contains("cachengue")
         || p.contains("turreo")
         || p.contains("dembow")
-        || p.contains("tresillo");
+        || p.contains("tresillo")
+        || p.contains("syncopated")
+        || p.contains("sincopado");
 
     if is_rkt {
         // Sets BPM to 100.0 - 112.0 (or retains current tempo if already within range)
@@ -447,11 +682,15 @@ pub fn execute_studio_intent(prompt: &str, app: &mut AbletonStudioApp) -> (Strin
             "drums_configure_pad".to_string(),
         ];
 
-        let reply = format!("¡Metimos el tresillo de RKT / Turreo al toque! Bombos en los tiempos (0, 4, 8, 12) y redobles sincopados en (3, 6, 11, 14) clavados a {:.1} BPM para que retumbe el parlante.", app.bpm);
+        let reply = if is_es {
+            format!("Patrón de tresillo sincopado configurado a {:.1} BPM. Bombos en tiempos principales (0, 4, 8, 12) y redobles sincopados en pasos (3, 6, 11, 14) con articulación dinámica.", app.bpm)
+        } else {
+            format!("Syncopated tresillo rhythm programmed at {:.1} BPM. Downbeat kick triggers at (0, 4, 8, 12) and syncopated snare accents at (3, 6, 11, 14).", app.bpm)
+        };
         return (reply, badges);
     }
 
-    // 5. Clean Mud / Brighten / Open Filter Intent
+    // 5. Clean Mud / Brighten / Open Filter / High-Pass + OTT Intent
     let is_brighten = p.contains("limpia el barro")
         || p.contains("limpiar el barro")
         || p.contains("mas brillo")
@@ -461,7 +700,12 @@ pub fn execute_studio_intent(prompt: &str, app: &mut AbletonStudioApp) -> (Strin
         || p.contains("abrir el filtro")
         || p.contains("clear mud")
         || p.contains("brighten")
-        || p.contains("open filter");
+        || p.contains("open filter")
+        || p.contains("high-pass")
+        || p.contains("high pass")
+        || p.contains("paso-alto")
+        || p.contains("paso alto")
+        || p.contains("ott");
 
     if is_brighten {
         app.synth_state.cutoff_hz = 4800.0;
@@ -483,13 +727,21 @@ pub fn execute_studio_intent(prompt: &str, app: &mut AbletonStudioApp) -> (Strin
             "fx_set_eq_eight".to_string(),
         ];
 
-        let reply = "¡Filtro abierto a 4800 Hz y medios-graves limpiados! Atenuamos los 300 Hz para sacar la bola de barro y activamos compresión OTT para darle aire y definición a los agudos.".to_string();
+        let reply = if is_es {
+            "Filtro paso-alto abierto a 4800 Hz con resonancia 1.2. Medios-graves atenuados en 300 Hz para eliminar enmascaramiento espectral y procesamiento multi-banda OTT activado para definición de agudos.".to_string()
+        } else {
+            "High-pass filter opened to 4800 Hz with 1.2 resonance. Low-mid masking attenuated around 300 Hz and upward/downward OTT multiband processing applied for high-frequency clarity.".to_string()
+        };
         return (reply, badges);
     }
 
     // Fallback Studio Assistant Response
     let badges = vec!["device_set_param".to_string()];
-    let reply = format!("Entendido: \"{}\". Modulé los parámetros en tiempo real vía MCP. Probá también pedirme: \"hace este kick mas gordo\", \"dale mas acido al bajo\", \"arma un drop de techno\" o \"mete un patron de rkt\".", prompt);
+    let reply = if is_es {
+        format!("Comando registrado: \"{}\". Parámetros modulados en tiempo real vía puente MCP. Presets disponibles: alineación sub-bass, bajo 303 resonante, drop techno 136 bpm, tresillo sincopado o paso-alto + OTT.", prompt)
+    } else {
+        format!("Command processed: \"{}\". Parameters modulated in real time via MCP bridge. Available presets: Sub-Bass Alignment, Resonant 303 Bass, 136 BPM Techno Drop, Syncopated Tresillo, or High-Pass + OTT.", prompt)
+    };
     (reply, badges)
 }
 
@@ -526,11 +778,20 @@ pub fn render_ai_copilot_panel(ui: &mut Ui, app: &mut AbletonStudioApp) {
                     .color(COLOR_CYAN)
                     .strong(),
             );
+
+            // Synchronize locale with global Top Control Bar if modified externally
+            let locale_id = egui::Id::new("oxide_studio_locale");
+            if let Some(stored_locale) = ui.data(|d| d.get_temp::<StudioLocale>(locale_id)) {
+                if app.ai_copilot.locale != stored_locale {
+                    app.ai_copilot.set_locale(stored_locale);
+                }
+            }
+
             let has_key = !app.ai_copilot.api_key.trim().is_empty();
             let status_label = if has_key {
-                format!("• {} KEY OK", app.ai_copilot.provider.name().to_uppercase())
+                "• KEY OK".to_string()
             } else {
-                "• MCP READY".to_string()
+                "• READY".to_string()
             };
             ui.label(
                 RichText::new(status_label)
@@ -539,8 +800,38 @@ pub fn render_ai_copilot_panel(ui: &mut Ui, app: &mut AbletonStudioApp) {
             );
 
             ui.with_layout(Layout::right_to_left(egui::Align::Center), |ui| {
-                if ui.small_button("×").on_hover_text("Close AI Copilot").clicked() {
+                let is_es = app.ai_copilot.locale == StudioLocale::Es;
+                if ui.small_button("×").on_hover_text(if is_es { "Cerrar AI Copilot" } else { "Close AI Copilot" }).clicked() {
                     app.copilot_open = false;
+                }
+
+                // [EN | ES] Locale Segmented Toggle in Copilot Header
+                let es_btn = Button::new(
+                    RichText::new("ES")
+                        .size(9.0)
+                        .color(if is_es { COLOR_AMBER } else { COLOR_TEXT_MUTED })
+                        .strong(),
+                )
+                .min_size(vec2(20.0, 20.0))
+                .fill(if is_es { COLOR_BG_PANEL_ALT } else { COLOR_BG_PANEL_ALT.gamma_multiply(0.5) })
+                .stroke(Stroke::new(1.0_f32, if is_es { COLOR_AMBER } else { COLOR_BORDER }));
+                if ui.add(es_btn).on_hover_text("Cambiar idioma a Español").clicked() && !is_es {
+                    app.ai_copilot.set_locale(StudioLocale::Es);
+                    ui.data_mut(|d| *d.get_temp_mut_or(locale_id, StudioLocale::Es) = StudioLocale::Es);
+                }
+
+                let en_btn = Button::new(
+                    RichText::new("EN")
+                        .size(9.0)
+                        .color(if !is_es { COLOR_AMBER } else { COLOR_TEXT_MUTED })
+                        .strong(),
+                )
+                .min_size(vec2(20.0, 20.0))
+                .fill(if !is_es { COLOR_BG_PANEL_ALT } else { COLOR_BG_PANEL_ALT.gamma_multiply(0.5) })
+                .stroke(Stroke::new(1.0_f32, if !is_es { COLOR_AMBER } else { COLOR_BORDER }));
+                if ui.add(en_btn).on_hover_text("Switch language to English").clicked() && is_es {
+                    app.ai_copilot.set_locale(StudioLocale::En);
+                    ui.data_mut(|d| *d.get_temp_mut_or(locale_id, StudioLocale::En) = StudioLocale::En);
                 }
 
                 let key_btn_col = if app.ai_copilot.show_key_settings || has_key {
@@ -551,14 +842,21 @@ pub fn render_ai_copilot_panel(ui: &mut Ui, app: &mut AbletonStudioApp) {
                 let key_btn = Button::new(RichText::new("⚙ Key").size(9.5).color(key_btn_col).strong())
                     .fill(if app.ai_copilot.show_key_settings { COLOR_BG_PANEL_ALT } else { Color32::TRANSPARENT })
                     .stroke(Stroke::new(1.0_f32, if app.ai_copilot.show_key_settings { COLOR_AMBER } else { COLOR_BORDER }));
-                if ui.add(key_btn).on_hover_text("Configurar tu API Key local (~/.config/oxide-studio/copilot_keys.env — nunca se sube a GitHub)").clicked() {
+                let key_hover = if is_es {
+                    "Configurar API Key y Modelo local (~/.config/oxide-studio/copilot_keys.env)"
+                } else {
+                    "Configure local API Key & Model (~/.config/oxide-studio/copilot_keys.env)"
+                };
+                if ui.add(key_btn).on_hover_text(key_hover).clicked() {
                     app.ai_copilot.show_key_settings = !app.ai_copilot.show_key_settings;
                 }
             });
         });
 
-        // 1b. Collapsible Local API Key Drawer (Stored in ~/.config/oxide-studio/copilot_keys.env, never in Git)
+        // 1b. Minimal Universal Custom AI Settings Drawer (Model, Base URL, API Key masked input)
+        // Stored locally in ~/.config/oxide-studio/copilot_keys.env (chmod 0600, never in git)
         if app.ai_copilot.show_key_settings {
+            let is_es = app.ai_copilot.locale == StudioLocale::Es;
             Frame::none()
                 .fill(Color32::from_rgb(0x10, 0x15, 0x20))
                 .stroke(Stroke::new(1.0_f32, COLOR_AMBER))
@@ -567,52 +865,81 @@ pub fn render_ai_copilot_panel(ui: &mut Ui, app: &mut AbletonStudioApp) {
                 .show(ui, |ui| {
                     ui.vertical(|ui| {
                         ui.spacing_mut().item_spacing = vec2(4.0, 4.0);
+
+                        // Model single-line text input
                         ui.horizontal(|ui| {
-                            ui.label(RichText::new("Proveedor:").size(9.5).color(COLOR_TEXT_MUTED));
-                            for &prov in &AiProvider::ALL {
-                                let is_sel = app.ai_copilot.provider == prov;
-                                let btn = Button::new(
-                                    RichText::new(prov.name())
-                                        .size(9.5)
-                                        .color(if is_sel { COLOR_AMBER } else { COLOR_TEXT_PRIMARY })
-                                        .strong(),
-                                )
-                                .fill(if is_sel { COLOR_BG_PANEL_ALT } else { Color32::TRANSPARENT })
-                                .stroke(Stroke::new(1.0_f32, if is_sel { COLOR_AMBER } else { COLOR_BORDER }));
-                                if ui.add(btn).clicked() && !is_sel {
-                                    app.ai_copilot.provider = prov;
-                                    app.ai_copilot.api_key =
-                                        AiCopilotState::load_local_api_key(prov).unwrap_or_default();
-                                    app.ai_copilot.key_status_msg = None;
-                                }
-                            }
+                            let lbl = if is_es { "Modelo:" } else { "Model:" };
+                            ui.label(RichText::new(lbl).size(9.5).color(COLOR_TEXT_MUTED));
+                            let hint = if is_es {
+                                "ID del modelo (ej: minimax, gemini-3.1-flash...)"
+                            } else {
+                                "Model ID (e.g. minimax, gemini-3.1-flash...)"
+                            };
+                            let w = ui.available_width().max(80.0);
+                            ui.add(
+                                TextEdit::singleline(&mut app.ai_copilot.custom_model)
+                                    .hint_text(hint)
+                                    .desired_width(w),
+                            );
                         });
 
+                        // Base URL single-line text input
                         ui.horizontal(|ui| {
-                            let key_w = (ui.available_width() - 108.0).max(80.0);
+                            let lbl = "Base URL:";
+                            ui.label(RichText::new(lbl).size(9.5).color(COLOR_TEXT_MUTED));
+                            let hint = if is_es {
+                                "URL Endpoint API (opcional / custom)"
+                            } else {
+                                "API Endpoint URL (optional / custom)"
+                            };
+                            let w = ui.available_width().max(80.0);
+                            ui.add(
+                                TextEdit::singleline(&mut app.ai_copilot.custom_base_url)
+                                    .hint_text(hint)
+                                    .desired_width(w),
+                            );
+                        });
+
+                        // API Key password-masked single-line text input + Save / Clear buttons
+                        ui.horizontal(|ui| {
+                            let lbl = "API Key:";
+                            ui.label(RichText::new(lbl).size(9.5).color(COLOR_TEXT_MUTED));
+                            let key_w = (ui.available_width() - 110.0).max(60.0);
+                            let hint = if is_es { "Pegá tu API Key..." } else { "Enter API Key..." };
                             ui.add(
                                 TextEdit::singleline(&mut app.ai_copilot.api_key)
                                     .password(true)
-                                    .hint_text(format!("Pegá tu {}...", app.ai_copilot.provider.env_var_name()))
+                                    .hint_text(hint)
                                     .desired_width(key_w),
                             );
+
+                            let save_lbl = if is_es { "Guardar" } else { "Save" };
+                            let save_hover = if is_es {
+                                "Guarda en ~/.config/oxide-studio/copilot_keys.env (chmod 0600, ignorado por Git)"
+                            } else {
+                                "Save to ~/.config/oxide-studio/copilot_keys.env (chmod 0600, never in Git)"
+                            };
                             if ui
                                 .add(
-                                    Button::new(RichText::new("Guardar").size(9.5).color(COLOR_GREEN).strong())
+                                    Button::new(RichText::new(save_lbl).size(9.5).color(COLOR_GREEN).strong())
                                         .fill(COLOR_BG_PANEL_ALT)
                                         .stroke(Stroke::new(1.0_f32, COLOR_GREEN)),
                                 )
-                                .on_hover_text("Guarda en ~/.config/oxide-studio/copilot_keys.env (chmod 600, ignorado por Git)")
+                                .on_hover_text(save_hover)
                                 .clicked()
                             {
                                 let _ = app.ai_copilot.save_local_api_key();
                             }
+
+                            let clear_lbl = if is_es { "Borrar" } else { "Clear" };
+                            let clear_hover = if is_es { "Borrar API Key local" } else { "Clear local API Key" };
                             if ui
                                 .add(
-                                    Button::new(RichText::new("Borrar").size(9.5).color(COLOR_TEXT_MUTED))
+                                    Button::new(RichText::new(clear_lbl).size(9.5).color(COLOR_TEXT_MUTED))
                                         .fill(COLOR_BG_PANEL_ALT)
                                         .stroke(Stroke::new(1.0_f32, COLOR_BORDER)),
                                 )
+                                .on_hover_text(clear_hover)
                                 .clicked()
                             {
                                 app.ai_copilot.api_key.clear();
@@ -638,6 +965,7 @@ pub fn render_ai_copilot_panel(ui: &mut Ui, app: &mut AbletonStudioApp) {
         ui.separator();
 
         // 2. Context-Aware Header Card ("Knows What We're Doing")
+        let is_es = app.ai_copilot.locale == StudioLocale::Es;
         let sel_track_idx = ui
             .data(|d| d.get_temp::<usize>(egui::Id::new("aruston_selected_track")))
             .unwrap_or(0);
@@ -673,31 +1001,54 @@ pub fn render_ai_copilot_panel(ui: &mut Ui, app: &mut AbletonStudioApp) {
                 ui.vertical(|ui| {
                     ui.spacing_mut().item_spacing = vec2(0.0, 3.0);
                     // Selected Track
+                    let track_label = if is_es {
+                        format!("▶ Pista Seleccionada: Pista {}: {}", sel_track_idx + 1, trk_name)
+                    } else {
+                        format!("▶ Selected Track: Track {}: {}", sel_track_idx + 1, trk_name)
+                    };
                     ui.label(
-                        RichText::new(format!("▶ Selected Track: Track {}: {}", sel_track_idx + 1, trk_name))
+                        RichText::new(track_label)
                             .size(10.5)
                             .color(COLOR_AMBER)
                             .strong(),
                     );
                     // Kick & Synth State
-                    ui.label(
-                        RichText::new(format!(
+                    let state_label = if is_es {
+                        format!(
+                            "⚙ Kick y Sintetizador: Kick {:.0}Hz | Drive {:.1}dB | Corte {:.0}Hz",
+                            app.ai_copilot.kick_fundamental_hz,
+                            app.ai_copilot.kick_drive_db,
+                            app.synth_state.cutoff_hz
+                        )
+                    } else {
+                        format!(
                             "⚙ Kick & Synth: Kick {:.0}Hz | Drive {:.1}dB | Cutoff {:.0}Hz",
                             app.ai_copilot.kick_fundamental_hz,
                             app.ai_copilot.kick_drive_db,
                             app.synth_state.cutoff_hz
-                        ))
-                        .size(10.0)
-                        .color(COLOR_TEXT_PRIMARY),
+                        )
+                    };
+                    ui.label(
+                        RichText::new(state_label)
+                            .size(10.0)
+                            .color(COLOR_TEXT_PRIMARY),
                     );
                     // Agent Ears
-                    ui.label(
-                        RichText::new(format!(
+                    let ears_label = if is_es {
+                        format!(
+                            "≈ Espectro en Vivo: Sub (20-60Hz) {:+.1} dBFS | RMS {:+.1} dBFS",
+                            sub_db, rms_db
+                        )
+                    } else {
+                        format!(
                             "≈ Live Spectrum: Sub (20-60Hz) {:+.1} dBFS | RMS {:+.1} dBFS",
                             sub_db, rms_db
-                        ))
-                        .size(10.0)
-                        .color(COLOR_GREEN),
+                        )
+                    };
+                    ui.label(
+                        RichText::new(ears_label)
+                            .size(10.0)
+                            .color(COLOR_GREEN),
                     );
                 });
             });
@@ -716,8 +1067,13 @@ pub fn render_ai_copilot_panel(ui: &mut Ui, app: &mut AbletonStudioApp) {
                 |ui| {
                     ui.spacing_mut().item_spacing = vec2(4.0, 0.0);
                     let input_width = (ui.available_width() - 54.0).max(110.0);
+                    let hint = if is_es {
+                        "Ingresá un comando (ej: alineación sub-bass)..."
+                    } else {
+                        "Enter studio command (e.g. sub-bass alignment)..."
+                    };
                     let text_edit = TextEdit::singleline(&mut app.ai_copilot.prompt_input)
-                        .hint_text("Pedí al Copilot (ej: kick mas gordo)...")
+                        .hint_text(hint)
                         .desired_width(input_width);
 
                     let response = ui.add(text_edit);
@@ -741,13 +1097,7 @@ pub fn render_ai_copilot_panel(ui: &mut Ui, app: &mut AbletonStudioApp) {
                 |ui| {
                     ui.spacing_mut().item_spacing = vec2(3.0, 3.0);
 
-                    let chips = [
-                        ("■ Kick +Gordo", "hace este kick mas gordo"),
-                        ("⚡ Bajo Acid 303", "dale mas acido al bajo"),
-                        ("▶ Drop Techno 136", "arma un drop de techno a 136 bpm"),
-                        ("★ Groove RKT", "mete un patron de rkt / cachengue"),
-                        ("⚙ Abrir filtro + OTT", "limpia el barro y abre el filtro"),
-                    ];
+                    let chips = app.ai_copilot.locale.quick_chips();
 
                     for (label, intent) in chips {
                         let chip_btn = Button::new(
@@ -1066,5 +1416,130 @@ mod tests {
         // Ensure key file path is in ~/.config/oxide-studio outside the repository
         let p = AiCopilotState::local_key_file_path();
         assert!(p.to_string_lossy().contains(".config/oxide-studio/copilot_keys.env"));
+    }
+
+    #[test]
+    fn test_ai_provider_minimax_and_custom() {
+        assert_eq!(AiProvider::MiniMax.name(), "MiniMax");
+        assert_eq!(AiProvider::MiniMax.env_var_name(), "MINIMAX_API_KEY");
+        assert_eq!(AiProvider::MiniMax.default_base_url(), "https://api.minimax.io/v1");
+        assert_eq!(AiProvider::MiniMax.default_model(), "MiniMax-M2.7");
+
+        assert_eq!(AiProvider::Custom.name(), "Custom");
+        assert_eq!(AiProvider::Custom.env_var_name(), "CUSTOM_API_KEY");
+        assert_eq!(AiProvider::Custom.default_base_url(), "");
+        assert_eq!(AiProvider::Custom.default_model(), "custom-model");
+
+        assert_eq!(AiProvider::ALL.len(), 5);
+        assert!(AiProvider::ALL.contains(&AiProvider::MiniMax));
+        assert!(AiProvider::ALL.contains(&AiProvider::Custom));
+    }
+
+    #[test]
+    fn test_custom_endpoint_model_persistence_and_permissions() {
+        let mut state = AiCopilotState::new();
+        state.custom_model = "minimax-m2.7".to_string();
+        state.custom_base_url = "https://api.minimax.io/v1".to_string();
+        state.api_key = "sk-minimax-test-key-5678".to_string();
+
+        let save_res = state.save_local_api_key();
+        assert!(save_res.is_ok(), "Saving local config must succeed");
+
+        let path = AiCopilotState::local_key_file_path();
+        assert!(path.exists(), "Config file must exist on disk");
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let meta = std::fs::metadata(&path).unwrap();
+            let mode = meta.permissions().mode();
+            assert_eq!(
+                mode & 0o777,
+                0o600,
+                "File permissions must be 0600 (-rw-------)"
+            );
+        }
+
+        let (loaded_key, loaded_model, loaded_url) = AiCopilotState::load_local_config();
+        assert_eq!(loaded_key, "sk-minimax-test-key-5678");
+        assert_eq!(loaded_model, "minimax-m2.7");
+        assert_eq!(loaded_url, "https://api.minimax.io/v1");
+
+        assert_eq!(state.masked_key_preview(), "sk-m•••5678");
+    }
+
+    #[test]
+    fn test_studio_locale_bilingual_initial_messages_and_presets() {
+        let en_init = StudioLocale::En.initial_message();
+        assert_eq!(
+            en_init,
+            "Oxide Studio Assistant ready. Real-time LOM & DSP telemetry bridge connected. Enter a command for parameter automation, MIDI synthesis, stem separation, or spectral mix analysis."
+        );
+
+        let es_init = StudioLocale::Es.initial_message();
+        assert_eq!(
+            es_init,
+            "Asistente de Oxide Studio listo. Puente de telemetría LOM y DSP en tiempo real conectado. Ingresá un comando para automatización de parámetros, síntesis MIDI, separación de stems o análisis espectral."
+        );
+
+        let en_chips = StudioLocale::En.quick_chips();
+        let expected_en = [
+            "Sub-Bass Alignment",
+            "Resonant 303 Bass",
+            "136 BPM Techno Drop",
+            "Syncopated Tresillo",
+            "High-Pass + OTT",
+        ];
+        for (i, &exp) in expected_en.iter().enumerate() {
+            assert_eq!(en_chips[i].0, exp);
+        }
+
+        let es_chips = StudioLocale::Es.quick_chips();
+        let expected_es = [
+            "Alineación Sub-Bass",
+            "Bajo 303 Resonante",
+            "Drop Techno 136 BPM",
+            "Tresillo Sincopado",
+            "Paso-Alto + OTT",
+        ];
+        for (i, &exp) in expected_es.iter().enumerate() {
+            assert_eq!(es_chips[i].0, exp);
+        }
+    }
+
+    #[test]
+    fn test_handle_ai_prompt_bilingual_responses() {
+        let mut app = AbletonStudioApp::new_mock(44100.0);
+
+        // 1. English prompt & reply
+        app.ai_copilot.set_locale(StudioLocale::En);
+        assert_eq!(app.ai_copilot.locale, StudioLocale::En);
+        app.handle_ai_prompt("Sub-Bass Alignment");
+
+        let last_msg = app.ai_copilot.messages.last().unwrap();
+        assert_eq!(last_msg.role, MessageRole::Assistant);
+        assert!(last_msg.text.contains("Kick 909 a 48.0 Hz"));
+        assert!(last_msg.text.contains("fundamental alignment"));
+
+        // 2. Spanish prompt & reply
+        app.ai_copilot.set_locale(StudioLocale::Es);
+        assert_eq!(app.ai_copilot.locale, StudioLocale::Es);
+        app.handle_ai_prompt("Alineación Sub-Bass");
+
+        let last_msg_es = app.ai_copilot.messages.last().unwrap();
+        assert_eq!(last_msg_es.role, MessageRole::Assistant);
+        assert!(last_msg_es.text.contains("Kick 909 a 48.0 Hz"));
+        assert!(last_msg_es.text.contains("alineado en sub-graves"));
+
+        // 3. 303 Resonant bass in Spanish
+        app.handle_ai_prompt("Bajo 303 Resonante");
+        let last_303 = app.ai_copilot.messages.last().unwrap();
+        assert!(last_303.text.contains("Filtro Ladder ZDF"));
+
+        // 4. 136 BPM Techno Drop in English
+        app.ai_copilot.set_locale(StudioLocale::En);
+        app.handle_ai_prompt("136 BPM Techno Drop");
+        let last_drop = app.ai_copilot.messages.last().unwrap();
+        assert!(last_drop.text.contains("Tempo locked at 136.0 BPM"));
     }
 }

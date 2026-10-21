@@ -275,7 +275,7 @@ pub fn render_device_chain_view(
                             // Header tools on right
                             ui.with_layout(Layout::right_to_left(egui::Align::Center), |ui| {
                                 // Delete button
-                                if ui.add(Button::new(RichText::new("✕").size(9.5).color(COLOR_TEXT_MUTED))).clicked() {
+                                if ui.add(Button::new(RichText::new("×").size(9.5).color(COLOR_TEXT_MUTED))).clicked() {
                                     action.delete_device = Some(idx);
                                 }
 
@@ -298,7 +298,7 @@ pub fn render_device_chain_view(
                         ui.separator();
 
                         // Render Custom Interactive Visualizer Widget for this device
-                        let vis_h = 135.0;
+                        let vis_h = (ui.available_height() - 32.0).clamp(90.0, 105.0);
                         let vis_size = vec2(dev_w, vis_h);
                         let vis_response = match dev.kind {
                             DeviceKind::Wavetable => {
@@ -353,7 +353,7 @@ pub fn render_device_chain_view(
                                     if ui.add(DragValue::new(&mut dev.wavetable.filter1_res).range(0.0..=1.0).speed(0.01)).changed() {
                                         param_changed = true;
                                     }
-                                    if ui.add(Button::new(RichText::new("↺").size(9.0).color(COLOR_TEXT_MUTED)).min_size(vec2(16.0, 16.0))).on_hover_text("Reset to Defaults").clicked() {
+                                    if ui.add(Button::new(RichText::new("R").size(9.0).color(COLOR_TEXT_MUTED)).min_size(vec2(16.0, 16.0))).on_hover_text("Reset to Defaults").clicked() {
                                         dev.wavetable = WavetableVisualizerState::default();
                                         param_changed = true;
                                     }
@@ -371,7 +371,7 @@ pub fn render_device_chain_view(
                                     if ui.add(DragValue::new(&mut dev.operator.ops[0].level).range(0.0..=1.0).speed(0.01)).changed() {
                                         param_changed = true;
                                     }
-                                    if ui.add(Button::new(RichText::new("↺").size(9.0).color(COLOR_TEXT_MUTED)).min_size(vec2(16.0, 16.0))).on_hover_text("Reset to Defaults").clicked() {
+                                    if ui.add(Button::new(RichText::new("R").size(9.0).color(COLOR_TEXT_MUTED)).min_size(vec2(16.0, 16.0))).on_hover_text("Reset to Defaults").clicked() {
                                         dev.operator = OperatorVisualizerState::default();
                                         param_changed = true;
                                     }
@@ -389,7 +389,7 @@ pub fn render_device_chain_view(
                                     if ui.add(DragValue::new(&mut dev.roar.feedback).range(0.0..=0.95).speed(0.01)).changed() {
                                         param_changed = true;
                                     }
-                                    if ui.add(Button::new(RichText::new("↺").size(9.0).color(COLOR_TEXT_MUTED)).min_size(vec2(16.0, 16.0))).on_hover_text("Reset to Defaults").clicked() {
+                                    if ui.add(Button::new(RichText::new("R").size(9.0).color(COLOR_TEXT_MUTED)).min_size(vec2(16.0, 16.0))).on_hover_text("Reset to Defaults").clicked() {
                                         dev.roar = RoarVisualizerState::default();
                                         param_changed = true;
                                     }
@@ -408,7 +408,7 @@ pub fn render_device_chain_view(
                                     if ui.add(DragValue::new(&mut dev.eq8.bands[sel_band].q).range(0.1..=18.0).speed(0.05)).changed() {
                                         param_changed = true;
                                     }
-                                    if ui.add(Button::new(RichText::new("↺").size(9.0).color(COLOR_TEXT_MUTED)).min_size(vec2(16.0, 16.0))).on_hover_text("Reset to Defaults").clicked() {
+                                    if ui.add(Button::new(RichText::new("R").size(9.0).color(COLOR_TEXT_MUTED)).min_size(vec2(16.0, 16.0))).on_hover_text("Reset to Defaults").clicked() {
                                         dev.eq8 = EqEightVisualizerState::default();
                                         param_changed = true;
                                     }
@@ -426,7 +426,7 @@ pub fn render_device_chain_view(
                                     if ui.add(DragValue::new(&mut dev.glue.attack_ms).range(0.1..=30.0).speed(0.5).suffix(" ms")).changed() {
                                         param_changed = true;
                                     }
-                                    if ui.add(Button::new(RichText::new("↺").size(9.0).color(COLOR_TEXT_MUTED)).min_size(vec2(16.0, 16.0))).on_hover_text("Reset to Defaults").clicked() {
+                                    if ui.add(Button::new(RichText::new("R").size(9.0).color(COLOR_TEXT_MUTED)).min_size(vec2(16.0, 16.0))).on_hover_text("Reset to Defaults").clicked() {
                                         dev.glue = GlueCompressorVisualizerState::default();
                                         param_changed = true;
                                     }
@@ -444,7 +444,7 @@ pub fn render_device_chain_view(
                                     if ui.add(DragValue::new(&mut dev.auto_filter.env_amount).range(-1.0..=1.0).speed(0.02)).changed() {
                                         param_changed = true;
                                     }
-                                    if ui.add(Button::new(RichText::new("↺").size(9.0).color(COLOR_TEXT_MUTED)).min_size(vec2(16.0, 16.0))).on_hover_text("Reset to Defaults").clicked() {
+                                    if ui.add(Button::new(RichText::new("R").size(9.0).color(COLOR_TEXT_MUTED)).min_size(vec2(16.0, 16.0))).on_hover_text("Reset to Defaults").clicked() {
                                         dev.auto_filter = AutoFilterVisualizerState::default();
                                         param_changed = true;
                                     }
@@ -462,7 +462,7 @@ pub fn render_device_chain_view(
                                     if ui.add(DragValue::new(&mut dev.ott.output_gain_db).range(-24.0..=24.0).speed(0.2).suffix(" dB")).changed() {
                                         param_changed = true;
                                     }
-                                    if ui.add(Button::new(RichText::new("↺").size(9.0).color(COLOR_TEXT_MUTED)).min_size(vec2(16.0, 16.0))).on_hover_text("Reset to Defaults").clicked() {
+                                    if ui.add(Button::new(RichText::new("R").size(9.0).color(COLOR_TEXT_MUTED)).min_size(vec2(16.0, 16.0))).on_hover_text("Reset to Defaults").clicked() {
                                         dev.ott = OttVisualizerState::default();
                                         param_changed = true;
                                     }
@@ -481,7 +481,7 @@ pub fn render_device_chain_view(
                                     if ui.add(DragValue::new(&mut dev.simpler.active_slice).range(0..=max_slice)).changed() {
                                         param_changed = true;
                                     }
-                                    if ui.add(Button::new(RichText::new("↺").size(9.0).color(COLOR_TEXT_MUTED)).min_size(vec2(16.0, 16.0))).on_hover_text("Reset to Defaults").clicked() {
+                                    if ui.add(Button::new(RichText::new("R").size(9.0).color(COLOR_TEXT_MUTED)).min_size(vec2(16.0, 16.0))).on_hover_text("Reset to Defaults").clicked() {
                                         dev.simpler = SimplerVisualizerState::default();
                                         param_changed = true;
                                     }
@@ -500,7 +500,7 @@ pub fn render_device_chain_view(
                                     if ui.add(DragValue::new(&mut dev.drum_rack.pads[sel_pad].choke_group).range(0..=16)).changed() {
                                         param_changed = true;
                                     }
-                                    if ui.add(Button::new(RichText::new("↺").size(9.0).color(COLOR_TEXT_MUTED)).min_size(vec2(16.0, 16.0))).on_hover_text("Reset to Defaults").clicked() {
+                                    if ui.add(Button::new(RichText::new("R").size(9.0).color(COLOR_TEXT_MUTED)).min_size(vec2(16.0, 16.0))).on_hover_text("Reset to Defaults").clicked() {
                                         dev.drum_rack = DrumRackVisualizerState::default();
                                         param_changed = true;
                                     }

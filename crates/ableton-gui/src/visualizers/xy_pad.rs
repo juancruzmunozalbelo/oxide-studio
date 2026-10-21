@@ -231,7 +231,7 @@ impl<'a> XyPerformPadWidget<'a> {
         } else {
             total_w
         };
-        let canvas_h = 138.0_f32;
+        let canvas_h = (ui.available_height() - 28.0).clamp(60.0, 140.0);
 
         let response = if split_layout {
             ui.horizontal(|ui| {
@@ -291,7 +291,7 @@ impl<'a> XyPerformPadWidget<'a> {
                         // Orbit Controls Toolbar
                         ui.horizontal(|ui| {
                             let orbit_active = self.state.orbit_enabled;
-                            let orbit_text = RichText::new(if orbit_active { "⇄ Orbit ON" } else { "⇄ Orbit OFF" })
+                            let orbit_text = RichText::new(if orbit_active { "• Orbit ON" } else { "• Orbit OFF" })
                                 .size(9.5)
                                 .color(if orbit_active { COLOR_AMBER } else { COLOR_TEXT_MUTED })
                                 .strong();
@@ -320,7 +320,7 @@ impl<'a> XyPerformPadWidget<'a> {
                                 changed = true;
                             }
 
-                            let shape_lis = Button::new(RichText::new("∿").size(11.0).color(
+                            let shape_lis = Button::new(RichText::new("~").size(11.0).color(
                                 if self.state.orbit_shape == OrbitShape::Lissajous { COLOR_AMBER } else { COLOR_TEXT_MUTED },
                             )).min_size(vec2(18.0, 18.0));
                             if ui.add(shape_lis).clicked() {
@@ -374,52 +374,44 @@ impl<'a> XyPerformPadWidget<'a> {
                                     let is_mapped_x = self.state.map_x_to_macro == Some(macro_idx);
                                     let is_mapped_y = self.state.map_y_to_macro == Some(macro_idx);
 
-                                    let card_size = vec2(col_w, 66.0);
-                                    let (card_rect, _card_response) = ui.allocate_exact_size(card_size, Sense::hover());
-
-                                    if ui.is_rect_visible(card_rect) {
-                                        let painter = ui.painter_at(card_rect);
-                                        painter.rect_filled(card_rect, 3.0, COLOR_BG_SURFACE);
-                                        let stroke_color = if is_mapped_x {
-                                            COLOR_AMBER
-                                        } else if is_mapped_y {
-                                            COLOR_CYAN
-                                        } else {
-                                            COLOR_BORDER
-                                        };
-                                        painter.rect_stroke(card_rect, 3.0, Stroke::new(1.0_f32, stroke_color));
-
-                                        // Macro title & readout
-                                        let p = &self.state.macros[macro_idx];
-                                        painter.text(
-                                            pos2(card_rect.left() + 5.0, card_rect.top() + 4.0),
-                                            Align2::LEFT_TOP,
-                                            p.label,
-                                            FontId::new(9.5, FontFamily::Proportional),
-                                            if is_mapped_x {
-                                                COLOR_AMBER
-                                            } else if is_mapped_y {
-                                                COLOR_CYAN
-                                            } else {
-                                                COLOR_TEXT_PRIMARY
-                                            },
-                                        );
-
-                                        painter.text(
-                                            pos2(card_rect.right() - 5.0, card_rect.top() + 4.0),
-                                            Align2::RIGHT_TOP,
-                                            p.format_display(),
-                                            FontId::new(9.0, FontFamily::Monospace),
-                                            COLOR_TEXT_MUTED,
-                                        );
-                                    }
-
-                                    // Macro slider & mapping chips inside card
-                                    #[allow(deprecated)]
-                                    ui.allocate_ui_at_rect(
-                                        card_rect.shrink(4.0),
+                                    let card_h = ((ui.available_height() - 4.0) * 0.5).clamp(44.0, 66.0);
+                                    let card_size = vec2(col_w, card_h);
+                                    ui.allocate_ui_with_layout(
+                                        card_size,
+                                        egui::Layout::top_down(egui::Align::Min),
                                         |card_ui| {
-                                            card_ui.add_space(16.0);
+                                            let card_rect = card_ui.max_rect();
+                                            if card_ui.is_rect_visible(card_rect) {
+                                                let painter = card_ui.painter();
+                                                painter.rect_filled(card_rect, 3.0, COLOR_BG_SURFACE);
+                                                let stroke_color = if is_mapped_x {
+                                                    COLOR_AMBER
+                                                } else if is_mapped_y {
+                                                    COLOR_CYAN
+                                                } else {
+                                                    COLOR_BORDER
+                                                };
+                                                painter.rect_stroke(card_rect, 3.0, Stroke::new(1.0_f32, stroke_color));
+
+                                                // Macro title
+                                                let p = &self.state.macros[macro_idx];
+                                                painter.text(
+                                                    pos2(card_rect.left() + 5.0, card_rect.top() + 4.0),
+                                                    Align2::LEFT_TOP,
+                                                    p.label,
+                                                    FontId::new(9.5, FontFamily::Proportional),
+                                                    if is_mapped_x {
+                                                        COLOR_AMBER
+                                                    } else if is_mapped_y {
+                                                        COLOR_CYAN
+                                                    } else {
+                                                        COLOR_TEXT_PRIMARY
+                                                    },
+                                                );
+                                            }
+
+                                            let top_space = if card_h < 56.0 { 12.0 } else { 16.0 };
+                                            card_ui.add_space(top_space);
 
                                             // Slider bar
                                             let slider = Slider::new(&mut self.state.macros[macro_idx].value, 0.0..=1.0)
@@ -434,7 +426,8 @@ impl<'a> XyPerformPadWidget<'a> {
                                                 changed = true;
                                             }
 
-                                            // Axis Mapping Chips [X] and [Y]
+                                            // Axis Mapping Chips [X] and [Y] + Readout on right
+                                            let p = &self.state.macros[macro_idx];
                                             card_ui.horizontal(|card_ui| {
                                                 let x_btn = Button::new(
                                                     RichText::new("X")
@@ -471,6 +464,15 @@ impl<'a> XyPerformPadWidget<'a> {
                                                     }
                                                     changed = true;
                                                 }
+
+                                                card_ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |card_ui| {
+                                                    card_ui.label(
+                                                        RichText::new(p.format_display())
+                                                            .size(8.5)
+                                                            .monospace()
+                                                            .color(COLOR_TEXT_MUTED),
+                                                    );
+                                                });
                                             });
                                         },
                                     );
