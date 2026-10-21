@@ -52,9 +52,9 @@ impl ViewportBudget {
         // 4. Center workspace width receives all remaining horizontal space
         let center_width = (total_w - left_browser_width - right_copilot_width).max(0.0);
 
-        // 5. Bottom deck: 210.0..=260.0 px, strictly <= 34% of window height
+        // 5. Bottom deck: 210.0..=270.0 px, strictly <= 34% of window height
         let max_deck_h = total_h * 0.34;
-        let bottom_deck_height = (total_h * 0.30).clamp(210.0, 260.0).min(max_deck_h);
+        let bottom_deck_height = (total_h * 0.33).clamp(210.0, 270.0).min(max_deck_h);
 
         // 6. Center workspace height receives >= 55% of window height
         let center_height = (total_h - top_bar_height - bottom_deck_height).max(0.0);

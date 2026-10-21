@@ -392,19 +392,19 @@ pub fn render_ai_copilot_panel(ui: &mut Ui, app: &mut AbletonStudioApp) {
         // 1. Panel Header Row
         ui.horizontal(|ui| {
             ui.label(
-                RichText::new("🤖 AI COPILOT")
+                RichText::new("⚡ AI COPILOT")
                     .size(12.0)
                     .color(COLOR_CYAN)
                     .strong(),
             );
             ui.label(
                 RichText::new("• MCP CONNECTED")
-                    .size(9.0)
+                    .size(9.5)
                     .color(COLOR_GREEN),
             );
 
             ui.with_layout(Layout::right_to_left(egui::Align::Center), |ui| {
-                if ui.small_button("✖").on_hover_text("Close AI Copilot").clicked() {
+                if ui.small_button("×").on_hover_text("Close AI Copilot").clicked() {
                     app.copilot_open = false;
                 }
             });
@@ -446,10 +446,10 @@ pub fn render_ai_copilot_panel(ui: &mut Ui, app: &mut AbletonStudioApp) {
             .inner_margin(Margin::same(6.0))
             .show(ui, |ui| {
                 ui.vertical(|ui| {
-                    ui.spacing_mut().item_spacing = vec2(0.0, 2.0);
+                    ui.spacing_mut().item_spacing = vec2(0.0, 3.0);
                     // Selected Track
                     ui.label(
-                        RichText::new(format!("🎯 Selected Track: Track {}: {}", sel_track_idx + 1, trk_name))
+                        RichText::new(format!("▶ Selected Track: Track {}: {}", sel_track_idx + 1, trk_name))
                             .size(10.5)
                             .color(COLOR_AMBER)
                             .strong(),
@@ -457,21 +457,21 @@ pub fn render_ai_copilot_panel(ui: &mut Ui, app: &mut AbletonStudioApp) {
                     // Kick & Synth State
                     ui.label(
                         RichText::new(format!(
-                            "🎚️ Kick & Synth State: Kick: {:.0}Hz | Drive: {:.1}dB | Cutoff: {:.0}Hz",
+                            "⚙ Kick & Synth: Kick {:.0}Hz | Drive {:.1}dB | Cutoff {:.0}Hz",
                             app.ai_copilot.kick_fundamental_hz,
                             app.ai_copilot.kick_drive_db,
                             app.synth_state.cutoff_hz
                         ))
-                        .size(9.5)
+                        .size(10.0)
                         .color(COLOR_TEXT_PRIMARY),
                     );
                     // Agent Ears
                     ui.label(
                         RichText::new(format!(
-                            "👂 Agent Ears (Live Spectrum): Sub (20-60Hz): {:+.1} dBFS | RMS: {:+.1} dBFS",
+                            "≈ Live Spectrum: Sub (20-60Hz) {:+.1} dBFS | RMS {:+.1} dBFS",
                             sub_db, rms_db
                         ))
-                        .size(9.5)
+                        .size(10.0)
                         .color(COLOR_GREEN),
                     );
                 });
@@ -480,7 +480,7 @@ pub fn render_ai_copilot_panel(ui: &mut Ui, app: &mut AbletonStudioApp) {
         ui.add_space(2.0);
 
         // 3. Scrollable Chat Message History
-        let chat_avail_height = (ui.available_height() - 95.0).max(120.0);
+        let chat_avail_height = (ui.available_height() - 142.0).max(100.0);
         ScrollArea::vertical()
             .max_height(chat_avail_height)
             .auto_shrink([false, false])
@@ -524,7 +524,7 @@ pub fn render_ai_copilot_panel(ui: &mut Ui, app: &mut AbletonStudioApp) {
                                         ui.vertical(|ui| {
                                             ui.horizontal(|ui| {
                                                 ui.label(
-                                                    RichText::new("🤖 Copilot")
+                                                    RichText::new("⚡ Copilot")
                                                         .size(10.5)
                                                         .color(COLOR_CYAN)
                                                         .strong(),
@@ -578,17 +578,17 @@ pub fn render_ai_copilot_panel(ui: &mut Ui, app: &mut AbletonStudioApp) {
             ui.spacing_mut().item_spacing = vec2(3.0, 3.0);
 
             let chips = [
-                ("🥁 Hacer este Kick más gordo", "hace este kick mas gordo"),
-                ("🧪 Bajo Acid 303 picante", "dale mas acido al bajo"),
-                ("🔥 Drop Techno 136 BPM", "arma un drop de techno a 136 bpm"),
-                ("🇦🇷 Grooves RKT / Turreo", "mete un patron de rkt / cachengue"),
-                ("✨ Abrir filtro + OTT", "limpia el barro y abre el filtro"),
+                ("■ Hacer este Kick más gordo", "hace este kick mas gordo"),
+                ("⚡ Bajo Acid 303 picante", "dale mas acido al bajo"),
+                ("▶ Drop Techno 136 BPM", "arma un drop de techno a 136 bpm"),
+                ("★ Grooves RKT / Turreo", "mete un patron de rkt / cachengue"),
+                ("⚙ Abrir filtro + OTT", "limpia el barro y abre el filtro"),
             ];
 
             for (label, intent) in chips {
                 let chip_btn = Button::new(
                     RichText::new(label)
-                        .size(9.5)
+                        .size(10.0)
                         .color(COLOR_TEXT_PRIMARY),
                 )
                 .fill(COLOR_BG_PANEL_ALT)
@@ -612,7 +612,7 @@ pub fn render_ai_copilot_panel(ui: &mut Ui, app: &mut AbletonStudioApp) {
             let response = ui.add(text_edit);
             let enter_pressed = response.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter));
 
-            let send_btn = Button::new(RichText::new("➤").size(11.0).color(COLOR_CYAN).strong())
+            let send_btn = Button::new(RichText::new("▶").size(11.0).color(COLOR_CYAN).strong())
                 .min_size(vec2(48.0, 24.0))
                 .fill(COLOR_BG_PANEL_ALT)
                 .stroke(Stroke::new(1.0_f32, COLOR_CYAN));

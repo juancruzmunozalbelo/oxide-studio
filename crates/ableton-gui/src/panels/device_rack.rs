@@ -163,9 +163,9 @@ pub fn render_device_chain_view(
         let selected_track_idx = ui.data_mut(|d| d.get_temp::<usize>(egui::Id::new("aruston_selected_track")).unwrap_or(0));
         ui.horizontal(|ui| {
             ui.spacing_mut().item_spacing = vec2(8.0, 0.0);
-            let badge_text = format!("🎛 Track {} Signal Chain (MIDI FX ➔ Instrument ➔ Audio FX)", selected_track_idx + 1);
-            ui.label(RichText::new(badge_text).size(11.0).color(COLOR_AMBER).strong());
-            ui.label(RichText::new("• Audio flows left ➔ right").size(9.5).color(COLOR_TEXT_MUTED));
+            let badge_text = format!("⚙ Track {} Signal Chain (MIDI FX -> Instrument -> Audio FX)", selected_track_idx + 1);
+            ui.label(RichText::new(badge_text).size(11.5).color(COLOR_AMBER).strong());
+            ui.label(RichText::new("• Audio flows left -> right").size(10.0).color(COLOR_TEXT_MUTED));
         });
         ui.add_space(2.0);
 

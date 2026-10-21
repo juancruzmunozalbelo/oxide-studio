@@ -43,16 +43,16 @@ impl BrowserCategory {
 
     pub fn icon_label(&self) -> &'static str {
         match self {
-            BrowserCategory::Sounds => "🎵 Sounds",
-            BrowserCategory::Drums => "🥁 Drums",
-            BrowserCategory::Instruments => "🎹 Instruments",
-            BrowserCategory::AudioEffects => "🎛 Audio FX",
+            BrowserCategory::Sounds => "♪ Sounds",
+            BrowserCategory::Drums => "■ Drums",
+            BrowserCategory::Instruments => "★ Instruments",
+            BrowserCategory::AudioEffects => "⚙ Audio FX",
             BrowserCategory::MidiEffects => "⚡ MIDI FX",
-            BrowserCategory::PlugIns => "🔌 Plug-Ins",
-            BrowserCategory::Clips => "🎞 Clips",
-            BrowserCategory::Samples => "🔊 Samples",
-            BrowserCategory::Grooves => "🌊 Grooves",
-            BrowserCategory::Templates => "📐 Templates",
+            BrowserCategory::PlugIns => "+ Plug-Ins",
+            BrowserCategory::Clips => "▶ Clips",
+            BrowserCategory::Samples => "≈ Samples",
+            BrowserCategory::Grooves => "♫ Grooves",
+            BrowserCategory::Templates => "≡ Templates",
         }
     }
 
@@ -514,21 +514,20 @@ pub fn render_browser_panel(ui: &mut Ui, state: &mut BrowserState) -> BrowserAct
         // 1. Instant Search Filter Bar with Tags Toggle on same row
         ui.horizontal(|ui| {
             ui.spacing_mut().item_spacing = vec2(4.0, 0.0);
-            ui.label(RichText::new("🔍").size(11.0).color(COLOR_TEXT_MUTED));
             ui.add(
                 TextEdit::singleline(&mut state.search_query)
                     .hint_text("Search synths, 909, FX...")
-                    .desired_width(ui.available_width() - 86.0),
+                    .desired_width(ui.available_width() - 68.0),
             );
 
             let has_tags = state.selected_tag.is_some() || !state.active_tags.is_empty();
             let tag_text = if has_tags {
-                "🏷 Tags (Active)"
+                "# Tags *"
             } else {
-                "🏷 Tags"
+                "# Tags"
             };
             let tag_color = if has_tags { COLOR_AMBER } else { COLOR_TEXT_MUTED };
-            let tag_btn = Button::new(RichText::new(tag_text).size(9.5).color(tag_color))
+            let tag_btn = Button::new(RichText::new(tag_text).size(10.0).color(tag_color))
                 .fill(if state.show_tags_drawer { COLOR_BG_PANEL_ALT } else { COLOR_BG_SURFACE })
                 .stroke(Stroke::new(1.0_f32, if has_tags { COLOR_AMBER } else { COLOR_BORDER }));
             if ui.add(tag_btn).on_hover_text("Toggle Tag Filters Drawer").clicked() {
@@ -550,7 +549,7 @@ pub fn render_browser_panel(ui: &mut Ui, state: &mut BrowserState) -> BrowserAct
                         (COLOR_BG_SURFACE, COLOR_TEXT_MUTED, COLOR_BORDER)
                     };
 
-                    let pill = Button::new(RichText::new(tag).size(9.0).color(text_color))
+                    let pill = Button::new(RichText::new(tag).size(9.5).color(text_color))
                         .fill(fill)
                         .stroke(Stroke::new(1.0_f32, border_color));
 
@@ -566,13 +565,13 @@ pub fn render_browser_panel(ui: &mut Ui, state: &mut BrowserState) -> BrowserAct
         ui.separator();
 
         // 3. Category Navigation (Unclipped 2-column egui::Grid, no vertical scroll)
-        ui.label(RichText::new("Categories:").size(10.0).color(COLOR_TEXT_MUTED));
+        ui.label(RichText::new("Categories:").size(10.5).color(COLOR_TEXT_MUTED));
 
         let all_cats_sel = state.show_all_categories && state.search_query.is_empty();
         let all_cats_color = if all_cats_sel { COLOR_AMBER } else { COLOR_TEXT_PRIMARY };
         let all_cats_btn = Button::new(
-            RichText::new("✨ All Categories")
-                .size(10.0)
+            RichText::new("★ All Categories")
+                .size(10.5)
                 .color(all_cats_color)
                 .strong(),
         )

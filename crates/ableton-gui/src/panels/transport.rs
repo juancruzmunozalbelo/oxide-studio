@@ -70,7 +70,7 @@ pub fn render_top_control_bar(
     };
 
     ui.horizontal(|ui| {
-        ui.spacing_mut().item_spacing = vec2(6.0, 0.0);
+        ui.spacing_mut().item_spacing = vec2(5.0, 0.0);
 
         // 1. Brand Badge: "⚡ OXIDE STUDIO" in ACCENT_AMBER bold (13px)
         ui.label(
@@ -82,12 +82,11 @@ pub fn render_top_control_bar(
 
         ui.separator();
 
-        // 2. Transport Group: Prominent "▶ PLAY" / "⏹ STOP" button, "128.0 BPM" drag value, and "🎹 Key: Piano" toggle
-        // Play Button
+        // 2. Transport Group: Prominent "▶ PLAY" / "■ STOP" button, "124.00 BPM" drag value, and "Key: Piano" toggle
         let play_color = if is_playing { COLOR_GREEN } else { COLOR_TEXT_PRIMARY };
         let play_fill = if is_playing { Color32::from_rgb(0x10, 0x36, 0x18) } else { COLOR_BG_PANEL_ALT };
         let play_btn = Button::new(RichText::new("▶ PLAY").size(11.0).color(play_color).strong())
-            .min_size(vec2(58.0, 26.0))
+            .min_size(vec2(54.0, 26.0))
             .fill(play_fill)
             .stroke(Stroke::new(1.0_f32, if is_playing { COLOR_GREEN } else { COLOR_BORDER }));
         if ui.add(play_btn).clicked() {
@@ -95,8 +94,8 @@ pub fn render_top_control_bar(
         }
 
         // Stop Button
-        let stop_btn = Button::new(RichText::new("⏹ STOP").size(11.0).color(COLOR_TEXT_PRIMARY).strong())
-            .min_size(vec2(54.0, 26.0))
+        let stop_btn = Button::new(RichText::new("■ STOP").size(11.0).color(COLOR_TEXT_PRIMARY).strong())
+            .min_size(vec2(52.0, 26.0))
             .fill(COLOR_BG_PANEL_ALT)
             .stroke(Stroke::new(1.0_f32, COLOR_BORDER));
         if ui.add(stop_btn).clicked() {
@@ -106,8 +105,8 @@ pub fn render_top_control_bar(
         // Record Button
         let rec_color = if is_recording { COLOR_RUBY } else { COLOR_TEXT_MUTED };
         let rec_fill = if is_recording { Color32::from_rgb(0x38, 0x08, 0x10) } else { COLOR_BG_PANEL_ALT };
-        let rec_btn = Button::new(RichText::new("●").size(13.0).color(rec_color))
-            .min_size(vec2(28.0, 26.0))
+        let rec_btn = Button::new(RichText::new("REC").size(10.0).color(rec_color).strong())
+            .min_size(vec2(32.0, 26.0))
             .fill(rec_fill)
             .stroke(Stroke::new(1.0_f32, if is_recording { COLOR_RUBY } else { COLOR_BORDER }));
         if ui.add(rec_btn).on_hover_text("Toggle Record").clicked() {
@@ -116,7 +115,7 @@ pub fn render_top_control_bar(
 
         // Tap Tempo
         let tap_btn = Button::new(RichText::new("TAP").size(10.0).color(COLOR_AMBER).strong())
-            .min_size(vec2(32.0, 26.0))
+            .min_size(vec2(30.0, 26.0))
             .fill(COLOR_BG_PANEL_ALT)
             .stroke(Stroke::new(1.0_f32, COLOR_BORDER));
         if ui.add(tap_btn).clicked() {
@@ -146,20 +145,20 @@ pub fn render_top_control_bar(
 
         // Metronome Toggle
         let metro_color = if *metronome { COLOR_AMBER } else { COLOR_TEXT_MUTED };
-        let metro_btn = Button::new(RichText::new("⏱").size(12.0).color(metro_color))
-            .min_size(vec2(24.0, 26.0))
+        let metro_btn = Button::new(RichText::new("CLK").size(10.0).color(metro_color).strong())
+            .min_size(vec2(30.0, 26.0))
             .fill(if *metronome { COLOR_BG_PANEL_ALT } else { COLOR_BG_SURFACE })
             .stroke(Stroke::new(1.0_f32, if *metronome { COLOR_AMBER } else { COLOR_BORDER }));
         if ui.add(metro_btn).on_hover_text("Metronome Click").clicked() {
             *metronome = !*metronome;
         }
 
-        // Keyboard Mode Toggle: "🎹 Key: Piano"
+        // Keyboard Mode Toggle: "♪ Piano"
         let key_mode_id = egui::Id::new("aruston_key_piano_mode");
         let mut is_piano_mode = ui.data_mut(|d| *d.get_temp_mut_or(key_mode_id, true));
-        let key_label = if is_piano_mode { "🎹 Key: Piano" } else { "🎹 Key: Iso" };
+        let key_label = if is_piano_mode { "♪ Piano" } else { "♪ Iso" };
         let key_btn = Button::new(RichText::new(key_label).size(10.0).color(if is_piano_mode { COLOR_AMBER } else { COLOR_CYAN }))
-            .min_size(vec2(86.0, 24.0))
+            .min_size(vec2(52.0, 24.0))
             .fill(COLOR_BG_PANEL_ALT)
             .stroke(Stroke::new(1.0_f32, COLOR_BORDER));
         if ui.add(key_btn).on_hover_text("Toggle Computer Keyboard Input Mode (Piano / Wicki-Hayden Isomorphic)").clicked() {
@@ -169,11 +168,11 @@ pub fn render_top_control_bar(
 
         ui.separator();
 
-        // 3. Musical Scale Group: Root + Scale selector ("🎵 F Dorian") + "🔒 Scale" toggle
+        // 3. Musical Scale Group: Root + Scale selector ("♪ F Dorian") + "★" Scale Lock toggle
         let cur_root_name = ROOT_NAMES[(scale.root % 12) as usize];
         ComboBox::from_id_salt("top_bar_root_selector")
-            .selected_text(RichText::new(format!("🎵 {}", cur_root_name)).size(11.0).color(COLOR_AMBER).strong())
-            .width(46.0)
+            .selected_text(RichText::new(format!("♪ {}", cur_root_name)).size(10.5).color(COLOR_AMBER).strong())
+            .width(38.0)
             .show_ui(ui, |ui| {
                 for (idx, &name) in ROOT_NAMES.iter().enumerate() {
                     let is_sel = scale.root == idx as u8;
@@ -185,8 +184,8 @@ pub fn render_top_control_bar(
             });
 
         ComboBox::from_id_salt("top_bar_scale_mode_selector")
-            .selected_text(RichText::new(scale.mode.name()).size(11.0).color(COLOR_AMBER))
-            .width(96.0)
+            .selected_text(RichText::new(scale.mode.name()).size(10.5).color(COLOR_AMBER))
+            .width(66.0)
             .show_ui(ui, |ui| {
                 for &m in &ScaleMode::ALL {
                     let is_sel = scale.mode == m;
@@ -198,7 +197,7 @@ pub fn render_top_control_bar(
             });
 
         let lock_color = if scale.scale_lock { COLOR_AMBER } else { COLOR_TEXT_MUTED };
-        let lock_text = if scale.scale_lock { "🔒 Scale" } else { "🔓 Scale" };
+        let lock_text = if scale.scale_lock { "★ Lock" } else { "☆ Lock" };
         let lock_btn = Button::new(RichText::new(lock_text).size(10.0).color(lock_color))
             .fill(if scale.scale_lock { COLOR_BG_PANEL_ALT } else { COLOR_BG_SURFACE })
             .stroke(Stroke::new(1.0_f32, if scale.scale_lock { COLOR_AMBER } else { COLOR_BORDER }));
@@ -208,18 +207,17 @@ pub fn render_top_control_bar(
             action.scale_changed = true;
         }
 
-        ui.separator();
-
         // 4. Pro Controls (Toggle "⚙ Pro", stored in ui.data_mut)
         let pro_mode_id = egui::Id::new("aruston_pro_header_mode");
         let mut pro_mode = ui.data_mut(|d| *d.get_temp_mut_or(pro_mode_id, false));
 
         let pro_btn = Button::new(
-            RichText::new("⚙ Pro")
-                .size(10.5)
+            RichText::new("⚙")
+                .size(11.0)
                 .color(if pro_mode { COLOR_AMBER } else { COLOR_TEXT_MUTED })
                 .strong(),
         )
+        .min_size(vec2(24.0, 24.0))
         .fill(if pro_mode { COLOR_BG_PANEL_ALT } else { COLOR_BG_SURFACE })
         .stroke(Stroke::new(1.0_f32, if pro_mode { COLOR_AMBER } else { COLOR_BORDER }));
 
@@ -246,7 +244,7 @@ pub fn render_top_control_bar(
             // Tuning System Selector (12-TET, Just Intonation, 24-EDO, Scala loader)
             ComboBox::from_id_salt("top_bar_tuning_system_selector")
                 .selected_text(RichText::new(tuning.tuning_type.name()).size(10.0).color(COLOR_CYAN))
-                .width(105.0)
+                .width(95.0)
                 .show_ui(ui, |ui| {
                     for &t in &TuningType::ALL {
                         let is_sel = tuning.tuning_type == t;
@@ -257,8 +255,8 @@ pub fn render_top_control_bar(
                     }
                 });
 
-            // Record destination mode toggle: "● SES REC" / "● ARR REC"
-            let rec_mode_text = if *arr_record { "● ARR REC" } else { "● SES REC" };
+            // Record destination mode toggle: "• SES REC" / "• ARR REC"
+            let rec_mode_text = if *arr_record { "• ARR REC" } else { "• SES REC" };
             let rec_mode_color = if *arr_record { COLOR_CYAN } else { COLOR_AMBER };
             let rec_mode_btn = Button::new(RichText::new(rec_mode_text).size(9.5).color(rec_mode_color))
                 .fill(COLOR_BG_PANEL_ALT)
@@ -268,62 +266,19 @@ pub fn render_top_control_bar(
             }
         }
 
-        ui.separator();
-
-        // 5. View Switcher (Center-Right): Clear, high-contrast segmented buttons "⊞ SESSION" and "▤ ARRANGEMENT"
-        let view_id = egui::Id::new("aruston_workspace_view");
-        let mut active_view = ui.data_mut(|d| *d.get_temp_mut_or(view_id, 0)); // 0 = Session, 1 = Arrangement
-
-        ui.horizontal(|ui| {
-            ui.spacing_mut().item_spacing = vec2(1.0, 0.0);
-            let is_session = active_view == 0;
-            let session_btn = Button::new(
-                RichText::new("⊞ SESSION")
-                    .size(10.5)
-                    .color(if is_session { COLOR_AMBER } else { COLOR_TEXT_MUTED })
-                    .strong(),
-            )
-            .fill(if is_session { COLOR_BG_PANEL_ALT } else { COLOR_BG_SURFACE })
-            .stroke(Stroke::new(1.0_f32, if is_session { COLOR_AMBER } else { COLOR_BORDER }))
-            .min_size(vec2(76.0, 24.0));
-
-            if ui.add(session_btn).on_hover_text("Switch to Session Matrix View").clicked() {
-                active_view = 0;
-                ui.data_mut(|d| *d.get_temp_mut_or(view_id, 0) = 0);
-                action.view_session = true;
-            }
-
-            let is_arr = active_view == 1;
-            let arr_btn = Button::new(
-                RichText::new("▤ ARRANGEMENT")
-                    .size(10.5)
-                    .color(if is_arr { COLOR_CYAN } else { COLOR_TEXT_MUTED })
-                    .strong(),
-            )
-            .fill(if is_arr { COLOR_BG_PANEL_ALT } else { COLOR_BG_SURFACE })
-            .stroke(Stroke::new(1.0_f32, if is_arr { COLOR_CYAN } else { COLOR_BORDER }))
-            .min_size(vec2(98.0, 24.0));
-
-            if ui.add(arr_btn).on_hover_text("Switch to Arrangement Timeline View").clicked() {
-                active_view = 1;
-                ui.data_mut(|d| *d.get_temp_mut_or(view_id, 0) = 1);
-                action.view_arrangement = true;
-            }
-        });
-
-        // 6. Right Telemetry & Export: Live Oscilloscope (64x24), Spectrum (64x24), compact CPU badge, and "⬇ Export WAV" button
+        // 5. Right Telemetry & Export: Live Oscilloscope (46x22), Spectrum (46x22), compact CPU badge, and Export / Copilot buttons
         ui.with_layout(Layout::right_to_left(egui::Align::Center), |ui| {
-            ui.spacing_mut().item_spacing = vec2(6.0, 0.0);
+            ui.spacing_mut().item_spacing = vec2(4.0, 0.0);
 
-            // Prominent 🤖 AI Copilot toggle button
+            // Prominent ⚡ AI Copilot toggle button
             let copilot_color = if copilot_open { COLOR_CYAN } else { COLOR_TEXT_MUTED };
             let copilot_btn = Button::new(
-                RichText::new("🤖 AI Copilot")
+                RichText::new("⚡ AI Copilot")
                     .size(10.5)
                     .color(copilot_color)
                     .strong(),
             )
-            .min_size(vec2(86.0, 26.0))
+            .min_size(vec2(78.0, 25.0))
             .fill(if copilot_open { COLOR_BG_PANEL_ALT } else { COLOR_BG_SURFACE })
             .stroke(Stroke::new(1.0_f32, if copilot_open { COLOR_CYAN } else { COLOR_BORDER }));
 
@@ -333,21 +288,21 @@ pub fn render_top_control_bar(
 
             // One-click WAV export
             let bounce_btn = Button::new(
-                RichText::new("⬇ Export WAV")
-                    .size(10.5)
+                RichText::new("WAV")
+                    .size(10.0)
                     .color(COLOR_AMBER)
                     .strong(),
             )
             .fill(COLOR_BG_PANEL_ALT)
             .stroke(Stroke::new(1.0_f32, COLOR_AMBER));
 
-            if ui.add(bounce_btn).clicked() {
+            if ui.add(bounce_btn).on_hover_text("Export Master Bounce WAV (/tmp/ableton_studio_export.wav)").clicked() {
                 action.export_wav = true;
             }
 
             // Export .ALS
             let export_als_btn = Button::new(
-                RichText::new("💾 .ALS")
+                RichText::new("Save .ALS")
                     .size(10.0)
                     .color(COLOR_AMBER)
                     .strong(),
@@ -360,7 +315,7 @@ pub fn render_top_control_bar(
 
             // Import .ALS
             let import_als_btn = Button::new(
-                RichText::new("📂 .ALS")
+                RichText::new("Open .ALS")
                     .size(10.0)
                     .color(COLOR_CYAN)
                     .strong(),
@@ -373,7 +328,7 @@ pub fn render_top_control_bar(
 
             // Split Stems
             let stems_btn = Button::new(
-                RichText::new("✂️ Stems")
+                RichText::new("✂ Stems")
                     .size(10.0)
                     .color(COLOR_AMBER)
                     .strong(),
@@ -398,16 +353,16 @@ pub fn render_top_control_bar(
                     .color(cpu_color),
             );
 
-            // Mini Spectrum (64x24)
-            let spec_size = vec2(64.0, 24.0);
+            // Mini Spectrum (44x22)
+            let spec_size = vec2(44.0, 22.0);
             let (spec_rect, _) = ui.allocate_exact_size(spec_size, Sense::hover());
             if ui.is_rect_visible(spec_rect) {
                 let painter = ui.painter_at(spec_rect);
                 render_spectrum(&painter, spec_rect, &telemetry.spectrum_bins);
             }
 
-            // Mini Oscilloscope (64x24)
-            let osc_size = vec2(64.0, 24.0);
+            // Mini Oscilloscope (44x22)
+            let osc_size = vec2(44.0, 22.0);
             let (osc_rect, _) = ui.allocate_exact_size(osc_size, Sense::hover());
             if ui.is_rect_visible(osc_rect) {
                 let painter = ui.painter_at(osc_rect);

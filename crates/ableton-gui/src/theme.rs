@@ -85,15 +85,23 @@ pub fn apply_dark_carbon_theme(ctx: &Context) {
     // Monospace tabular text styles for telemetry
     style.text_styles.insert(
         TextStyle::Monospace,
-        FontId::new(12.0, FontFamily::Monospace),
+        FontId::new(12.5, FontFamily::Monospace),
     );
     style.text_styles.insert(
         TextStyle::Body,
-        FontId::new(12.0, FontFamily::Proportional),
+        FontId::new(13.0, FontFamily::Proportional),
+    );
+    style.text_styles.insert(
+        TextStyle::Button,
+        FontId::new(12.5, FontFamily::Proportional),
+    );
+    style.text_styles.insert(
+        TextStyle::Small,
+        FontId::new(11.0, FontFamily::Proportional),
     );
     style.text_styles.insert(
         TextStyle::Heading,
-        FontId::new(14.0, FontFamily::Proportional),
+        FontId::new(15.0, FontFamily::Proportional),
     );
 
     ctx.set_style(style);

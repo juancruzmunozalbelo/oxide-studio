@@ -143,14 +143,14 @@ pub fn render_clip_view(
 
             // Scale-Fold toggle for piano roll
             let fold_col = if state.scale_folded { COLOR_AMBER } else { COLOR_TEXT_MUTED };
-            let fold_text = if state.scale_folded { "🔒 Scale-Folded" } else { "🔓 Chromatic" };
-            if ui.add(Button::new(RichText::new(fold_text).size(10.0).color(fold_col))).clicked() {
+            let fold_text = if state.scale_folded { "★ Scale-Folded" } else { "☆ Chromatic" };
+            if ui.add(Button::new(RichText::new(fold_text).size(10.5).color(fold_col))).clicked() {
                 state.scale_folded = !state.scale_folded;
             }
 
             ui.separator();
 
-            ui.label(RichText::new("💡 Click grid to add/remove MIDI notes • Drag Velocity/Chance below").size(9.5).color(COLOR_TEXT_MUTED));
+            ui.label(RichText::new("• Click grid to add/remove MIDI notes • Drag Velocity/Chance below").size(10.0).color(COLOR_TEXT_MUTED));
         });
 
         ui.separator();
@@ -442,7 +442,7 @@ pub fn render_interactive_piano_roll(
     current_beat: f64,
 ) -> bool {
     let available_w = ui.available_width().max(420.0);
-    let total_h = 168.0_f32.min(ui.available_height().max(130.0));
+    let total_h = ui.available_height().clamp(155.0, 215.0);
     let (roll_rect, response) = ui.allocate_exact_size(vec2(available_w, total_h), Sense::click_and_drag());
 
     let mut pattern_mutated = false;
@@ -453,8 +453,8 @@ pub fn render_interactive_piano_roll(
         painter.rect_stroke(roll_rect, 2.0, Stroke::new(1.0_f32, COLOR_BORDER));
 
         let ruler_h = 18.0_f32;
-        let lanes_h = 38.0_f32;
-        let gutter_w = 46.0_f32;
+        let lanes_h = 34.0_f32;
+        let gutter_w = 50.0_f32;
 
         let grid_top = roll_rect.top() + ruler_h;
         let grid_bottom = roll_rect.bottom() - lanes_h;
@@ -462,7 +462,32 @@ pub fn render_interactive_piano_roll(
         let grid_left = roll_rect.left() + gutter_w;
         let grid_w = (roll_rect.width() - gutter_w).max(10.0);
 
-        let pitches = get_visible_pitches(&midi_pattern.notes, scale, state.scale_folded);
+        let all_pitches = get_visible_pitches(&midi_pattern.notes, scale, state.scale_folded);
+        // Select a 9-row viewport window covering all active clip notes so each row is >= 12px tall (zero label overlap)
+        let target_rows = 9usize;
+        let pitches: Vec<u8> = if all_pitches.len() <= target_rows {
+            all_pitches
+        } else {
+            let mut min_idx = all_pitches.len() / 2;
+            let mut max_idx = min_idx;
+            if !midi_pattern.notes.is_empty() {
+                min_idx = all_pitches.len().saturating_sub(1);
+                max_idx = 0;
+                for n in &midi_pattern.notes {
+                    if let Some(pos) = all_pitches.iter().position(|&p| p == n.pitch) {
+                        min_idx = min_idx.min(pos);
+                        max_idx = max_idx.max(pos);
+                    }
+                }
+            }
+            let mid = (min_idx + max_idx) / 2;
+            let start = mid
+                .saturating_sub(target_rows / 2)
+                .min(all_pitches.len().saturating_sub(target_rows));
+            let end = (start + target_rows).min(all_pitches.len());
+            all_pitches[start..end].to_vec()
+        };
+
         let row_count = pitches.len().max(1);
         let row_h = grid_h / row_count as f32;
 

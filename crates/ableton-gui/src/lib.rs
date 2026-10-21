@@ -30,7 +30,7 @@ pub use theme::apply_dark_carbon_theme;
 pub fn run_gui() -> Result<(), eframe::Error> {
     let native_options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
-            .with_inner_size([1280.0, 800.0])
+            .with_inner_size([1440.0, 900.0])
             .with_min_inner_size([960.0, 600.0])
             .with_title("Oxide Studio — Native Electronic Music Workstation"),
         ..Default::default()

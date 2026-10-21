@@ -90,7 +90,7 @@ pub fn render_arrangement_timeline(
 
             // Loop Toggle & Controls
             let loop_col = if gui_state.loop_enabled { COLOR_AMBER } else { COLOR_TEXT_MUTED };
-            let loop_btn = Button::new(RichText::new("🔁 Loop").size(10.5).color(loop_col))
+            let loop_btn = Button::new(RichText::new("⇄ Loop").size(10.5).color(loop_col))
                 .fill(if gui_state.loop_enabled { COLOR_BG_PANEL_ALT } else { COLOR_BG_SURFACE });
             if ui.add(loop_btn).clicked() {
                 gui_state.loop_enabled = !gui_state.loop_enabled;
