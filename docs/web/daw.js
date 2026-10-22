@@ -44,34 +44,34 @@
     // Synth Parameters
     synth: {
       mode: 'drift', // 'drift' | 'meld' | 'operator' | 'wavetable'
-      cutoff: 2800,
-      resonance: 4.2,
-      attack: 0.012,
-      decay: 0.42,
-      sustain: 0.65,
-      release: 0.38,
-      morph: 0.45,
-      drive: 6.0
+      cutoff: 6200,
+      resonance: 1.4,
+      attack: 0.008,
+      decay: 0.28,
+      sustain: 0.45,
+      release: 0.16,
+      morph: 0.35,
+      drive: 2.5
     },
 
     // FX Parameters
     fx: {
-      glue: { active: true, threshold: -14, ratio: 4, makeup: 4.5, gainReduction: 0 },
-      ott: { active: true, low: 0.7, mid: 0.65, high: 0.8, depth: 0.6 },
-      roar: { active: true, drive: 12, tone: 4500, curve: 'warm' },
-      reverb: { active: true, decay: 2.4, size: 0.75, mix: 0.28 },
-      limiter: { active: true, ceiling: -0.3, release: 0.08, isClipping: false }
+      glue: { active: true, threshold: -10, ratio: 2.5, makeup: 1.5, gainReduction: 0 },
+      ott: { active: true, low: 0.55, mid: 0.5, high: 0.6, depth: 0.35 },
+      roar: { active: true, drive: 2.5, tone: 8500, curve: 'warm' },
+      reverb: { active: true, decay: 1.8, size: 0.65, mix: 0.18 },
+      limiter: { active: true, ceiling: -0.3, release: 0.06, isClipping: false }
     },
 
     // 4 Tracks + 2 Returns + Master
     tracks: [
-      { name: '1 DRUMS', volume: 0.95, pan: 0.0, sendA: 0.2, sendB: 0.1, mute: false, solo: false, peakDb: -60, rmsDb: -60 },
-      { name: '2 BASS', volume: 0.88, pan: 0.0, sendA: 0.1, sendB: 0.0, mute: false, solo: false, peakDb: -60, rmsDb: -60 },
-      { name: '3 LEAD', volume: 0.85, pan: 0.15, sendA: 0.35, sendB: 0.25, mute: false, solo: false, peakDb: -60, rmsDb: -60 },
-      { name: '4 STEMS', volume: 0.75, pan: -0.2, sendA: 0.4, sendB: 0.2, mute: false, solo: false, peakDb: -60, rmsDb: -60 },
-      { name: 'A REV', volume: 0.80, pan: 0.0, sendA: 0, sendB: 0, mute: false, solo: false, peakDb: -60, rmsDb: -60 },
-      { name: 'B DLY', volume: 0.70, pan: 0.0, sendA: 0, sendB: 0, mute: false, solo: false, peakDb: -60, rmsDb: -60 },
-      { name: 'MASTER', volume: 1.00, pan: 0.0, sendA: 0, sendB: 0, mute: false, solo: false, peakDb: -0.3, rmsDb: -12, mono: false, dim: false }
+      { name: '1 DRUMS', volume: 0.88, pan: 0.0, sendA: 0.08, sendB: 0.04, mute: false, solo: false, peakDb: -60, rmsDb: -60 },
+      { name: '2 BASS', volume: 0.78, pan: 0.0, sendA: 0.02, sendB: 0.0, mute: false, solo: false, peakDb: -60, rmsDb: -60 },
+      { name: '3 LEAD', volume: 0.68, pan: 0.12, sendA: 0.22, sendB: 0.18, mute: false, solo: false, peakDb: -60, rmsDb: -60 },
+      { name: '4 STEMS', volume: 0.62, pan: -0.15, sendA: 0.28, sendB: 0.14, mute: false, solo: false, peakDb: -60, rmsDb: -60 },
+      { name: 'A REV', volume: 0.55, pan: 0.0, sendA: 0, sendB: 0, mute: false, solo: false, peakDb: -60, rmsDb: -60 },
+      { name: 'B DLY', volume: 0.48, pan: 0.0, sendA: 0, sendB: 0, mute: false, solo: false, peakDb: -60, rmsDb: -60 },
+      { name: 'MASTER', volume: 0.92, pan: 0.0, sendA: 0, sendB: 0, mute: false, solo: false, peakDb: -0.3, rmsDb: -12, mono: false, dim: false }
     ],
 
     // Session Matrix Clips: 4 Tracks x 4 Scenes
@@ -87,32 +87,36 @@
     ],
 
     // 16 Synthesized Drum Voices: 8 Bank A + 8 Bank B
-    // Step state: array of 16 numbers (0: off, 1: normal, 2: accented)
+    // Clean, club-mastered initial groove (6 core 909 voices active; 10 auxiliary voices ready on demand)
     drumVoices: [
       // Bank A (1–8)
-      { id: 'kick', name: 'Kick 909', bank: 'A', mute: false, solo: false, steps: [2, 0, 0, 0, 1, 0, 0, 0, 2, 0, 0, 0, 1, 0, 0, 0] },
-      { id: 'snare', name: 'Snare 909', bank: 'A', mute: false, solo: false, steps: [0, 0, 0, 0, 2, 0, 0, 0, 0, 0, 0, 0, 2, 0, 0, 0] },
-      { id: 'lowTom', name: 'Low Tom 909', bank: 'A', mute: false, solo: false, steps: [0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0] },
-      { id: 'midTom', name: 'Mid Tom 909', bank: 'A', mute: false, solo: false, steps: [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0] },
-      { id: 'hiTom', name: 'Hi Tom 909', bank: 'A', mute: false, solo: false, steps: [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0] },
-      { id: 'rim', name: 'Rimshot 909', bank: 'A', mute: false, solo: false, steps: [0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0] },
-      { id: 'clap', name: 'Clap 909', bank: 'A', mute: false, solo: false, steps: [0, 0, 0, 0, 2, 0, 0, 1, 0, 0, 0, 0, 2, 0, 0, 0] },
-      { id: 'cowbell', name: 'Cowbell 909', bank: 'A', mute: false, solo: false, steps: [0, 0, 0, 1, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 1, 0] },
+      { id: 'kick', name: 'Kick 909', bank: 'A', mute: false, solo: false, steps: [2, 0, 0, 0, 2, 0, 0, 0, 2, 0, 0, 0, 2, 0, 0, 0] },
+      { id: 'snare', name: 'Snare 909', bank: 'A', mute: false, solo: false, steps: [0, 0, 0, 0, 2, 0, 0, 0, 0, 0, 0, 0, 2, 0, 0, 1] },
+      { id: 'lowTom', name: 'Low Tom 909', bank: 'A', mute: false, solo: false, steps: [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0] },
+      { id: 'midTom', name: 'Mid Tom 909', bank: 'A', mute: false, solo: false, steps: [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0] },
+      { id: 'hiTom', name: 'Hi Tom 909', bank: 'A', mute: false, solo: false, steps: [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0] },
+      { id: 'rim', name: 'Rimshot 909', bank: 'A', mute: false, solo: false, steps: [0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0] },
+      { id: 'clap', name: 'Clap 909', bank: 'A', mute: false, solo: false, steps: [0, 0, 0, 0, 2, 0, 0, 0, 0, 0, 0, 0, 2, 0, 0, 0] },
+      { id: 'cowbell', name: 'Cowbell 909', bank: 'A', mute: false, solo: false, steps: [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0] },
 
       // Bank B (9–16)
-      { id: 'ch', name: 'Closed Hat 909', bank: 'B', mute: false, solo: false, steps: [1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1] },
+      { id: 'ch', name: 'Closed Hat 909', bank: 'B', mute: false, solo: false, steps: [1, 1, 0, 1, 1, 1, 0, 1, 1, 1, 0, 1, 1, 1, 0, 1] },
       { id: 'oh', name: 'Open Hat 909', bank: 'B', mute: false, solo: false, steps: [0, 0, 2, 0, 0, 0, 2, 0, 0, 0, 2, 0, 0, 0, 2, 0] },
-      { id: 'crash', name: 'Crash 909', bank: 'B', mute: false, solo: false, steps: [2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0] },
-      { id: 'ride', name: 'Ride 909', bank: 'B', mute: false, solo: false, steps: [0, 0, 1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0, 1, 0] },
-      { id: 'percLow', name: 'Perc Low Wood', bank: 'B', mute: false, solo: false, steps: [0, 1, 0, 0, 0, 0, 0, 1, 0, 1, 0, 0, 0, 0, 0, 1] },
-      { id: 'percHigh', name: 'Perc High Bongo', bank: 'B', mute: false, solo: false, steps: [0, 0, 0, 1, 0, 1, 0, 0, 0, 0, 0, 1, 0, 1, 0, 0] },
-      { id: 'shaker', name: 'Analog Shaker', bank: 'B', mute: false, solo: false, steps: [1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0] },
-      { id: 'tamb', name: 'Tambourine 909', bank: 'B', mute: false, solo: false, steps: [0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0] }
+      { id: 'crash', name: 'Crash 909', bank: 'B', mute: false, solo: false, steps: [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0] },
+      { id: 'ride', name: 'Ride 909', bank: 'B', mute: false, solo: false, steps: [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0] },
+      { id: 'percLow', name: 'Perc Low Wood', bank: 'B', mute: false, solo: false, steps: [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0] },
+      { id: 'percHigh', name: 'Perc High Bongo', bank: 'B', mute: false, solo: false, steps: [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0] },
+      { id: 'shaker', name: 'Analog Shaker', bank: 'B', mute: false, solo: false, steps: [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0] },
+      { id: 'tamb', name: 'Tambourine 909', bank: 'B', mute: false, solo: false, steps: [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0] }
     ]
   };
 
   // Open Hat active voice node reference for closed hat choke link
   let activeOpenHatGain = null;
+  // Active monophonic bass voice node reference to prevent sub-bass mud/overlap
+  let activeBassGain = null;
+  // Pre-computed waveshaper curve cache (prevents main-thread GC stalls)
+  const DISTORTION_CURVE_CACHE = new Map();
 
   // Active audio nodes references
   const NODES = {
@@ -126,7 +130,9 @@
     reverbConvolver: null,
     delayNode: null,
     delayFeedback: null,
+    synthBusInput: null,
     masterPreGain: null,
+    subCutFilter: null,
     glueCompressor: null,
     ottFilters: [],
     roarShaper: null,
@@ -152,12 +158,14 @@
       x ^= x << 5;
       data[i] = (x / 2147483648.0) - 1.0;
     }
-    STATE.noiseBuffer = buffer;
+    if (ctx === STATE.audioCtx) {
+      STATE.noiseBuffer = buffer;
+    }
     return buffer;
   }
 
   // =========================================================================
-  // 2. WEBAUDIO GRAPH ARCHITECTURE
+  // 2. WEBAUDIO GRAPH ARCHITECTURE (Full-Bandwidth Master + Dedicated Synth Bus)
   // =========================================================================
 
   function initAudioGraph() {
@@ -168,47 +176,73 @@
     STATE.audioCtx = ctx;
     STATE.sampleRate = ctx.sampleRate;
 
-    // Master Bus Pipeline:
-    // [Tracks] -> [MasterPreGain] -> [Glue Compressor] -> [Roar Waveshaper] -> [ZDF Filter] -> [TruePeakLimiter] -> [MasterAnalyser] -> [MasterFader] -> [ctx.destination]
-    const masterPreGain = ctx.createGain();
-    masterPreGain.gain.setValueAtTime(1.0, ctx.currentTime);
-    NODES.masterPreGain = masterPreGain;
+    // 1. Dedicated Synth & Saturation Bus (used by Track 2 Lead & Synth Keyboard):
+    // [Synth Voices] -> [Roar Warm Saturation] -> [4-Pole ZDF Filter (filter1 -> filter2)] -> [Track Gain]
+    const synthBusInput = ctx.createGain();
+    synthBusInput.gain.setValueAtTime(0.85, ctx.currentTime);
+    NODES.synthBusInput = synthBusInput;
 
-    // Glue Compressor (DynamicsCompressorNode emulation)
-    const glue = ctx.createDynamicsCompressor();
-    glue.threshold.setValueAtTime(STATE.fx.glue.threshold, ctx.currentTime);
-    glue.knee.setValueAtTime(4.0, ctx.currentTime);
-    glue.ratio.setValueAtTime(STATE.fx.glue.ratio, ctx.currentTime);
-    glue.attack.setValueAtTime(0.01, ctx.currentTime);
-    glue.release.setValueAtTime(0.1, ctx.currentTime);
-    NODES.glueCompressor = glue;
-
-    // Roar Waveshaper
     const roarShaper = ctx.createWaveShaper();
-    roarShaper.curve = makeDistortionCurve(STATE.fx.roar.drive, STATE.fx.roar.curve);
-    roarShaper.oversample = '4x';
+    roarShaper.curve = getCachedDistortionCurve(STATE.fx.roar.drive, STATE.fx.roar.curve);
+    roarShaper.oversample = '2x';
     NODES.roarShaper = roarShaper;
 
-    // Cascaded 4-Pole ZDF Lowpass Filter (2x 12dB/oct BiquadFilters)
     const filter1 = ctx.createBiquadFilter();
     filter1.type = 'lowpass';
     filter1.frequency.setValueAtTime(STATE.synth.cutoff, ctx.currentTime);
-    filter1.Q.setValueAtTime(Math.sqrt(STATE.synth.resonance), ctx.currentTime);
+    filter1.Q.setValueAtTime(Math.min(4.0, Math.sqrt(STATE.synth.resonance)), ctx.currentTime);
 
     const filter2 = ctx.createBiquadFilter();
     filter2.type = 'lowpass';
     filter2.frequency.setValueAtTime(STATE.synth.cutoff, ctx.currentTime);
-    filter2.Q.setValueAtTime(Math.sqrt(STATE.synth.resonance), ctx.currentTime);
+    filter2.Q.setValueAtTime(Math.min(4.0, Math.sqrt(STATE.synth.resonance)), ctx.currentTime);
     NODES.filterNode1 = filter1;
     NODES.filterNode2 = filter2;
 
-    // TruePeakLimiter (clamped brickwall)
+    synthBusInput.connect(roarShaper);
+    roarShaper.connect(filter1);
+    filter1.connect(filter2);
+
+    // 2. Full-Bandwidth Studio Master Bus (20 Hz – 20 kHz, zero mud):
+    // [Tracks + Returns] -> [MasterPreGain (0.72 headroom)] -> [28Hz Sub-Cut HPF] -> [Glue Bus Compressor] -> [OTT Air/Low EQ] -> [TruePeakLimiter] -> [MasterAnalyser] -> [MasterFader] -> [ctx.destination]
+    const masterPreGain = ctx.createGain();
+    masterPreGain.gain.setValueAtTime(0.72, ctx.currentTime);
+    NODES.masterPreGain = masterPreGain;
+
+    const subCut = ctx.createBiquadFilter();
+    subCut.type = 'highpass';
+    subCut.frequency.setValueAtTime(28, ctx.currentTime);
+    subCut.Q.setValueAtTime(0.707, ctx.currentTime);
+    NODES.subCutFilter = subCut;
+
+    // Glue Bus Compressor (smooth SSL-style 2.5:1 bus glue)
+    const glue = ctx.createDynamicsCompressor();
+    glue.threshold.setValueAtTime(STATE.fx.glue.threshold, ctx.currentTime);
+    glue.knee.setValueAtTime(6.0, ctx.currentTime);
+    glue.ratio.setValueAtTime(STATE.fx.glue.ratio, ctx.currentTime);
+    glue.attack.setValueAtTime(0.015, ctx.currentTime);
+    glue.release.setValueAtTime(0.12, ctx.currentTime);
+    NODES.glueCompressor = glue;
+
+    // Subtle OTT Punch & Air sheen shelves
+    const ottLow = ctx.createBiquadFilter();
+    ottLow.type = 'lowshelf';
+    ottLow.frequency.setValueAtTime(90, ctx.currentTime);
+    ottLow.gain.setValueAtTime(1.2, ctx.currentTime);
+
+    const ottAir = ctx.createBiquadFilter();
+    ottAir.type = 'highshelf';
+    ottAir.frequency.setValueAtTime(9500, ctx.currentTime);
+    ottAir.gain.setValueAtTime(1.6, ctx.currentTime);
+    NODES.ottFilters = [ottLow, ottAir];
+
+    // TruePeakLimiter (transparent brickwall safety ceiling at -0.3 dBFS)
     const limiter = ctx.createDynamicsCompressor();
     limiter.threshold.setValueAtTime(STATE.limiterCeiling, ctx.currentTime);
     limiter.knee.setValueAtTime(0.0, ctx.currentTime);
     limiter.ratio.setValueAtTime(20.0, ctx.currentTime);
     limiter.attack.setValueAtTime(0.002, ctx.currentTime);
-    limiter.release.setValueAtTime(0.05, ctx.currentTime);
+    limiter.release.setValueAtTime(0.06, ctx.currentTime);
     NODES.truePeakLimiter = limiter;
 
     // Master Analyser (FFT & Oscilloscope)
@@ -222,44 +256,55 @@
     masterFader.gain.setValueAtTime(STATE.tracks[6].volume, ctx.currentTime);
     NODES.masterFader = masterFader;
 
-    // Connect Master Chain
-    masterPreGain.connect(glue);
-    glue.connect(roarShaper);
-    roarShaper.connect(filter1);
-    filter1.connect(filter2);
-    filter2.connect(limiter);
+    // Connect Clean Full-Range Master Chain
+    masterPreGain.connect(subCut);
+    subCut.connect(glue);
+    glue.connect(ottLow);
+    ottLow.connect(ottAir);
+    ottAir.connect(limiter);
     limiter.connect(masterAnalyser);
     masterAnalyser.connect(masterFader);
     masterFader.connect(ctx.destination);
 
-    // Reverb Return Bus (Return A)
+    // Reverb Return Bus (Return A — high-passed at 260 Hz so sub-bass never muddies reverb)
     const returnAGain = ctx.createGain();
-    returnAGain.gain.setValueAtTime(STATE.tracks[4].volume, ctx.currentTime);
+    returnAGain.gain.setValueAtTime(STATE.tracks[4].volume * 0.45, ctx.currentTime);
     NODES.returnAGain = returnAGain;
+
+    const revHpf = ctx.createBiquadFilter();
+    revHpf.type = 'highpass';
+    revHpf.frequency.setValueAtTime(260, ctx.currentTime);
 
     const convolver = ctx.createConvolver();
     convolver.buffer = buildReverbImpulse(ctx, STATE.fx.reverb.decay);
     NODES.reverbConvolver = convolver;
 
-    returnAGain.connect(convolver);
+    returnAGain.connect(revHpf);
+    revHpf.connect(convolver);
     convolver.connect(masterPreGain);
 
-    // Delay Return Bus (Return B)
+    // Delay Return Bus (Return B — ping-pong filtered dotted-8th dub delay)
     const returnBGain = ctx.createGain();
-    returnBGain.gain.setValueAtTime(STATE.tracks[5].volume, ctx.currentTime);
+    returnBGain.gain.setValueAtTime(STATE.tracks[5].volume * 0.4, ctx.currentTime);
     NODES.returnBGain = returnBGain;
 
     const delay = ctx.createDelay(1.0);
-    delay.delayTime.setValueAtTime((60 / STATE.tempo) * 0.75, ctx.currentTime); // Dotted 8th
+    delay.delayTime.setValueAtTime((60 / STATE.tempo) * 0.75, ctx.currentTime);
+    const delayFilter = ctx.createBiquadFilter();
+    delayFilter.type = 'bandpass';
+    delayFilter.frequency.setValueAtTime(1600, ctx.currentTime);
+    delayFilter.Q.setValueAtTime(0.9, ctx.currentTime);
+
     const delayFb = ctx.createGain();
-    delayFb.gain.setValueAtTime(0.42, ctx.currentTime);
-    delay.connect(delayFb);
+    delayFb.gain.setValueAtTime(0.32, ctx.currentTime);
+    delay.connect(delayFilter);
+    delayFilter.connect(delayFb);
     delayFb.connect(delay);
     NODES.delayNode = delay;
     NODES.delayFeedback = delayFb;
 
     returnBGain.connect(delay);
-    delay.connect(masterPreGain);
+    delayFilter.connect(masterPreGain);
 
     // 4 Main Tracks (0: Drums, 1: Bass, 2: Lead, 3: Stems)
     for (let i = 0; i < 4; i++) {
@@ -296,42 +341,59 @@
       trackGain.connect(sendB);
       sendB.connect(returnBGain);
     }
+
+    // Route Synth ZDF Filter Bus output into Track 2 (3 LEAD)
+    filter2.connect(NODES.trackGains[2]);
   }
 
-  // Generate waveshaper distortion curve for Roar
+  // Generate gain-compensated waveshaper curve for Roar (cached for zero real-time allocation)
   function makeDistortionCurve(driveDb, type) {
-    const n_samples = 44100;
+    const n_samples = 4096;
     const curve = new Float32Array(n_samples);
-    const drive = Math.pow(10, driveDb / 20);
+    const drive = Math.pow(10, Math.min(18, Math.max(0, driveDb)) / 20);
+    const norm = 1.0 / Math.max(0.85, Math.tanh(drive * 0.85));
 
     for (let i = 0; i < n_samples; ++i) {
       const x = (i * 2) / n_samples - 1;
       const xDrive = x * drive;
       if (type === 'hard') {
-        curve[i] = Math.max(-1, Math.min(1, xDrive));
+        curve[i] = Math.max(-0.95, Math.min(0.95, xDrive * 0.7));
       } else if (type === 'asym') {
-        // Tube-like asymmetric curve
-        curve[i] = x >= 0 ? Math.tanh(xDrive) : Math.tanh(xDrive * 1.5) * 0.8;
+        curve[i] = (x >= 0 ? Math.tanh(xDrive) : Math.tanh(xDrive * 1.25) * 0.85) * norm * 0.85;
       } else {
-        // Warm tanh saturation
-        curve[i] = Math.tanh(xDrive);
+        curve[i] = Math.tanh(xDrive) * norm * 0.88;
       }
     }
     return curve;
   }
 
-  // Procedural synthetic exponential noise impulse for Hybrid Reverb
+  function getCachedDistortionCurve(driveDb, type) {
+    const key = `${Number(driveDb).toFixed(1)}_${type || 'warm'}`;
+    if (!DISTORTION_CURVE_CACHE.has(key)) {
+      DISTORTION_CURVE_CACHE.set(key, makeDistortionCurve(driveDb, type));
+    }
+    return DISTORTION_CURVE_CACHE.get(key);
+  }
+
+  // Procedural stereo velvet-noise impulse for Hybrid Reverb
   function buildReverbImpulse(ctx, duration) {
     const rate = ctx.sampleRate;
-    const length = Math.floor(rate * duration);
+    const length = Math.floor(rate * Math.max(0.4, Math.min(4.0, duration)));
     const impulse = ctx.createBuffer(2, length, rate);
     const left = impulse.getChannelData(0);
     const right = impulse.getChannelData(1);
 
+    let lLp = 0;
+    let rLp = 0;
     for (let i = 0; i < length; i++) {
-      const decay = Math.exp(-i / (rate * (duration / 4)));
-      left[i] = (Math.random() * 2 - 1) * decay;
-      right[i] = (Math.random() * 2 - 1) * decay;
+      const t = i / rate;
+      const preDelayEnv = Math.min(1.0, t / 0.012);
+      const decay = preDelayEnv * Math.exp(-t / (duration * 0.28));
+      // Warm damping (1-pole lowpass on noise tail)
+      lLp = lLp * 0.62 + (Math.random() * 2 - 1) * 0.38;
+      rLp = rLp * 0.62 + (Math.random() * 2 - 1) * 0.38;
+      left[i] = lLp * decay * 0.55;
+      right[i] = rLp * decay * 0.55;
     }
     return impulse;
   }
@@ -342,167 +404,196 @@
 
   function triggerDrumVoice(voiceId, time, velocity, isAccent) {
     if (!STATE.audioCtx) return;
-    const ctx = STATE.audioCtx;
-    const dest = NODES.trackGains[0]; // Track 1: Drums
+    const dest = NODES.trackGains[0]; // Track 0: Drums
     if (!dest) return;
+    triggerDrumVoiceOnCtx(STATE.audioCtx, dest, voiceId, time, velocity, isAccent);
+  }
 
-    const vel = (isAccent ? 1.25 : 1.0) * (velocity || 0.85);
+  function triggerDrumVoiceOnCtx(ctx, dest, voiceId, time, velocity, isAccent) {
+    const vel = (isAccent ? 1.18 : 0.92) * (velocity || 0.85);
+    const noiseBuf = getNoiseBuffer(ctx);
 
     switch (voiceId) {
       case 'kick': {
-        // Pitch sweep: drops exponentially ~160 Hz -> ~45 Hz in 28ms + click transient
+        // Authentic 909 Kick: 3-stage pitch envelope (168Hz -> 54Hz punch -> 45Hz sub) + woody transient click
         const osc = ctx.createOscillator();
         const gain = ctx.createGain();
         osc.type = 'sine';
-        osc.frequency.setValueAtTime(160, time);
-        osc.frequency.exponentialRampToValueAtTime(45, time + 0.045);
+        osc.frequency.setValueAtTime(168, time);
+        osc.frequency.exponentialRampToValueAtTime(54, time + 0.024);
+        osc.frequency.exponentialRampToValueAtTime(45, time + 0.36);
 
-        gain.gain.setValueAtTime(1.0 * vel, time);
-        gain.gain.exponentialRampToValueAtTime(0.001, time + 0.45);
+        gain.gain.setValueAtTime(0.0001, time);
+        gain.gain.linearRampToValueAtTime(0.72 * vel, time + 0.002);
+        gain.gain.exponentialRampToValueAtTime(0.45 * vel, time + 0.08);
+        gain.gain.exponentialRampToValueAtTime(0.0001, time + 0.38);
 
-        // Click transient
-        const clickOsc = ctx.createOscillator();
+        // Filtered click impulse
+        const clickNoise = ctx.createBufferSource();
+        clickNoise.buffer = noiseBuf;
+        const clickFilter = ctx.createBiquadFilter();
+        clickFilter.type = 'bandpass';
+        clickFilter.frequency.setValueAtTime(950, time);
+        clickFilter.Q.setValueAtTime(1.4, time);
         const clickGain = ctx.createGain();
-        clickOsc.type = 'triangle';
-        clickOsc.frequency.setValueAtTime(320, time);
-        clickGain.gain.setValueAtTime(0.4 * vel, time);
-        clickGain.gain.exponentialRampToValueAtTime(0.001, time + 0.015);
+        clickGain.gain.setValueAtTime(0.26 * vel, time);
+        clickGain.gain.exponentialRampToValueAtTime(0.0001, time + 0.012);
 
         osc.connect(gain);
-        clickOsc.connect(clickGain);
+        clickNoise.connect(clickFilter);
+        clickFilter.connect(clickGain);
         gain.connect(dest);
         clickGain.connect(dest);
 
         osc.start(time);
-        clickOsc.start(time);
-        osc.stop(time + 0.5);
-        clickOsc.stop(time + 0.02);
+        clickNoise.start(time);
+        osc.stop(time + 0.4);
+        clickNoise.stop(time + 0.015);
         break;
       }
 
       case 'snare': {
-        // Dual tuned drumhead tone (~185 Hz + 330 Hz) + white noise burst (1200 Hz HPF)
+        // 909 Snare: Dual tuned drumhead modes (182 Hz + 328 Hz with pitch drop) + band-shaped snare wires
         const toneOsc1 = ctx.createOscillator();
         const toneOsc2 = ctx.createOscillator();
         const toneGain = ctx.createGain();
 
-        toneOsc1.frequency.setValueAtTime(185, time);
-        toneOsc2.frequency.setValueAtTime(330, time);
-        toneGain.gain.setValueAtTime(0.5 * vel, time);
-        toneGain.gain.exponentialRampToValueAtTime(0.001, time + 0.18);
+        toneOsc1.type = 'triangle';
+        toneOsc2.type = 'sine';
+        toneOsc1.frequency.setValueAtTime(220, time);
+        toneOsc1.frequency.exponentialRampToValueAtTime(178, time + 0.035);
+        toneOsc2.frequency.setValueAtTime(360, time);
+        toneOsc2.frequency.exponentialRampToValueAtTime(315, time + 0.035);
+
+        toneGain.gain.setValueAtTime(0.28 * vel, time);
+        toneGain.gain.exponentialRampToValueAtTime(0.0001, time + 0.14);
 
         toneOsc1.connect(toneGain);
         toneOsc2.connect(toneGain);
         toneGain.connect(dest);
 
-        // Noise snare wires
+        // Snare wires: Highpass 1500 Hz + Lowpass 6500 Hz
         const noise = ctx.createBufferSource();
-        noise.buffer = getNoiseBuffer(ctx);
-        const noiseFilter = ctx.createBiquadFilter();
-        noiseFilter.type = 'highpass';
-        noiseFilter.frequency.setValueAtTime(1200, time);
-        const noiseGain = ctx.createGain();
-        noiseGain.gain.setValueAtTime(0.6 * vel, time);
-        noiseGain.gain.exponentialRampToValueAtTime(0.001, time + 0.22);
+        noise.buffer = noiseBuf;
+        const hpf = ctx.createBiquadFilter();
+        hpf.type = 'highpass';
+        hpf.frequency.setValueAtTime(1500, time);
+        const lpf = ctx.createBiquadFilter();
+        lpf.type = 'lowpass';
+        lpf.frequency.setValueAtTime(6500, time);
 
-        noise.connect(noiseFilter);
-        noiseFilter.connect(noiseGain);
+        const noiseGain = ctx.createGain();
+        noiseGain.gain.setValueAtTime(0.36 * vel, time);
+        noiseGain.gain.exponentialRampToValueAtTime(0.0001, time + 0.19);
+
+        noise.connect(hpf);
+        hpf.connect(lpf);
+        lpf.connect(noiseGain);
         noiseGain.connect(dest);
 
         toneOsc1.start(time);
         toneOsc2.start(time);
         noise.start(time);
-        toneOsc1.stop(time + 0.2);
-        toneOsc2.stop(time + 0.2);
-        noise.stop(time + 0.25);
+        toneOsc1.stop(time + 0.16);
+        toneOsc2.stop(time + 0.16);
+        noise.stop(time + 0.21);
         break;
       }
 
       case 'lowTom':
       case 'midTom':
       case 'hiTom': {
-        const startFreq = voiceId === 'lowTom' ? 110 : voiceId === 'midTom' ? 155 : 220;
-        const endFreq = voiceId === 'lowTom' ? 58 : voiceId === 'midTom' ? 88 : 125;
+        const startFreq = voiceId === 'lowTom' ? 118 : voiceId === 'midTom' ? 162 : 218;
+        const endFreq = voiceId === 'lowTom' ? 62 : voiceId === 'midTom' ? 92 : 128;
         const osc = ctx.createOscillator();
-        const osc2 = ctx.createOscillator();
         const gain = ctx.createGain();
 
+        osc.type = 'sine';
         osc.frequency.setValueAtTime(startFreq, time);
-        osc.frequency.exponentialRampToValueAtTime(endFreq, time + 0.12);
-        osc2.frequency.setValueAtTime(startFreq * 1.48, time);
-        osc2.frequency.exponentialRampToValueAtTime(endFreq * 1.48, time + 0.12);
+        osc.frequency.exponentialRampToValueAtTime(endFreq, time + 0.11);
 
-        gain.gain.setValueAtTime(0.8 * vel, time);
-        gain.gain.exponentialRampToValueAtTime(0.001, time + 0.35);
+        gain.gain.setValueAtTime(0.42 * vel, time);
+        gain.gain.exponentialRampToValueAtTime(0.0001, time + 0.26);
 
         osc.connect(gain);
-        osc2.connect(gain);
         gain.connect(dest);
 
         osc.start(time);
-        osc2.start(time);
-        osc.stop(time + 0.4);
-        osc2.stop(time + 0.4);
+        osc.stop(time + 0.28);
         break;
       }
 
       case 'rim': {
-        // High tuned resonance ~1650 Hz
-        const osc = ctx.createOscillator();
-        const gain = ctx.createGain();
-        osc.type = 'sine';
-        osc.frequency.setValueAtTime(1650, time);
-        gain.gain.setValueAtTime(0.85 * vel, time);
-        gain.gain.exponentialRampToValueAtTime(0.001, time + 0.045);
+        // Authentic 909 Rimshot: 3-band woody/metallic transient (500 Hz + 1680 Hz bandpass impulse)
+        const noise = ctx.createBufferSource();
+        noise.buffer = noiseBuf;
+        const bp = ctx.createBiquadFilter();
+        bp.type = 'bandpass';
+        bp.frequency.setValueAtTime(1680, time);
+        bp.Q.setValueAtTime(4.5, time);
 
+        const osc = ctx.createOscillator();
+        osc.type = 'triangle';
+        osc.frequency.setValueAtTime(480, time);
+        osc.frequency.exponentialRampToValueAtTime(220, time + 0.018);
+
+        const gain = ctx.createGain();
+        gain.gain.setValueAtTime(0.32 * vel, time);
+        gain.gain.exponentialRampToValueAtTime(0.0001, time + 0.032);
+
+        noise.connect(bp);
+        bp.connect(gain);
         osc.connect(gain);
         gain.connect(dest);
+
+        noise.start(time);
         osc.start(time);
-        osc.stop(time + 0.05);
+        noise.stop(time + 0.038);
+        osc.stop(time + 0.038);
         break;
       }
 
       case 'clap': {
-        // 3 staggered noise bursts (0ms, 11ms, 22ms) + 1200 Hz bandpass reverberant decay tail
+        // 3 staggered noise bursts (0ms, 10ms, 20ms) + 1250 Hz bandpass reverberant tail
         for (let i = 0; i < 3; i++) {
-          const t = time + i * 0.011;
+          const t = time + i * 0.010;
           const noise = ctx.createBufferSource();
-          noise.buffer = getNoiseBuffer(ctx);
+          noise.buffer = noiseBuf;
           const filter = ctx.createBiquadFilter();
           filter.type = 'bandpass';
-          filter.frequency.setValueAtTime(1200, t);
-          filter.Q.setValueAtTime(1.8, t);
+          filter.frequency.setValueAtTime(1350, t);
+          filter.Q.setValueAtTime(2.0, t);
 
           const gain = ctx.createGain();
-          gain.gain.setValueAtTime(0.7 * vel, t);
-          gain.gain.exponentialRampToValueAtTime(0.001, t + 0.025);
+          gain.gain.setValueAtTime(0.28 * vel, t);
+          gain.gain.exponentialRampToValueAtTime(0.0001, t + 0.016);
 
           noise.connect(filter);
           filter.connect(gain);
           gain.connect(dest);
           noise.start(t);
-          noise.stop(t + 0.03);
+          noise.stop(t + 0.02);
         }
-        // Tail
         const tailNoise = ctx.createBufferSource();
-        tailNoise.buffer = getNoiseBuffer(ctx);
+        tailNoise.buffer = noiseBuf;
         const tailFilter = ctx.createBiquadFilter();
         tailFilter.type = 'bandpass';
-        tailFilter.frequency.setValueAtTime(1100, time + 0.025);
+        tailFilter.frequency.setValueAtTime(1200, time + 0.024);
+        tailFilter.Q.setValueAtTime(1.6, time + 0.024);
         const tailGain = ctx.createGain();
-        tailGain.gain.setValueAtTime(0.8 * vel, time + 0.025);
-        tailGain.gain.exponentialRampToValueAtTime(0.001, time + 0.28);
+        tailGain.gain.setValueAtTime(0.30 * vel, time + 0.024);
+        tailGain.gain.exponentialRampToValueAtTime(0.0001, time + 0.20);
 
         tailNoise.connect(tailFilter);
         tailFilter.connect(tailGain);
         tailGain.connect(dest);
-        tailNoise.start(time + 0.025);
-        tailNoise.stop(time + 0.3);
+        tailNoise.start(time + 0.024);
+        tailNoise.stop(time + 0.22);
         break;
       }
 
       case 'cowbell': {
-        // Dual metallic resonance at 540 Hz and 800 Hz
+        // 808/909 Dual Bandpassed Metallic Cowbell (540 Hz + 800 Hz with steep bandpass)
         const osc1 = ctx.createOscillator();
         const osc2 = ctx.createOscillator();
         osc1.type = 'square';
@@ -512,12 +603,12 @@
 
         const filter = ctx.createBiquadFilter();
         filter.type = 'bandpass';
-        filter.frequency.setValueAtTime(680, time);
-        filter.Q.setValueAtTime(2.2, time);
+        filter.frequency.setValueAtTime(670, time);
+        filter.Q.setValueAtTime(3.8, time);
 
         const gain = ctx.createGain();
-        gain.gain.setValueAtTime(0.6 * vel, time);
-        gain.gain.exponentialRampToValueAtTime(0.001, time + 0.3);
+        gain.gain.setValueAtTime(0.22 * vel, time);
+        gain.gain.exponentialRampToValueAtTime(0.0001, time + 0.16);
 
         osc1.connect(filter);
         osc2.connect(filter);
@@ -526,110 +617,164 @@
 
         osc1.start(time);
         osc2.start(time);
-        osc1.stop(time + 0.32);
-        osc2.stop(time + 0.32);
+        osc1.stop(time + 0.18);
+        osc2.stop(time + 0.18);
         break;
       }
 
       case 'ch': {
-        // Closed hat chokes open hat!
-        if (activeOpenHatGain) {
+        // Closed Hat chokes Open Hat
+        if (ctx === STATE.audioCtx && activeOpenHatGain) {
           try {
             activeOpenHatGain.gain.cancelScheduledValues(time);
-            activeOpenHatGain.gain.linearRampToValueAtTime(0.001, time + 0.005);
+            activeOpenHatGain.gain.setValueAtTime(activeOpenHatGain.gain.value, time);
+            activeOpenHatGain.gain.linearRampToValueAtTime(0.0001, time + 0.006);
           } catch (_) {}
           activeOpenHatGain = null;
         }
 
-        // 6 inharmonic frequencies through 7800 Hz HPF
-        const freqs = [245, 306, 384, 422, 659, 866];
+        // Authentic 909 Closed Hat: Crisp bandpassed noise + attenuated metallic shimmer through 2-stage 8.8kHz HPF
+        const noise = ctx.createBufferSource();
+        noise.buffer = noiseBuf;
+
+        const hpf1 = ctx.createBiquadFilter();
+        hpf1.type = 'highpass';
+        hpf1.frequency.setValueAtTime(8500, time);
+
+        const hpf2 = ctx.createBiquadFilter();
+        hpf2.type = 'bandpass';
+        hpf2.frequency.setValueAtTime(9800, time);
+        hpf2.Q.setValueAtTime(1.8, time);
+
         const hatGain = ctx.createGain();
-        hatGain.gain.setValueAtTime(0.55 * vel, time);
-        hatGain.gain.exponentialRampToValueAtTime(0.001, time + 0.045);
+        hatGain.gain.setValueAtTime(0.28 * vel, time);
+        hatGain.gain.exponentialRampToValueAtTime(0.0001, time + 0.042);
 
-        const filter = ctx.createBiquadFilter();
-        filter.type = 'highpass';
-        filter.frequency.setValueAtTime(7800, time);
-
+        const freqs = [312, 422, 659, 866];
         freqs.forEach(f => {
           const osc = ctx.createOscillator();
+          const oscScale = ctx.createGain();
           osc.type = 'square';
-          osc.frequency.setValueAtTime(f, time);
-          osc.connect(filter);
+          osc.frequency.setValueAtTime(f * 4.0, time);
+          oscScale.gain.setValueAtTime(0.04, time);
+          osc.connect(oscScale);
+          oscScale.connect(hpf1);
           osc.start(time);
-          osc.stop(time + 0.05);
+          osc.stop(time + 0.046);
         });
 
-        filter.connect(hatGain);
+        noise.connect(hpf1);
+        hpf1.connect(hpf2);
+        hpf2.connect(hatGain);
         hatGain.connect(dest);
+        noise.start(time);
+        noise.stop(time + 0.046);
         break;
       }
 
       case 'oh': {
-        // Open Hat with choke link capability
-        const freqs = [245, 306, 384, 422, 659, 866];
+        // Authentic 909 Open Hat with choke link capability
+        const noise = ctx.createBufferSource();
+        noise.buffer = noiseBuf;
+
+        const hpf1 = ctx.createBiquadFilter();
+        hpf1.type = 'highpass';
+        hpf1.frequency.setValueAtTime(7600, time);
+
+        const bpf = ctx.createBiquadFilter();
+        bpf.type = 'bandpass';
+        bpf.frequency.setValueAtTime(8800, time);
+        bpf.Q.setValueAtTime(1.6, time);
+
         const hatGain = ctx.createGain();
-        hatGain.gain.setValueAtTime(0.5 * vel, time);
-        hatGain.gain.exponentialRampToValueAtTime(0.001, time + 0.35);
-        activeOpenHatGain = hatGain;
+        hatGain.gain.setValueAtTime(0.26 * vel, time);
+        hatGain.gain.exponentialRampToValueAtTime(0.0001, time + 0.28);
+        if (ctx === STATE.audioCtx) {
+          activeOpenHatGain = hatGain;
+        }
 
-        const filter = ctx.createBiquadFilter();
-        filter.type = 'bandpass';
-        filter.frequency.setValueAtTime(7200, time);
-        filter.Q.setValueAtTime(1.5, time);
-
+        const freqs = [312, 422, 659, 866];
         freqs.forEach(f => {
           const osc = ctx.createOscillator();
+          const oscScale = ctx.createGain();
           osc.type = 'square';
-          osc.frequency.setValueAtTime(f, time);
-          osc.connect(filter);
+          osc.frequency.setValueAtTime(f * 4.0, time);
+          oscScale.gain.setValueAtTime(0.035, time);
+          osc.connect(oscScale);
+          oscScale.connect(hpf1);
           osc.start(time);
-          osc.stop(time + 0.4);
+          osc.stop(time + 0.30);
         });
 
-        filter.connect(hatGain);
+        noise.connect(hpf1);
+        hpf1.connect(bpf);
+        bpf.connect(hatGain);
         hatGain.connect(dest);
+        noise.start(time);
+        noise.stop(time + 0.30);
         break;
       }
 
       case 'crash': {
-        // Metallic shimmer + high-frequency noise burst
+        // 909 Crash Cymbal: Metallic shimmer + dual-filtered air wash
         const noise = ctx.createBufferSource();
-        noise.buffer = getNoiseBuffer(ctx);
-        const filter = ctx.createBiquadFilter();
-        filter.type = 'highpass';
-        filter.frequency.setValueAtTime(4500, time);
+        noise.buffer = noiseBuf;
+        const hpf = ctx.createBiquadFilter();
+        hpf.type = 'highpass';
+        hpf.frequency.setValueAtTime(5200, time);
+        const bpf = ctx.createBiquadFilter();
+        bpf.type = 'peaking';
+        bpf.frequency.setValueAtTime(7800, time);
+        bpf.gain.setValueAtTime(4.0, time);
 
         const gain = ctx.createGain();
-        gain.gain.setValueAtTime(0.7 * vel, time);
-        gain.gain.exponentialRampToValueAtTime(0.001, time + 1.2);
+        gain.gain.setValueAtTime(0.26 * vel, time);
+        gain.gain.exponentialRampToValueAtTime(0.0001, time + 0.85);
 
-        noise.connect(filter);
-        filter.connect(gain);
+        noise.connect(hpf);
+        hpf.connect(bpf);
+        bpf.connect(gain);
         gain.connect(dest);
         noise.start(time);
-        noise.stop(time + 1.3);
+        noise.stop(time + 0.90);
         break;
       }
 
       case 'ride': {
-        // Dual bell ping (1050 Hz + 1680 Hz) + noise
-        const osc1 = ctx.createOscillator();
-        const osc2 = ctx.createOscillator();
-        osc1.frequency.setValueAtTime(1050, time);
-        osc2.frequency.setValueAtTime(1680, time);
+        // 909 Ride Cymbal: Metallic bell ping + high-passed cymbal sizzle noise (zero raw sine dial-tone)
+        const noise = ctx.createBufferSource();
+        noise.buffer = noiseBuf;
+
+        const hpf = ctx.createBiquadFilter();
+        hpf.type = 'highpass';
+        hpf.frequency.setValueAtTime(6400, time);
+
+        const bellFilter = ctx.createBiquadFilter();
+        bellFilter.type = 'bandpass';
+        bellFilter.frequency.setValueAtTime(7400, time);
+        bellFilter.Q.setValueAtTime(3.2, time);
+
+        const bellOsc = ctx.createOscillator();
+        const bellScale = ctx.createGain();
+        bellOsc.type = 'triangle';
+        bellOsc.frequency.setValueAtTime(2950, time);
+        bellScale.gain.setValueAtTime(0.05, time);
+        bellOsc.connect(bellScale);
+        bellScale.connect(bellFilter);
 
         const gain = ctx.createGain();
-        gain.gain.setValueAtTime(0.45 * vel, time);
-        gain.gain.exponentialRampToValueAtTime(0.001, time + 0.8);
+        gain.gain.setValueAtTime(0.22 * vel, time);
+        gain.gain.exponentialRampToValueAtTime(0.0001, time + 0.42);
 
-        osc1.connect(gain);
-        osc2.connect(gain);
+        noise.connect(hpf);
+        hpf.connect(bellFilter);
+        bellFilter.connect(gain);
         gain.connect(dest);
-        osc1.start(time);
-        osc2.start(time);
-        osc1.stop(time + 0.85);
-        osc2.stop(time + 0.85);
+
+        noise.start(time);
+        bellOsc.start(time);
+        noise.stop(time + 0.45);
+        bellOsc.stop(time + 0.45);
         break;
       }
 
@@ -637,127 +782,186 @@
         // Woodblock sweep ~290 Hz -> ~210 Hz
         const osc = ctx.createOscillator();
         const gain = ctx.createGain();
+        osc.type = 'triangle';
         osc.frequency.setValueAtTime(290, time);
-        osc.frequency.exponentialRampToValueAtTime(210, time + 0.05);
-        gain.gain.setValueAtTime(0.75 * vel, time);
-        gain.gain.exponentialRampToValueAtTime(0.001, time + 0.12);
+        osc.frequency.exponentialRampToValueAtTime(210, time + 0.045);
+        gain.gain.setValueAtTime(0.34 * vel, time);
+        gain.gain.exponentialRampToValueAtTime(0.0001, time + 0.09);
         osc.connect(gain);
         gain.connect(dest);
         osc.start(time);
-        osc.stop(time + 0.15);
+        osc.stop(time + 0.10);
         break;
       }
 
       case 'percHigh': {
-        // Bongo sweep ~620 Hz -> ~480 Hz
+        // Bongo sweep ~540 Hz -> ~420 Hz
         const osc = ctx.createOscillator();
         const gain = ctx.createGain();
-        osc.frequency.setValueAtTime(620, time);
-        osc.frequency.exponentialRampToValueAtTime(480, time + 0.04);
-        gain.gain.setValueAtTime(0.7 * vel, time);
-        gain.gain.exponentialRampToValueAtTime(0.001, time + 0.09);
+        osc.type = 'sine';
+        osc.frequency.setValueAtTime(540, time);
+        osc.frequency.exponentialRampToValueAtTime(420, time + 0.038);
+        gain.gain.setValueAtTime(0.30 * vel, time);
+        gain.gain.exponentialRampToValueAtTime(0.0001, time + 0.08);
         osc.connect(gain);
         gain.connect(dest);
         osc.start(time);
-        osc.stop(time + 0.12);
+        osc.stop(time + 0.09);
         break;
       }
 
       case 'shaker': {
-        // High-pass shaped noise envelope burst
+        // Band-passed maraca/shaker noise burst
         const noise = ctx.createBufferSource();
-        noise.buffer = getNoiseBuffer(ctx);
+        noise.buffer = noiseBuf;
         const filter = ctx.createBiquadFilter();
-        filter.type = 'highpass';
-        filter.frequency.setValueAtTime(4200, time);
+        filter.type = 'bandpass';
+        filter.frequency.setValueAtTime(7600, time);
+        filter.Q.setValueAtTime(2.4, time);
         const gain = ctx.createGain();
-        gain.gain.setValueAtTime(0.45 * vel, time);
-        gain.gain.exponentialRampToValueAtTime(0.001, time + 0.06);
+        gain.gain.setValueAtTime(0.001, time);
+        gain.gain.linearRampToValueAtTime(0.22 * vel, time + 0.012);
+        gain.gain.exponentialRampToValueAtTime(0.0001, time + 0.055);
 
         noise.connect(filter);
         filter.connect(gain);
         gain.connect(dest);
         noise.start(time);
-        noise.stop(time + 0.07);
+        noise.stop(time + 0.06);
         break;
       }
 
       case 'tamb': {
-        // Metallic jingle ring 3200 Hz + 4900 Hz + noise
-        const osc1 = ctx.createOscillator();
-        const osc2 = ctx.createOscillator();
-        osc1.frequency.setValueAtTime(3200, time);
-        osc2.frequency.setValueAtTime(4900, time);
+        // Metallic tambourine jingle burst (high-Q bandpassed noise + shimmer, zero sine whistle)
+        const noise = ctx.createBufferSource();
+        noise.buffer = noiseBuf;
+        const filter = ctx.createBiquadFilter();
+        filter.type = 'bandpass';
+        filter.frequency.setValueAtTime(8400, time);
+        filter.Q.setValueAtTime(3.6, time);
 
         const gain = ctx.createGain();
-        gain.gain.setValueAtTime(0.4 * vel, time);
-        gain.gain.exponentialRampToValueAtTime(0.001, time + 0.18);
+        gain.gain.setValueAtTime(0.22 * vel, time);
+        gain.gain.exponentialRampToValueAtTime(0.08 * vel, time + 0.022);
+        gain.gain.linearRampToValueAtTime(0.18 * vel, time + 0.032);
+        gain.gain.exponentialRampToValueAtTime(0.0001, time + 0.14);
 
-        osc1.connect(gain);
-        osc2.connect(gain);
+        noise.connect(filter);
+        filter.connect(gain);
         gain.connect(dest);
-        osc1.start(time);
-        osc2.start(time);
-        osc1.stop(time + 0.2);
-        osc2.stop(time + 0.2);
+        noise.start(time);
+        noise.stop(time + 0.15);
         break;
       }
     }
   }
 
   // =========================================================================
-  // 4. POLYPHONIC SUITE SYNTHESIZER ENGINE (Drift, Meld, Operator, Wavetable)
+  // 4. MONOPHONIC SUB/ACID BASS & POLYPHONIC SUITE SYNTHESIZER ENGINE
   // =========================================================================
 
-  function playSynthNote(midiNote, duration = 0.35, time = null, destTrack = 2) {
+  // Dedicated Monophonic Sub / Acid 303 Bass Engine for Track 1 (2 BASS)
+  function playBassNote(midiNote, duration = 0.14, time = null) {
     if (!STATE.audioCtx) return;
     const ctx = STATE.audioCtx;
     const t = time !== null ? time : ctx.currentTime;
-    const dest = NODES.trackGains[destTrack]; // Track 2 (Bass) or Track 3 (Lead)
+    const dest = NODES.trackGains[1]; // Track 1: 2 BASS
+    if (!dest) return;
+
+    // Monophonic choke of previous bass note so sub frequencies never overlap/muddy
+    if (activeBassGain) {
+      try {
+        activeBassGain.gain.cancelScheduledValues(t);
+        activeBassGain.gain.setValueAtTime(activeBassGain.gain.value, t);
+        activeBassGain.gain.linearRampToValueAtTime(0.0001, t + 0.006);
+      } catch (_) {}
+    }
+
+    const freq = 440 * Math.pow(2, (midiNote - 69) / 12);
+
+    const subOsc = ctx.createOscillator();
+    const sawOsc = ctx.createOscillator();
+    subOsc.type = 'sine';
+    sawOsc.type = 'sawtooth';
+    subOsc.frequency.setValueAtTime(freq, t);
+    sawOsc.frequency.setValueAtTime(freq, t);
+
+    const sawScale = ctx.createGain();
+    sawScale.gain.setValueAtTime(0.28, t);
+
+    // Dedicated Acid Lowpass Filter envelope per bass note
+    const filter = ctx.createBiquadFilter();
+    filter.type = 'lowpass';
+    const peakCut = Math.min(2400, Math.max(260, STATE.synth.cutoff * 0.35));
+    filter.frequency.setValueAtTime(peakCut, t);
+    filter.frequency.exponentialRampToValueAtTime(130, t + duration);
+    filter.Q.setValueAtTime(Math.min(6.0, Math.max(1.2, STATE.synth.resonance * 0.8)), t);
+
+    const ampGain = ctx.createGain();
+    ampGain.gain.setValueAtTime(0.0001, t);
+    ampGain.gain.linearRampToValueAtTime(0.46, t + 0.004);
+    ampGain.gain.exponentialRampToValueAtTime(0.18, t + duration);
+    ampGain.gain.exponentialRampToValueAtTime(0.0001, t + duration + 0.04);
+    activeBassGain = ampGain;
+
+    subOsc.connect(filter);
+    sawOsc.connect(sawScale);
+    sawScale.connect(filter);
+    filter.connect(ampGain);
+    ampGain.connect(dest);
+
+    subOsc.start(t);
+    sawOsc.start(t);
+    subOsc.stop(t + duration + 0.05);
+    sawOsc.stop(t + duration + 0.05);
+  }
+
+  function playSynthNote(midiNote, duration = 0.24, time = null, destTrack = 2) {
+    if (!STATE.audioCtx) return;
+    const ctx = STATE.audioCtx;
+    const t = time !== null ? time : ctx.currentTime;
+    const dest = destTrack === 2 && NODES.synthBusInput ? NODES.synthBusInput : NODES.trackGains[destTrack];
     if (!dest) return;
 
     const freq = 440 * Math.pow(2, (midiNote - 69) / 12);
     const mode = STATE.synth.mode;
 
-    // Filter per voice
+    // Per-voice envelope filter
     const filter = ctx.createBiquadFilter();
     filter.type = 'lowpass';
-    filter.frequency.setValueAtTime(STATE.synth.cutoff, t);
-    filter.frequency.exponentialRampToValueAtTime(STATE.synth.cutoff * 0.4, t + duration);
-    filter.Q.setValueAtTime(STATE.synth.resonance, t);
+    const startCut = Math.min(14000, Math.max(400, STATE.synth.cutoff));
+    filter.frequency.setValueAtTime(startCut, t);
+    filter.frequency.exponentialRampToValueAtTime(Math.max(240, startCut * 0.45), t + duration);
+    filter.Q.setValueAtTime(Math.min(5.0, STATE.synth.resonance), t);
 
-    // Amplitude ADSR
+    // Clean, headroom-balanced Amplitude ADSR (0.26 max per voice so polyphony never clips)
     const ampGain = ctx.createGain();
-    const att = Math.max(0.002, STATE.synth.attack);
-    const dec = Math.max(0.02, STATE.synth.decay);
-    const sus = STATE.synth.sustain;
-    const rel = Math.max(0.02, STATE.synth.release);
+    const att = Math.max(0.004, STATE.synth.attack);
+    const dec = Math.max(0.03, STATE.synth.decay);
+    const sus = Math.min(0.8, STATE.synth.sustain);
+    const rel = Math.max(0.03, Math.min(0.35, STATE.synth.release));
+    const voicePeak = 0.24;
 
     ampGain.gain.setValueAtTime(0.0001, t);
-    ampGain.gain.linearRampToValueAtTime(0.8, t + att);
-    ampGain.gain.exponentialRampToValueAtTime(Math.max(0.001, sus * 0.8), t + att + dec);
-    ampGain.gain.setValueAtTime(Math.max(0.001, sus * 0.8), t + duration);
+    ampGain.gain.linearRampToValueAtTime(voicePeak, t + att);
+    ampGain.gain.exponentialRampToValueAtTime(Math.max(0.001, sus * voicePeak), t + att + dec);
+    ampGain.gain.setValueAtTime(Math.max(0.001, sus * voicePeak), t + duration);
     ampGain.gain.exponentialRampToValueAtTime(0.0001, t + duration + rel);
 
     filter.connect(ampGain);
     ampGain.connect(dest);
 
     if (mode === 'drift') {
-      // Drift: Dual analog oscillators with slight detune + drift LFO
+      // Drift: Dual analog oscillators with warm detune (zero per-note Float32Array allocation!)
       const osc1 = ctx.createOscillator();
       const osc2 = ctx.createOscillator();
       osc1.type = 'sawtooth';
       osc2.type = 'triangle';
       osc1.frequency.setValueAtTime(freq, t);
-      osc2.frequency.setValueAtTime(freq * 1.004, t); // Detuned by 4 cents
+      osc2.frequency.setValueAtTime(freq * 1.003, t);
 
-      // Wavefold / Drive
-      const shaper = ctx.createWaveShaper();
-      shaper.curve = makeDistortionCurve(STATE.synth.drive, 'warm');
-
-      osc1.connect(shaper);
-      osc2.connect(shaper);
-      shaper.connect(filter);
+      osc1.connect(filter);
+      osc2.connect(filter);
 
       osc1.start(t);
       osc2.start(t);
@@ -765,16 +969,17 @@
       osc2.stop(t + duration + rel + 0.05);
 
     } else if (mode === 'meld') {
-      // Meld: FM Swarm + Harmonic Resonator
+      // Meld: Bi-timbral FM Swarm
       const carrier = ctx.createOscillator();
       const mod = ctx.createOscillator();
       const modGain = ctx.createGain();
 
-      carrier.type = 'sawtooth';
+      carrier.type = 'triangle';
       mod.type = 'sine';
       carrier.frequency.setValueAtTime(freq, t);
-      mod.frequency.setValueAtTime(freq * (1.5 + STATE.synth.morph), t);
-      modGain.gain.setValueAtTime(freq * 1.2 * STATE.synth.morph, t);
+      mod.frequency.setValueAtTime(freq * 2.0, t);
+      modGain.gain.setValueAtTime(freq * (0.4 + STATE.synth.morph * 0.9), t);
+      modGain.gain.exponentialRampToValueAtTime(1.0, t + duration);
 
       mod.connect(modGain);
       modGain.connect(carrier.frequency);
@@ -786,7 +991,7 @@
       mod.stop(t + duration + rel + 0.05);
 
     } else if (mode === 'operator') {
-      // Operator: 4-Operator FM Synthesis
+      // Operator: Classic 2:1 FM Pluck
       const opA = ctx.createOscillator();
       const opB = ctx.createOscillator();
       const opB_gain = ctx.createGain();
@@ -795,7 +1000,8 @@
       opB.type = 'sine';
       opA.frequency.setValueAtTime(freq, t);
       opB.frequency.setValueAtTime(freq * 2.0, t);
-      opB_gain.gain.setValueAtTime(freq * (1.0 + STATE.synth.morph * 3.0), t);
+      opB_gain.gain.setValueAtTime(freq * (0.6 + STATE.synth.morph * 1.6), t);
+      opB_gain.gain.exponentialRampToValueAtTime(1.0, t + duration * 0.8);
 
       opB.connect(opB_gain);
       opB_gain.connect(opA.frequency);
@@ -807,13 +1013,19 @@
       opB.stop(t + duration + rel + 0.05);
 
     } else {
-      // Wavetable: Morphing sawtooth/pulse/square
+      // Wavetable: Detuned pulse/saw chordal lead
       const osc = ctx.createOscillator();
+      const oscSub = ctx.createOscillator();
       osc.type = STATE.synth.morph > 0.5 ? 'square' : 'sawtooth';
+      oscSub.type = 'sine';
       osc.frequency.setValueAtTime(freq, t);
+      oscSub.frequency.setValueAtTime(freq * 0.5, t);
       osc.connect(filter);
+      oscSub.connect(filter);
       osc.start(t);
+      oscSub.start(t);
       osc.stop(t + duration + rel + 0.05);
+      oscSub.stop(t + duration + rel + 0.05);
     }
   }
 
@@ -842,38 +1054,66 @@
     return 12 * (octave + octShift) + STATE.scaleRoot + noteInOct;
   }
 
-  function scheduleStep(stepIndex, time) {
-    // 1. Trigger Drum Voices active on this step
-    STATE.drumVoices.forEach(voice => {
-      if (voice.mute) return;
-      const stepVal = voice.steps[stepIndex];
-      if (stepVal > 0) {
-        triggerDrumVoice(voice.id, time, 0.85, stepVal === 2);
-      }
-    });
+  function isDrumVoiceAudible(voice) {
+    const anyVoiceSolo = STATE.drumVoices.some(v => v.solo);
+    if (anyVoiceSolo) return voice.solo;
+    return !voice.mute;
+  }
 
-    // 2. Auto-Play Bass / Lead Synth clips if running in Session View
-    // Bass line on Track 1 (e.g. 16th rolling techno bass or 303 pattern)
-    if (STATE.sessionClips[1][0].state === 'playing') {
-      const bassNotes = [0, 0, 3, 0, 2, 0, 5, 0, 0, 0, 3, 0, 7, 5, 3, 2];
-      const degree = bassNotes[stepIndex];
-      if (stepIndex % 2 === 0 || stepIndex === 3 || stepIndex === 7 || stepIndex === 11) {
-        const pitch = getScalePitch(degree, 2); // Low bass C2
-        playSynthNote(pitch, 0.15, time, 1);
+  function isMixerTrackAudible(trackIdx) {
+    const mainTracks = STATE.tracks.slice(0, 4);
+    const anyTrackSolo = mainTracks.some(t => t.solo);
+    if (anyTrackSolo) return STATE.tracks[trackIdx].solo;
+    return !STATE.tracks[trackIdx].mute;
+  }
+
+  function syncMixerTrackGains() {
+    if (!STATE.audioCtx) return;
+    for (let i = 0; i < 4; i++) {
+      const g = NODES.trackGains[i];
+      if (!g) continue;
+      const audible = isMixerTrackAudible(i);
+      g.gain.setTargetAtTime(audible ? STATE.tracks[i].volume : 0.0, STATE.audioCtx.currentTime, 0.008);
+    }
+  }
+
+  function scheduleStep(stepIndex, time) {
+    // 1. Trigger Drum Voices active on this step (respecting Track 0 & per-pad Mute/Solo)
+    const drumsPlaying = STATE.sessionClips[0].some(c => c.state === 'playing');
+    if (drumsPlaying && isMixerTrackAudible(0)) {
+      STATE.drumVoices.forEach(voice => {
+        if (!isDrumVoiceAudible(voice)) return;
+        const stepVal = voice.steps[stepIndex];
+        if (stepVal > 0) {
+          triggerDrumVoice(voice.id, time, 0.85, stepVal === 2);
+        }
+      });
+    }
+
+    // 2. Auto-Play Monophonic Sub/Acid Bass on Track 1 (offbeat rolling bassline that locks with the Kick)
+    const bassPlaying = STATE.sessionClips[1].some(c => c.state === 'playing');
+    if (bassPlaying && isMixerTrackAudible(1)) {
+      // Offbeat + syncopated rolling bass notes (avoids muddying the downbeat kick transient)
+      const bassPattern = [-1, 0, 0, 2, -1, 0, 4, 0, -1, 0, 0, 3, -1, 5, 4, 2];
+      const degree = bassPattern[stepIndex];
+      if (degree >= 0) {
+        const pitch = getScalePitch(degree, 1); // Deep Sub-Bass Octave 1 (F1 = 43.65 Hz)
+        playBassNote(pitch, 0.12, time);
       }
     }
 
-    // Lead melodic hook on Track 2 (when Scene 3 or Lead clip is active)
-    if (STATE.sessionClips[2][2].state === 'playing') {
-      const leadMelody = [7, 7, -1, 5, 8, -1, 7, 5, 7, 10, -1, 8, 7, 5, 3, 5];
+    // 3. Lead melodic hook on Track 2 (spacious syncopated minor chordal pluck)
+    const leadPlaying = STATE.sessionClips[2].some(c => c.state === 'playing');
+    if (leadPlaying && isMixerTrackAudible(2)) {
+      const leadMelody = [0, -1, -1, 4, -1, -1, 2, -1, 0, -1, 6, -1, 4, -1, 2, -1];
       const noteDeg = leadMelody[stepIndex];
       if (noteDeg >= 0) {
-        const pitch = getScalePitch(noteDeg, 4); // Lead C4
-        playSynthNote(pitch, 0.22, time, 2);
+        const pitch = getScalePitch(noteDeg, 3); // Warm Mid-Lead Octave 3
+        playSynthNote(pitch, 0.16, time, 2);
       }
     }
 
-    // 3. UI Cursor Updates scheduled for RAF
+    // 4. UI Cursor Updates scheduled for RAF
     const stepTimeMs = (time - STATE.audioCtx.currentTime) * 1000;
     setTimeout(() => {
       updateUIPlayhead(stepIndex);
@@ -1463,42 +1703,7 @@
   }
 
   function renderOfflineDrumVoice(ctx, voiceId, time, isAccent) {
-    const gain = ctx.createGain();
-    gain.gain.setValueAtTime(isAccent ? 1.0 : 0.8, time);
-    gain.connect(ctx.destination);
-
-    if (voiceId === 'kick') {
-      const osc = ctx.createOscillator();
-      osc.frequency.setValueAtTime(160, time);
-      osc.frequency.exponentialRampToValueAtTime(45, time + 0.04);
-      const g = ctx.createGain();
-      g.gain.setValueAtTime(1.0, time);
-      g.gain.exponentialRampToValueAtTime(0.001, time + 0.4);
-      osc.connect(g);
-      g.connect(gain);
-      osc.start(time);
-      osc.stop(time + 0.45);
-    } else if (voiceId === 'snare') {
-      const osc = ctx.createOscillator();
-      osc.frequency.setValueAtTime(200, time);
-      const g = ctx.createGain();
-      g.gain.setValueAtTime(0.6, time);
-      g.gain.exponentialRampToValueAtTime(0.001, time + 0.18);
-      osc.connect(g);
-      g.connect(gain);
-      osc.start(time);
-      osc.stop(time + 0.2);
-    } else {
-      const osc = ctx.createOscillator();
-      osc.frequency.setValueAtTime(voiceId === 'ch' ? 7800 : 800, time);
-      const g = ctx.createGain();
-      g.gain.setValueAtTime(0.4, time);
-      g.gain.exponentialRampToValueAtTime(0.001, time + 0.08);
-      osc.connect(g);
-      g.connect(gain);
-      osc.start(time);
-      osc.stop(time + 0.1);
-    }
+    triggerDrumVoiceOnCtx(ctx, ctx.destination, voiceId, time, 0.85, isAccent);
   }
 
   // AudioBuffer to 16-Bit Stereo PCM WAV Blob
@@ -2046,15 +2251,35 @@
     // Synth Knobs
     setupRangeListener('synth-cutoff', (v) => {
       STATE.synth.cutoff = v;
-      document.getElementById('synth-cutoff-val').textContent = `${v} Hz`;
-      if (NODES.filterNode1) NODES.filterNode1.frequency.setValueAtTime(v, STATE.audioCtx.currentTime);
-      if (NODES.filterNode2) NODES.filterNode2.frequency.setValueAtTime(v, STATE.audioCtx.currentTime);
+      document.getElementById('synth-cutoff-val').textContent = `${Math.round(v)} Hz`;
+      if (NODES.filterNode1 && STATE.audioCtx) NODES.filterNode1.frequency.setTargetAtTime(v, STATE.audioCtx.currentTime, 0.012);
+      if (NODES.filterNode2 && STATE.audioCtx) NODES.filterNode2.frequency.setTargetAtTime(v, STATE.audioCtx.currentTime, 0.012);
     });
     setupRangeListener('synth-res', (v) => {
       STATE.synth.resonance = v;
       document.getElementById('synth-res-val').textContent = `${v} Q`;
-      if (NODES.filterNode1) NODES.filterNode1.Q.setValueAtTime(Math.sqrt(v), STATE.audioCtx.currentTime);
-      if (NODES.filterNode2) NODES.filterNode2.Q.setValueAtTime(Math.sqrt(v), STATE.audioCtx.currentTime);
+      if (NODES.filterNode1 && STATE.audioCtx) NODES.filterNode1.Q.setTargetAtTime(Math.min(4.0, Math.sqrt(v)), STATE.audioCtx.currentTime, 0.012);
+      if (NODES.filterNode2 && STATE.audioCtx) NODES.filterNode2.Q.setTargetAtTime(Math.min(4.0, Math.sqrt(v)), STATE.audioCtx.currentTime, 0.012);
+    });
+    setupRangeListener('synth-att', (v) => {
+      STATE.synth.attack = v / 1000.0;
+      const el = document.getElementById('synth-att-val');
+      if (el) el.textContent = `${Math.round(v)} ms`;
+    });
+    setupRangeListener('synth-dec', (v) => {
+      STATE.synth.decay = v / 1000.0;
+      const el = document.getElementById('synth-dec-val');
+      if (el) el.textContent = `${Math.round(v)} ms`;
+    });
+    setupRangeListener('synth-sus', (v) => {
+      STATE.synth.sustain = v;
+      const el = document.getElementById('synth-sus-val');
+      if (el) el.textContent = `${Math.round(v * 100)} %`;
+    });
+    setupRangeListener('synth-rel', (v) => {
+      STATE.synth.release = v / 1000.0;
+      const el = document.getElementById('synth-rel-val');
+      if (el) el.textContent = `${Math.round(v)} ms`;
     });
     setupRangeListener('synth-morph', (v) => {
       STATE.synth.morph = v;
@@ -2063,6 +2288,46 @@
     setupRangeListener('synth-drive', (v) => {
       STATE.synth.drive = v;
       document.getElementById('synth-drive-val').textContent = `+${v} dB`;
+      if (NODES.roarShaper) NODES.roarShaper.curve = getCachedDistortionCurve(v, STATE.fx.roar.curve);
+    });
+
+    // FX Rack Sliders (Glue, OTT, Roar, Reverb, Limiter)
+    setupRangeListener('glue-thresh', (v) => {
+      STATE.fx.glue.threshold = v;
+      const el = document.getElementById('glue-thresh-val');
+      if (el) el.textContent = `${v} dB`;
+      if (NODES.glueCompressor && STATE.audioCtx) NODES.glueCompressor.threshold.setTargetAtTime(v, STATE.audioCtx.currentTime, 0.015);
+    });
+    document.getElementById('glue-ratio')?.addEventListener('change', (e) => {
+      const r = parseFloat(e.target.value) || 2.5;
+      STATE.fx.glue.ratio = r;
+      if (NODES.glueCompressor && STATE.audioCtx) NODES.glueCompressor.ratio.setTargetAtTime(r, STATE.audioCtx.currentTime, 0.015);
+    });
+    setupRangeListener('roar-drive', (v) => {
+      STATE.fx.roar.drive = v;
+      const el = document.getElementById('roar-drive-val');
+      if (el) el.textContent = `+${v} dB`;
+      if (NODES.roarShaper) NODES.roarShaper.curve = getCachedDistortionCurve(v, STATE.fx.roar.curve);
+    });
+    document.getElementById('roar-curve')?.addEventListener('change', (e) => {
+      STATE.fx.roar.curve = e.target.value;
+      if (NODES.roarShaper) NODES.roarShaper.curve = getCachedDistortionCurve(STATE.fx.roar.drive, STATE.fx.roar.curve);
+    });
+    setupRangeListener('rev-decay', (v) => {
+      STATE.fx.reverb.decay = v;
+      const el = document.getElementById('rev-decay-val');
+      if (el) el.textContent = `${v.toFixed(1)} s`;
+      if (NODES.reverbConvolver && STATE.audioCtx) {
+        NODES.reverbConvolver.buffer = buildReverbImpulse(STATE.audioCtx, v);
+      }
+    });
+    setupRangeListener('rev-mix', (v) => {
+      STATE.fx.reverb.mix = v / 100.0;
+      const el = document.getElementById('rev-mix-val');
+      if (el) el.textContent = `${Math.round(v)}%`;
+      if (NODES.returnAGain && STATE.audioCtx) {
+        NODES.returnAGain.gain.setTargetAtTime((v / 100.0) * 0.8, STATE.audioCtx.currentTime, 0.015);
+      }
     });
 
     // Octave Shift Buttons
@@ -2079,7 +2344,7 @@
     for (let i = 0; i < 4; i++) {
       setupRangeListener(`fader-ch${i}`, (v) => {
         STATE.tracks[i].volume = v;
-        if (NODES.trackGains[i]) NODES.trackGains[i].gain.setValueAtTime(v, STATE.audioCtx.currentTime);
+        syncMixerTrackGains();
       });
       setupRangeListener(`pan-ch${i}`, (v) => {
         STATE.tracks[i].pan = v;
@@ -2088,12 +2353,12 @@
       document.getElementById(`mute-ch${i}`)?.addEventListener('click', (e) => {
         STATE.tracks[i].mute = !STATE.tracks[i].mute;
         e.target.classList.toggle('active', STATE.tracks[i].mute);
-        const gain = STATE.tracks[i].mute ? 0 : STATE.tracks[i].volume;
-        if (NODES.trackGains[i]) NODES.trackGains[i].gain.setValueAtTime(gain, STATE.audioCtx.currentTime);
+        syncMixerTrackGains();
       });
       document.getElementById(`solo-ch${i}`)?.addEventListener('click', (e) => {
         STATE.tracks[i].solo = !STATE.tracks[i].solo;
         e.target.classList.toggle('active', STATE.tracks[i].solo);
+        syncMixerTrackGains();
       });
     }
 

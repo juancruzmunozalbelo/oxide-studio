@@ -31,6 +31,26 @@
 
   // Active voices tracking
   const activeVoices = new Map();
+  let sharedNoiseBuffer = null;
+  let activeOpenHatGain = null;
+
+  function getSharedNoiseBuffer(ctx) {
+    if (sharedNoiseBuffer && sharedNoiseBuffer.sampleRate === ctx.sampleRate) {
+      return sharedNoiseBuffer;
+    }
+    const len = ctx.sampleRate * 2;
+    const buf = ctx.createBuffer(1, len, ctx.sampleRate);
+    const data = buf.getChannelData(0);
+    let x = 0x13579bdf;
+    for (let i = 0; i < len; i++) {
+      x ^= x << 13;
+      x ^= x >> 17;
+      x ^= x << 5;
+      data[i] = (x / 2147483648.0) - 1.0;
+    }
+    sharedNoiseBuffer = buf;
+    return buf;
+  }
 
   function initAudio() {
     if (audioCtx) {
@@ -41,24 +61,25 @@
     }
 
     const AudioContextClass = window.AudioContext || window.webkitAudioContext;
-    audioCtx = new AudioContextClass();
+    audioCtx = new AudioContextClass({ latencyHint: 'interactive' });
+    getSharedNoiseBuffer(audioCtx);
 
     // Master analyser for 60 FPS Canvas visualizers
     masterAnalyser = audioCtx.createAnalyser();
     masterAnalyser.fftSize = 256; // 128 frequency bins
     masterAnalyser.smoothingTimeConstant = 0.8;
 
-    // Master limiter (DynamicsCompressorNode configured as brickwall)
+    // Smooth bus compressor/limiter with headroom
     masterLimiter = audioCtx.createDynamicsCompressor();
-    masterLimiter.threshold.setValueAtTime(-1.0, audioCtx.currentTime);
-    masterLimiter.knee.setValueAtTime(0.0, audioCtx.currentTime);
-    masterLimiter.ratio.setValueAtTime(20.0, audioCtx.currentTime);
-    masterLimiter.attack.setValueAtTime(0.002, audioCtx.currentTime);
-    masterLimiter.release.setValueAtTime(0.08, audioCtx.currentTime);
+    masterLimiter.threshold.setValueAtTime(-6.0, audioCtx.currentTime);
+    masterLimiter.knee.setValueAtTime(6.0, audioCtx.currentTime);
+    masterLimiter.ratio.setValueAtTime(4.0, audioCtx.currentTime);
+    masterLimiter.attack.setValueAtTime(0.008, audioCtx.currentTime);
+    masterLimiter.release.setValueAtTime(0.09, audioCtx.currentTime);
 
     // Master gain
     masterGain = audioCtx.createGain();
-    masterGain.gain.setValueAtTime(0.85, audioCtx.currentTime);
+    masterGain.gain.setValueAtTime(0.82, audioCtx.currentTime);
 
     masterLimiter.connect(masterAnalyser);
     masterAnalyser.connect(masterGain);
@@ -138,7 +159,7 @@
     subOsc.frequency.setValueAtTime(freq * 0.5, now);
 
     const voiceMixer = audioCtx.createGain();
-    voiceMixer.gain.setValueAtTime(0.5, now);
+    voiceMixer.gain.setValueAtTime(0.24, now);
 
     osc1.connect(voiceMixer);
     osc2.connect(voiceMixer);
@@ -157,8 +178,8 @@
     // Amp Envelope ADSR
     const ampGain = audioCtx.createGain();
     ampGain.gain.setValueAtTime(0.0001, now);
-    ampGain.gain.exponentialRampToValueAtTime(0.6, now + Math.max(0.005, synthParams.attack));
-    ampGain.gain.exponentialRampToValueAtTime(Math.max(0.0001, 0.6 * synthParams.sustain), now + Math.max(0.01, synthParams.attack + synthParams.decay));
+    ampGain.gain.exponentialRampToValueAtTime(0.42, now + Math.max(0.005, synthParams.attack));
+    ampGain.gain.exponentialRampToValueAtTime(Math.max(0.0001, 0.42 * synthParams.sustain), now + Math.max(0.01, synthParams.attack + synthParams.decay));
 
     filter.output.connect(ampGain);
     ampGain.connect(masterLimiter);
@@ -210,51 +231,59 @@
   // 2. Synthesized TR-909 Drum Engine (Web Audio Nodes)
   // =========================================================================
 
-  function trigger909Kick(time = audioCtx.currentTime, pitchHz = 48, drive = 1.0, decayMs = 450) {
+  function trigger909Kick(time = audioCtx.currentTime, pitchHz = 48, drive = 1.0, decayMs = 380) {
     const osc = audioCtx.createOscillator();
     const gain = audioCtx.createGain();
 
-    // Pitch envelope: Rapid sweep from 150 Hz to fundamental pitch
-    osc.frequency.setValueAtTime(155, time);
-    osc.frequency.exponentialRampToValueAtTime(pitchHz, time + 0.028);
-    osc.frequency.exponentialRampToValueAtTime(pitchHz * 0.85, time + (decayMs / 1000));
+    // Pitch envelope: Rapid sweep from 165 Hz to fundamental pitch
+    osc.frequency.setValueAtTime(165, time);
+    osc.frequency.exponentialRampToValueAtTime(pitchHz, time + 0.024);
+    osc.frequency.exponentialRampToValueAtTime(pitchHz * 0.88, time + (decayMs / 1000));
 
-    // Amp envelope
+    // Amp envelope (clean studio headroom)
     gain.gain.setValueAtTime(0.0001, time);
-    gain.gain.linearRampToValueAtTime(0.95 * Math.min(1.4, drive), time + 0.003);
+    gain.gain.linearRampToValueAtTime(0.68 * Math.min(1.25, drive), time + 0.002);
     gain.gain.exponentialRampToValueAtTime(0.0001, time + (decayMs / 1000));
 
-    // Click transient click impulse
-    const clickOsc = audioCtx.createOscillator();
+    // Band-limited click transient
+    const clickNoise = audioCtx.createBufferSource();
+    clickNoise.buffer = getSharedNoiseBuffer(audioCtx);
+    const clickFilter = audioCtx.createBiquadFilter();
+    clickFilter.type = 'bandpass';
+    clickFilter.frequency.setValueAtTime(920, time);
+    clickFilter.Q.setValueAtTime(1.4, time);
     const clickGain = audioCtx.createGain();
-    clickOsc.type = 'triangle';
-    clickOsc.frequency.setValueAtTime(320, time);
-    clickGain.gain.setValueAtTime(0.4 * drive, time);
+    clickGain.gain.setValueAtTime(0.24 * drive, time);
     clickGain.gain.exponentialRampToValueAtTime(0.0001, time + 0.012);
 
-    clickOsc.connect(clickGain);
+    clickNoise.connect(clickFilter);
+    clickFilter.connect(clickGain);
     clickGain.connect(masterLimiter);
-    clickOsc.start(time);
-    clickOsc.stop(time + 0.02);
+    clickNoise.start(time);
+    clickNoise.stop(time + 0.016);
 
     osc.connect(gain);
     gain.connect(masterLimiter);
 
     osc.start(time);
-    osc.stop(time + (decayMs / 1000) + 0.05);
+    osc.stop(time + (decayMs / 1000) + 0.04);
   }
 
   function trigger909Snare(time = audioCtx.currentTime) {
-    // Dual tuned sine body oscillators (185 Hz + 330 Hz)
+    // Dual tuned drumhead oscillators (182 Hz + 328 Hz with fast pitch drop)
     const osc1 = audioCtx.createOscillator();
     const osc2 = audioCtx.createOscillator();
     const toneGain = audioCtx.createGain();
 
-    osc1.frequency.setValueAtTime(185, time);
-    osc2.frequency.setValueAtTime(330, time);
+    osc1.type = 'triangle';
+    osc2.type = 'sine';
+    osc1.frequency.setValueAtTime(215, time);
+    osc1.frequency.exponentialRampToValueAtTime(180, time + 0.032);
+    osc2.frequency.setValueAtTime(355, time);
+    osc2.frequency.exponentialRampToValueAtTime(318, time + 0.032);
 
-    toneGain.gain.setValueAtTime(0.5, time);
-    toneGain.gain.exponentialRampToValueAtTime(0.0001, time + 0.18);
+    toneGain.gain.setValueAtTime(0.26, time);
+    toneGain.gain.exponentialRampToValueAtTime(0.0001, time + 0.14);
 
     osc1.connect(toneGain);
     osc2.connect(toneGain);
@@ -262,86 +291,84 @@
 
     osc1.start(time);
     osc2.start(time);
-    osc1.stop(time + 0.2);
-    osc2.stop(time + 0.2);
+    osc1.stop(time + 0.16);
+    osc2.stop(time + 0.16);
 
-    // Snare white noise snappy burst
-    const bufferSize = audioCtx.sampleRate * 0.22;
-    const noiseBuffer = audioCtx.createBuffer(1, bufferSize, audioCtx.sampleRate);
-    const output = noiseBuffer.getChannelData(0);
-    for (let i = 0; i < bufferSize; i++) {
-      output[i] = Math.random() * 2 - 1;
-    }
-
+    // Snare wires using shared pre-allocated noise buffer
     const whiteNoise = audioCtx.createBufferSource();
-    whiteNoise.buffer = noiseBuffer;
+    whiteNoise.buffer = getSharedNoiseBuffer(audioCtx);
 
-    const noiseFilter = audioCtx.createBiquadFilter();
-    noiseFilter.type = 'highpass';
-    noiseFilter.frequency.setValueAtTime(1200, time);
+    const hpf = audioCtx.createBiquadFilter();
+    hpf.type = 'highpass';
+    hpf.frequency.setValueAtTime(1500, time);
+    const lpf = audioCtx.createBiquadFilter();
+    lpf.type = 'lowpass';
+    lpf.frequency.setValueAtTime(6500, time);
 
     const noiseGain = audioCtx.createGain();
-    noiseGain.gain.setValueAtTime(0.7, time);
-    noiseGain.gain.exponentialRampToValueAtTime(0.0001, time + 0.22);
+    noiseGain.gain.setValueAtTime(0.32, time);
+    noiseGain.gain.exponentialRampToValueAtTime(0.0001, time + 0.19);
 
-    whiteNoise.connect(noiseFilter);
-    noiseFilter.connect(noiseGain);
+    whiteNoise.connect(hpf);
+    hpf.connect(lpf);
+    lpf.connect(noiseGain);
     noiseGain.connect(masterLimiter);
 
     whiteNoise.start(time);
-    whiteNoise.stop(time + 0.24);
+    whiteNoise.stop(time + 0.21);
   }
 
   function trigger909Hat(isOpen, time = audioCtx.currentTime) {
-    const bufferSize = audioCtx.sampleRate * (isOpen ? 0.38 : 0.045);
-    const noiseBuffer = audioCtx.createBuffer(1, bufferSize, audioCtx.sampleRate);
-    const output = noiseBuffer.getChannelData(0);
-    for (let i = 0; i < bufferSize; i++) {
-      output[i] = Math.random() * 2 - 1;
+    if (!isOpen && activeOpenHatGain) {
+      try {
+        activeOpenHatGain.gain.cancelScheduledValues(time);
+        activeOpenHatGain.gain.setValueAtTime(activeOpenHatGain.gain.value, time);
+        activeOpenHatGain.gain.linearRampToValueAtTime(0.0001, time + 0.006);
+      } catch (_) {}
+      activeOpenHatGain = null;
     }
 
     const noiseSource = audioCtx.createBufferSource();
-    noiseSource.buffer = noiseBuffer;
+    noiseSource.buffer = getSharedNoiseBuffer(audioCtx);
+
+    const hpf = audioCtx.createBiquadFilter();
+    hpf.type = 'highpass';
+    hpf.frequency.setValueAtTime(isOpen ? 7600 : 8400, time);
 
     const filter = audioCtx.createBiquadFilter();
     filter.type = 'bandpass';
-    filter.frequency.setValueAtTime(isOpen ? 7200 : 8800, time);
-    filter.Q.setValueAtTime(3.5, time);
+    filter.frequency.setValueAtTime(isOpen ? 8800 : 9800, time);
+    filter.Q.setValueAtTime(1.8, time);
 
     const gain = audioCtx.createGain();
-    gain.gain.setValueAtTime(0.55, time);
-    gain.gain.exponentialRampToValueAtTime(0.0001, time + (isOpen ? 0.35 : 0.04));
+    gain.gain.setValueAtTime(0.24, time);
+    gain.gain.exponentialRampToValueAtTime(0.0001, time + (isOpen ? 0.28 : 0.042));
+    if (isOpen) activeOpenHatGain = gain;
 
-    noiseSource.connect(filter);
+    noiseSource.connect(hpf);
+    hpf.connect(filter);
     filter.connect(gain);
     gain.connect(masterLimiter);
 
     noiseSource.start(time);
-    noiseSource.stop(time + (isOpen ? 0.4 : 0.05));
+    noiseSource.stop(time + (isOpen ? 0.30 : 0.046));
   }
 
   function trigger909Clap(time = audioCtx.currentTime) {
-    // 3 staggered micro-impulses (10ms spacing) + reverberant decay
-    const impulseOffsets = [0, 0.011, 0.022];
-    impulseOffsets.forEach((offset, idx) => {
-      const bufferSize = audioCtx.sampleRate * 0.015;
-      const noiseBuffer = audioCtx.createBuffer(1, bufferSize, audioCtx.sampleRate);
-      const output = noiseBuffer.getChannelData(0);
-      for (let i = 0; i < bufferSize; i++) {
-        output[i] = Math.random() * 2 - 1;
-      }
-
+    const noiseBuf = getSharedNoiseBuffer(audioCtx);
+    const impulseOffsets = [0, 0.010, 0.020];
+    impulseOffsets.forEach((offset) => {
       const noiseSource = audioCtx.createBufferSource();
-      noiseSource.buffer = noiseBuffer;
+      noiseSource.buffer = noiseBuf;
 
       const filter = audioCtx.createBiquadFilter();
       filter.type = 'bandpass';
-      filter.frequency.setValueAtTime(1400, time + offset);
-      filter.Q.setValueAtTime(1.8, time + offset);
+      filter.frequency.setValueAtTime(1350, time + offset);
+      filter.Q.setValueAtTime(2.0, time + offset);
 
       const gain = audioCtx.createGain();
-      gain.gain.setValueAtTime(0.45, time + offset);
-      gain.gain.exponentialRampToValueAtTime(0.0001, time + offset + 0.014);
+      gain.gain.setValueAtTime(0.25, time + offset);
+      gain.gain.exponentialRampToValueAtTime(0.0001, time + offset + 0.015);
 
       noiseSource.connect(filter);
       filter.connect(gain);
@@ -351,32 +378,24 @@
       noiseSource.stop(time + offset + 0.02);
     });
 
-    // Reverb decay tail
-    const tailSize = audioCtx.sampleRate * 0.26;
-    const tailBuffer = audioCtx.createBuffer(1, tailSize, audioCtx.sampleRate);
-    const tailOut = tailBuffer.getChannelData(0);
-    for (let i = 0; i < tailSize; i++) {
-      tailOut[i] = Math.random() * 2 - 1;
-    }
-
     const tailSource = audioCtx.createBufferSource();
-    tailSource.buffer = tailBuffer;
+    tailSource.buffer = noiseBuf;
 
     const tailFilter = audioCtx.createBiquadFilter();
     tailFilter.type = 'bandpass';
-    tailFilter.frequency.setValueAtTime(1200, time + 0.025);
-    tailFilter.Q.setValueAtTime(1.5, time + 0.025);
+    tailFilter.frequency.setValueAtTime(1200, time + 0.024);
+    tailFilter.Q.setValueAtTime(1.6, time + 0.024);
 
     const tailGain = audioCtx.createGain();
-    tailGain.gain.setValueAtTime(0.5, time + 0.025);
-    tailGain.gain.exponentialRampToValueAtTime(0.0001, time + 0.28);
+    tailGain.gain.setValueAtTime(0.26, time + 0.024);
+    tailGain.gain.exponentialRampToValueAtTime(0.0001, time + 0.20);
 
     tailSource.connect(tailFilter);
     tailFilter.connect(tailGain);
     tailGain.connect(masterLimiter);
 
-    tailSource.start(time + 0.025);
-    tailSource.stop(time + 0.3);
+    tailSource.start(time + 0.024);
+    tailSource.stop(time + 0.22);
   }
 
   // =========================================================================
