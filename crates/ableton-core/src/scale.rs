@@ -219,4 +219,72 @@ mod tests {
         let filtered = scale.filter_non_scale_notes(&input);
         assert_eq!(filtered, vec![60, 62, 64, 67, 69]);
     }
+
+    #[test]
+    fn test_scale_lock() {
+        // 1. Scale Lock flag initialization and builder
+        let unlocked = GlobalScale::new(0, ScaleMode::Major);
+        assert!(!unlocked.scale_lock);
+        let locked = unlocked.with_lock(true);
+        assert!(locked.scale_lock);
+        let default_scale = GlobalScale::default();
+        assert!(default_scale.scale_lock);
+        assert_eq!(default_scale.root, 5);
+        assert_eq!(default_scale.mode, ScaleMode::Dorian);
+
+        // 2. Global scale awareness across all 12 roots and 14 modes
+        for root in 0..12 {
+            for &mode in &ScaleMode::ALL {
+                let gs = GlobalScale::new(root, mode).with_lock(true);
+                assert_eq!(gs.root_name(), ROOT_NAMES[root as usize]);
+                assert!(!gs.display_name().is_empty());
+                let mask = gs.degree_mask();
+                assert_ne!(mask, 0, "Degree mask must never be empty for {} {}", gs.root_name(), mode.name());
+
+                // Root note itself must always be in scale
+                let root_midi = 60 + root;
+                assert!(gs.is_in_scale(root_midi), "Root note {} must be in scale", root_midi);
+
+                // All notes quantized must be in scale
+                for test_note in [0u8, 36, 47, 60, 61, 62, 63, 64, 65, 66, 67, 68, 69, 70, 71, 72, 127] {
+                    let quantized = gs.quantize(test_note);
+                    assert!(
+                        gs.is_in_scale(quantized),
+                        "Quantized note {} must be in scale {} {}",
+                        quantized,
+                        gs.root_name(),
+                        mode.name()
+                    );
+                }
+            }
+        }
+
+        // 3. Pitch snapping under Scale Lock in C Major (C, D, E, F, G, A, B)
+        let c_major_locked = GlobalScale::new(0, ScaleMode::Major).with_lock(true);
+        assert_eq!(c_major_locked.quantize(60), 60); // C4 -> C4
+        assert_eq!(c_major_locked.quantize(61), 60); // C#4 -> C4
+        assert_eq!(c_major_locked.quantize(62), 62); // D4 -> D4
+        assert_eq!(c_major_locked.quantize(63), 62); // D#4 -> D4
+        assert_eq!(c_major_locked.quantize(64), 64); // E4 -> E4
+        assert_eq!(c_major_locked.quantize(65), 65); // F4 -> F4
+        assert_eq!(c_major_locked.quantize(66), 65); // F#4 -> F4
+        assert_eq!(c_major_locked.quantize(67), 67); // G4 -> G4
+        assert_eq!(c_major_locked.quantize(68), 67); // G#4 -> G4
+        assert_eq!(c_major_locked.quantize(69), 69); // A4 -> A4
+        assert_eq!(c_major_locked.quantize(70), 69); // A#4 -> A4
+        assert_eq!(c_major_locked.quantize(71), 71); // B4 -> B4
+
+        // 4. Pitch snapping under Scale Lock in A Minor (A, B, C, D, E, F, G)
+        let a_minor_locked = GlobalScale::new(9, ScaleMode::Minor).with_lock(true);
+        assert_eq!(a_minor_locked.quantize(69), 69); // A4 -> A4
+        assert_eq!(a_minor_locked.quantize(70), 69); // A#4 -> A4
+        assert_eq!(a_minor_locked.quantize(71), 71); // B4 -> B4
+        assert_eq!(a_minor_locked.quantize(72), 72); // C5 -> C5
+        assert_eq!(a_minor_locked.quantize(73), 72); // C#5 -> C5
+
+        // 5. Note filtering under Scale Lock
+        let chromatic = (60..=72).collect::<Vec<u8>>();
+        let c_maj_notes = c_major_locked.filter_non_scale_notes(&chromatic);
+        assert_eq!(c_maj_notes, vec![60, 62, 64, 65, 67, 69, 71, 72]);
+    }
 }

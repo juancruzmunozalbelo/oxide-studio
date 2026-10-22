@@ -61,9 +61,9 @@ impl SlotState {
     }
 
     /// Queue this slot for stop at `target_beat`.
-    /// Has effect only if the slot is currently playing.
+    /// Has effect if the slot is currently playing or queued to launch.
     pub fn queue_stop(&mut self, target_beat: f64) {
-        if self.is_playing() {
+        if self.is_playing() || self.is_queued_launch() {
             *self = SlotState::QueuedStop(target_beat);
         }
     }

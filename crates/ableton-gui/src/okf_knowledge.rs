@@ -155,6 +155,7 @@ pub const OKF_MANUAL_SECTIONS: &[OkfSection] = &[
             "velocity", "velocidad", "chance", "probabilidad", "reverse", "invert", "legato",
             "humanize", "arpeggiate", "connect", "chord", "euclidean", "warp", "warping",
             "beats", "tones", "texture", "re-pitch", "complex", "complex pro", "mpe",
+            "envelope", "envelopes", "envolventes", "modulation", "modulacion", "pitch bend", "mod wheel",
         ],
         guide_en: "Clip View inspector, MIDI piano roll, and audio warp engine:\n\
             • Sub-Tabs: Notes (Piano Roll), Envelopes (Modulation), MPE (Polyphonic Expression), Sample (Audio Warper).\n\
@@ -300,6 +301,78 @@ pub const OKF_MANUAL_SECTIONS: &[OkfSection] = &[
             "bounce_export_stems",
         ],
     },
+
+    // OKF-09: Suite Instruments, Audio FX, MIDI FX & Modular Patch Graph
+    OkfSection {
+        id: "OKF-09",
+        title_en: "Suite Instruments, Audio FX, MIDI FX & Modular Patch Graph",
+        title_es: "Instrumentos Suite, Efectos de Audio, Efectos MIDI y Grafo Modular",
+        keywords: &[
+            "suite", "instruments", "instrumentos", "drift", "wavetable", "meld", "roar",
+            "operator", "collision", "tension", "electric", "audio fx", "efectos de audio",
+            "midi fx", "efectos midi", "patch graph", "modular", "grafo modular", "lfo",
+            "shaper", "envelope follower", "phaser-flanger", "chorus-ensemble", "hybrid reverb",
+            "spectral time", "spectral blur", "delay", "reverb", "limiter",
+        ],
+        guide_en: "Suite synthesis instruments, studio audio effects, generative MIDI FX and modular modulation graph:\n\
+            • Suite Instruments: 7 flagship synthesis engines (Drift, Wavetable, Meld bi-engine macro, Operator 4-op FM, Collision physical mallet, Tension physical string, Electric physical EP).\n\
+            • Audio FX Processing: Studio-grade saturators (Roar multi-stage drive), reverbs (Hybrid Reverb convolution/algorithmic), delays, and spectral transformations (Spectral Time, Spectral Blur).\n\
+            • MIDI FX Racks: Advanced generative MIDI devices (Arpeggiator, Chord, Scale, Velocity, Random, Note Length, Pitch, Strum).\n\
+            • Modular Patch Graph: Dynamic lock-free signal routing graph with LFO, Shaper, and Envelope Follower modulators mapping to any internal or plugin parameter at audio rate.",
+        guide_es: "Instrumentos de síntesis Suite, efectos de estudio, efectos MIDI generativos y grafo modular de modulación:\n\
+            • Instrumentos Suite: 7 motores insignias de síntesis (Drift, Wavetable, Meld bi-motor macro, Operator FM de 4 operadores, Collision modelado físico de mazos, Tension cuerdas físicas, Electric piano electromecánico).\n\
+            • Procesamiento Audio FX: Saturación de estudio (Roar distorsión multietapa), reverberación (Hybrid Reverb convolución/algorítmica), ecos y transformaciones espectrales (Spectral Time, Spectral Blur).\n\
+            • Racks de Efectos MIDI: Procesadores MIDI generativos (Arpeggiator, Acordes, Escala, Velocidad, Aleatoriedad, Longitud de nota, Strum).\n\
+            • Grafo Modular (Patch Graph): Ruteo dinámico libre de bloqueos con moduladores LFO, Shaper y Envelope Follower mapeables a cualquier parámetro interno o plugin a tasa de audio.",
+        mcp_tools: &[
+            "synth_list_presets",
+            "synth_load_preset",
+            "synth_set_parameter",
+            "synth_set_macro",
+            "device_add_to_track",
+            "device_remove_from_track",
+            "device_set_param",
+            "fx_set_saturator",
+            "fx_set_delay",
+            "fx_set_reverb",
+        ],
+    },
+
+    // OKF-10: CLAP/VST3/AU Sandboxing, Push 3 Control Surfaces, Audio-to-MIDI, Freeze/Flatten & .alp/DAWproject Formats
+    OkfSection {
+        id: "OKF-10",
+        title_en: "CLAP/VST3/AU Sandboxing, Push 3 Control Surfaces, Audio-to-MIDI, Freeze/Flatten & .alp/DAWproject Formats",
+        title_es: "Sandboxing CLAP/VST3/AU, Superficies Push 3, Audio a MIDI, Congelado/Aplanado y Formatos .alp/DAWproject",
+        keywords: &[
+            "clap", "vst3", "au", "plugin", "plugins", "sandbox", "sandboxing", "crash isolation",
+            "push 3", "push", "control surface", "mpe", "pad matrix", "audio to midi", "audio-to-midi",
+            "transcription", "groove pool", "agr", "freeze", "flatten", "congelar", "aplanar",
+            "alp", "dawproject", "bitwig", "presonus", "exchange", "lossless freeze", "flac cache",
+        ],
+        guide_en: "External plugin hosting, hardware control surface integration, intelligent transcription and cross-DAW archives:\n\
+            • Plugin Sandboxing: Multi-format host (CLAP, VST3, AU) with out-of-process crash isolation ensuring rogue plugins cannot terminate the audio engine.\n\
+            • Push 3 Hardware Integration: Bi-directional high-resolution MPE pad matrix, capacitive touch strip, rotary encoder mapping, and LCD/OLED display telemetry.\n\
+            • Polyphonic Audio-to-MIDI: Offline and real-time audio transcription converting drums (Kick 36, Snare 38, Hi-Hat 42), monophonic melodies (YIN f0), and polyphonic chords into MIDI clips.\n\
+            • Real-Time Groove Extraction: Ableton .agr template analysis extracting 16-step micro-timing displacement (-120..+120 ticks) and dynamic velocity profiles.\n\
+            • Lossless Freeze Cache & Flatten: Delta-LPC Rice-coded lossless audio compression reducing track freeze disk usage by 50..60% with bit-exact fidelity.\n\
+            • Ableton Live Pack (.alp) & DAWproject Exchange: Bundles project assets with CRC32 integrity verification and imports/exports open DAWproject XML structures compatible with Bitwig and Studio One.",
+        guide_es: "Alojamiento de plugins externos, superficies de control hardware, transcripción inteligente y archivos multi-DAW:\n\
+            • Sandboxing de Plugins: Host multiformato (CLAP, VST3, AU) con aislamiento de fallos fuera de proceso para evitar que plugins inestables cuelguen el motor de audio.\n\
+            • Integración Push 3: Matriz de pads MPE de alta resolución, cinta táctil capacitiva, mapeo de encoders rotativos y telemetría para pantallas LCD/OLED.\n\
+            • Audio a MIDI Polifónico: Transcripción de audio offline y en tiempo real para baterías (Kick 36, Snare 38, Hi-Hat 42), melodías monofónicas (YIN f0) y acordes polifónicos a clips MIDI.\n\
+            • Extracción de Grooves en Tiempo Real: Análisis de plantillas .agr extrayendo micro-desplazamientos de 16 pasos (-120..+120 ticks) y perfiles dinámicos de velocidad.\n\
+            • Freeze/Flatten con Códec Sin Pérdidas: Compresión delta-LPC Rice que reduce el espacio en disco de pistas congeladas en 50..60% con fidelidad exacta a nivel de bit.\n\
+            • Ableton Live Pack (.alp) y DAWproject: Empaquetado con verificación CRC32 e importación/exportación abierta de XML compatible con Bitwig y Studio One.",
+        mcp_tools: &[
+            "plugin_scan",
+            "bounce_wav",
+            "clip_create_midi",
+            "project_save",
+            "project_load",
+            "project_import_als",
+            "project_export_als",
+        ],
+    },
 ];
 
 /// Searches the OKF Manual for a query matching user questions in English or Spanish.
@@ -336,7 +409,9 @@ pub fn query_okf_manual(query: &str, locale: StudioLocale) -> Option<(String, Ve
             • **OKF-05**: Vista de Clip — Piano Roll MIDI, Herramientas Generativas y Warping\n\
             • **OKF-06**: Cadena de Dispositivos y 9 Instrumentos/FX (Wavetable, Operator, Glue, Simpler, Roar)\n\
             • **OKF-07**: Secuenciador TR-909 de 16 Pasos y Motor de Groove (Bancos A/B, Swing %, Humanize)\n\
-            • **OKF-08**: Escala Global, Afinación Microtonal y Exportación (WAV, .als, Stems)\n\n\
+            • **OKF-08**: Escala Global, Afinación Microtonal y Exportación (WAV, .als, Stems)\n\
+            • **OKF-09**: Instrumentos Suite, Efectos de Audio, Efectos MIDI y Grafo Modular\n\
+            • **OKF-10**: Sandboxing CLAP/VST3/AU, Superficies Push 3, Audio a MIDI, Freeze/Flatten y Formatos .alp/DAWproject\n\n\
             *Preguntá \"cómo usar [dispositivo/función]\" o \"how to [feature]\" para consultar el manual detallado.*".to_string()
         } else {
             "### Oxide Studio Operational Knowledge Framework (OKF)\n\
@@ -348,7 +423,9 @@ pub fn query_okf_manual(query: &str, locale: StudioLocale) -> Option<(String, Ve
             • **OKF-05**: Clip View — MIDI Piano Roll, Generative Tools & Audio Warping\n\
             • **OKF-06**: Device Chain View & 9 Native Devices (Wavetable, Operator, Glue, Simpler, Roar)\n\
             • **OKF-07**: TR-909 16-Step Sequencer & Groove Engine (Bank A/B, Swing %, Humanize)\n\
-            • **OKF-08**: Global Scale Awareness, Microtonal Tuning & Export (WAV, .als, Stems)\n\n\
+            • **OKF-08**: Global Scale Awareness, Microtonal Tuning & Export (WAV, .als, Stems)\n\
+            • **OKF-09**: Suite Instruments, Audio FX, MIDI FX & Modular Patch Graph\n\
+            • **OKF-10**: CLAP/VST3/AU Sandboxing, Push 3 Control Surfaces, Audio-to-MIDI, Freeze/Flatten & .alp/DAWproject Formats\n\n\
             *Ask \"how to use [device/feature]\" or \"cómo usar [función]\" for detailed operational guidance.*".to_string()
         };
         let badges = vec![
@@ -444,6 +521,12 @@ pub fn query_okf_manual(query: &str, locale: StudioLocale) -> Option<(String, Ve
         if section.id == "OKF-08" && (q.contains("microtonal") || q.contains("tuning") || q.contains("afinacion") || q.contains("afinación") || q.contains("scala") || q.contains("scl") || q.contains("als") || q.contains("stems") || q.contains("stem") || q.contains("remix")) {
             score += 15;
         }
+        if section.id == "OKF-09" && (q.contains("suite") || q.contains("drift") || q.contains("meld") || q.contains("collision") || q.contains("tension") || q.contains("electric") || q.contains("modular") || q.contains("patch graph") || q.contains("midi fx") || q.contains("audio fx")) {
+            score += 15;
+        }
+        if section.id == "OKF-10" && (q.contains("clap") || q.contains("vst") || q.contains("sandbox") || q.contains("push 3") || q.contains("audio to midi") || q.contains("audio-to-midi") || q.contains("freeze") || q.contains("flatten") || q.contains("alp") || q.contains("dawproject")) {
+            score += 15;
+        }
         if section.id == "OKF-03" && (q.contains("mixer") || q.contains("mezclador") || q.contains("crossfader") || q.contains("vu meter") || q.contains("vumetro") || q.contains("sends") || q.contains("envios") || q.contains("fader")) {
             score += 15;
         }
@@ -532,15 +615,76 @@ pub fn build_copilot_okf_system_prompt(locale: StudioLocale) -> String {
     }
 }
 
+/// Deterministic cross-platform golden audio and shader uniform telemetry verification helper.
+pub struct GoldenTelemetryVerifier;
+
+impl GoldenTelemetryVerifier {
+    /// Deterministically verifies that audio render buffers and GPU shader uniforms
+    /// conform to cross-platform golden invariants.
+    ///
+    /// Invariants:
+    /// 1. Shader Viewport: width and height between 64 and 8192, aspect ratio between 0.1 and 10.0.
+    /// 2. Audio Buffer: non-empty, all samples finite (no NaN, no Inf), peak amplitude <= 1.05 (clean digital headroom),
+    ///    and RMS energy >= 0.001 (active audible signal).
+    pub fn verify_golden_audio_and_shader_uniforms(
+        samples: &[f32],
+        width: u32,
+        height: u32,
+    ) -> bool {
+        // 1. Viewport & uniform invariants
+        if width < 64 || height < 64 || width > 8192 || height > 8192 {
+            return false;
+        }
+        let aspect = width as f32 / height as f32;
+        if aspect < 0.1 || aspect > 10.0 {
+            return false;
+        }
+
+        // 2. Audio buffer invariants
+        if samples.is_empty() {
+            return false;
+        }
+
+        let mut sum_sq = 0.0f64;
+        let mut peak = 0.0f32;
+
+        for &s in samples {
+            if !s.is_finite() || s.is_nan() {
+                return false;
+            }
+            let abs_s = s.abs();
+            if abs_s > peak {
+                peak = abs_s;
+            }
+            sum_sq += (s as f64) * (s as f64);
+        }
+
+        // Must not exceed digital ceiling (1.05 = 0 dBFS with slight numerical margin)
+        if peak > 1.05 {
+            return false;
+        }
+
+        // Must have non-zero audible RMS energy
+        let rms = (sum_sq / samples.len() as f64).sqrt();
+        if rms < 0.001 {
+            return false;
+        }
+
+        true
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
     fn test_okf_manual_sections_census() {
-        assert_eq!(OKF_MANUAL_SECTIONS.len(), 8);
+        assert_eq!(OKF_MANUAL_SECTIONS.len(), 10);
         assert_eq!(OKF_MANUAL_SECTIONS[0].id, "OKF-01");
         assert_eq!(OKF_MANUAL_SECTIONS[7].id, "OKF-08");
+        assert_eq!(OKF_MANUAL_SECTIONS[8].id, "OKF-09");
+        assert_eq!(OKF_MANUAL_SECTIONS[9].id, "OKF-10");
 
         for section in OKF_MANUAL_SECTIONS {
             assert!(!section.keywords.is_empty());
@@ -629,11 +773,107 @@ mod tests {
         let prompt_en = build_copilot_okf_system_prompt(StudioLocale::En);
         assert!(prompt_en.contains("OKF-01"));
         assert!(prompt_en.contains("OKF-08"));
+        assert!(prompt_en.contains("OKF-09"));
+        assert!(prompt_en.contains("OKF-10"));
         assert!(prompt_en.contains("Live 12"));
 
         let prompt_es = build_copilot_okf_system_prompt(StudioLocale::Es);
         assert!(prompt_es.contains("OKF-01"));
         assert!(prompt_es.contains("OKF-08"));
+        assert!(prompt_es.contains("OKF-09"));
+        assert!(prompt_es.contains("OKF-10"));
         assert!(prompt_es.contains("rioplatense"));
+    }
+
+    #[test]
+    fn test_golden_telemetry_verifier_valid_audio_and_shader_bounds() {
+        // Generate valid sine wave audio buffer
+        let samples: Vec<f32> = (0..1024)
+            .map(|i| (i as f32 * 0.05).sin() * 0.7)
+            .collect();
+
+        // 1920x1080 standard HD viewport
+        assert!(GoldenTelemetryVerifier::verify_golden_audio_and_shader_uniforms(
+            &samples, 1920, 1080
+        ));
+
+        // 4K resolution (3840x2160)
+        assert!(GoldenTelemetryVerifier::verify_golden_audio_and_shader_uniforms(
+            &samples, 3840, 2160
+        ));
+    }
+
+    #[test]
+    fn test_golden_telemetry_verifier_catches_nan_and_clipping() {
+        let valid_samples: Vec<f32> = (0..512).map(|i| (i as f32 * 0.05).sin() * 0.5).collect();
+
+        // Audio with NaN
+        let mut nan_samples = valid_samples.clone();
+        nan_samples[10] = f32::NAN;
+        assert!(!GoldenTelemetryVerifier::verify_golden_audio_and_shader_uniforms(
+            &nan_samples, 1280, 800
+        ));
+
+        // Audio with Inf
+        let mut inf_samples = valid_samples.clone();
+        inf_samples[5] = f32::INFINITY;
+        assert!(!GoldenTelemetryVerifier::verify_golden_audio_and_shader_uniforms(
+            &inf_samples, 1280, 800
+        ));
+
+        // Audio with severe digital clipping (> 1.05)
+        let mut clipped_samples = valid_samples.clone();
+        clipped_samples[20] = 1.85;
+        assert!(!GoldenTelemetryVerifier::verify_golden_audio_and_shader_uniforms(
+            &clipped_samples, 1280, 800
+        ));
+
+        // Empty audio buffer
+        assert!(!GoldenTelemetryVerifier::verify_golden_audio_and_shader_uniforms(
+            &[], 1280, 800
+        ));
+
+        // Near-zero energy silence
+        let silent_samples = vec![0.0f32; 512];
+        assert!(!GoldenTelemetryVerifier::verify_golden_audio_and_shader_uniforms(
+            &silent_samples, 1280, 800
+        ));
+    }
+
+    #[test]
+    fn test_golden_telemetry_verifier_catches_invalid_shader_uniforms() {
+        let valid_samples: Vec<f32> = (0..512).map(|i| (i as f32 * 0.05).sin() * 0.5).collect();
+
+        // 0x0 viewport dimensions
+        assert!(!GoldenTelemetryVerifier::verify_golden_audio_and_shader_uniforms(
+            &valid_samples, 0, 0
+        ));
+
+        // Dimensions below minimum budget (< 64px)
+        assert!(!GoldenTelemetryVerifier::verify_golden_audio_and_shader_uniforms(
+            &valid_samples, 32, 32
+        ));
+
+        // Absurd aspect ratio (e.g. 5000x10)
+        assert!(!GoldenTelemetryVerifier::verify_golden_audio_and_shader_uniforms(
+            &valid_samples, 5000, 10
+        ));
+    }
+
+    #[test]
+    fn test_query_okf_manual_suite_and_clap_formats() {
+        let (suite_reply, suite_badges) =
+            query_okf_manual("tell me about suite instruments and roar", StudioLocale::En).unwrap();
+        assert!(suite_reply.contains("OKF-09"));
+        assert!(suite_reply.contains("Drift"));
+        assert!(suite_reply.contains("Roar"));
+        assert!(suite_badges.contains(&"synth_load_preset".to_string()));
+
+        let (clap_reply, clap_badges) =
+            query_okf_manual("cómo funciona el sandboxing de plugins clap y vst3", StudioLocale::Es).unwrap();
+        assert!(clap_reply.contains("OKF-10"));
+        assert!(clap_reply.contains("CLAP"));
+        assert!(clap_reply.contains("aislamiento"));
+        assert!(clap_badges.contains(&"plugin_scan".to_string()));
     }
 }

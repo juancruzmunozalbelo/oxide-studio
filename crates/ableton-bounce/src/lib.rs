@@ -5,10 +5,17 @@
 //! - Lightweight 16-bit PCM (TPDF dithered) and 32-bit float stereo WAV writer with 44-byte RIFF headers
 //! - Verification of exported audio duration (>= 4.0s), RMS energy (> 0.02), and zero NaN/Inf
 
+pub mod audio_to_midi;
+pub mod pack_formats;
 pub mod renderer;
 pub mod stems;
 pub mod wav_writer;
 
+pub use audio_to_midi::{AudioToMidiConverter, GrooveTemplate, TranscribedMidiNote};
+pub use pack_formats::{
+    calculate_crc32, AlpError, AlpPackArchive, AlpPackEntry, DawClip, DawNote, DawProject,
+    DawProjectError, DawProjectExchange, DawTrack, FreezeCodecError, LosslessFreezeCodec,
+};
 pub use renderer::DemoArrangementRenderer;
 pub use stems::{
     export_all_tracks_as_stems, export_remix_stems, export_remix_stems_from_wav,

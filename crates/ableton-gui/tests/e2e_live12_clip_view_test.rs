@@ -352,6 +352,7 @@ fn test_f6_key_gutter_audition_and_command_dispatch() {
         warp_marker_moved: false,
         audition_note: Some((audition_pitch, audition_velocity)),
         loop_length_changed: None,
+        envelope_mutated: false,
     };
 
     assert_eq!(action.audition_note, Some((65, 100)));

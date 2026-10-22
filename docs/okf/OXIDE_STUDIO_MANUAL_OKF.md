@@ -17,8 +17,10 @@ The **Oxide Studio Operational Knowledge Framework (OKF)** serves as the definit
 6. [OKF-06: Device Chain View & 9 Native Instruments/FX](#okf-06-device-chain-view--9-native-instrumentsfx)
 7. [OKF-07: TR-909 16-Step Sequencer & Groove Engine](#okf-07-tr-909-16-step-sequencer--groove-engine)
 8. [OKF-08: Global Scale Awareness, Microtonal Tuning & Export](#okf-08-global-scale-awareness-microtonal-tuning--export)
-9. [Appendix A: Complete Keyboard Shortcuts Matrix](#appendix-a-complete-keyboard-shortcuts-matrix)
-10. [Appendix B: MCP Automation & Live RPC Bridge Reference](#appendix-b-mcp-automation--live-rpc-bridge-reference)
+9. [OKF-09: Suite Instruments, Audio FX, MIDI FX & Modular Patch Graph](#okf-09-suite-instruments-audio-fx-midi-fx--modular-patch-graph)
+10. [OKF-10: CLAP/VST3/AU Sandboxing, Push 3 Control Surfaces, Audio-to-MIDI, Freeze/Flatten & .alp/DAWproject Formats](#okf-10-clapvst3au-sandboxing-push-3-control-surfaces-audio-to-midi-freezeflatten--alpdawproject-formats)
+11. [Appendix A: Complete Keyboard Shortcuts Matrix](#appendix-a-complete-keyboard-shortcuts-matrix)
+12. [Appendix B: MCP Automation & Live RPC Bridge Reference](#appendix-b-mcp-automation--live-rpc-bridge-reference)
 
 ---
 
@@ -197,7 +199,20 @@ Oxide Studio synchronizes audio clips to arbitrary DAW project tempos via time-s
   - `Complex`: Multi-band polyphonic time-stretching for full mixes and dense instrumental stems.
   - `Complex Pro`: High-resolution formant-preserving polyphonic time-stretching.
 
-### 4. Relevant MCP Tools
+### 4. Clip Envelopes & Modulation (Chapter 30 Parity)
+Oxide Studio supports comprehensive clip-level automation and modulation envelopes residing directly on `SessionClip` and `ArrangementClip`:
+- **Automation vs. Modulation**:
+  - `Automation`: Absolute parameter assignment (0.0 .. 1.0).
+  - `Modulation`: Continuous relative bipolar offset (centered at 50% = 0 delta offset, ±100% modulation range) applied dynamically to the base parameter value.
+- **Linked vs. Unlinked Loop Lengths (Polymetric Phasing)**:
+  - `Linked`: Envelope loop braces adhere strictly to the parent clip's loop start and end beats.
+  - `Unlinked`: Envelope has independent loop start and end braces (e.g. 3-beat or 5-beat envelope looping against a 4-beat pattern), enabling non-repeating polymetric generative patterns.
+- **MIDI Target Envelopes**:
+  - `Pitch Bend`: 14-bit bipolar signed value (-8192 .. +8191) with configurable semitone bend range (±2.0 to ±48.0 st).
+  - `Modulation Wheel (CC 1)`: Standard 7-bit MIDI CC 1 (0 .. 127).
+  - `Continuous Controller (CC)`: Arbitrary CC numbers (e.g. CC 74 Brightness/Filter Cutoff, CC 7 Volume, CC 10 Pan, CC 64 Sustain).
+
+### 5. Relevant MCP Tools
 - `midi_transform_clip`: Execute Reverse, Invert, Legato, or Humanize on clip notes.
 - `midi_generate_clip`: Generate chord progressions, arpeggios, or Euclidean patterns.
 - `audio_clip_create_warped`: Load sample as a tempo-synced audio clip.
@@ -325,6 +340,76 @@ Live 12 introduces global harmonic coherence across instruments, MIDI editors, a
 - `project_import_als`: Import external Ableton Live `.als` project.
 - `project_export_als`: Save current project state as `.als` file.
 - `stems_separate_remix` / `bounce_export_stems`: Render isolated stem tracks for remixing.
+
+---
+
+## OKF-09: Suite Instruments, Audio FX, MIDI FX & Modular Patch Graph
+
+### 1. Suite Synthesis Engines
+Oxide Studio ships with full Live 12 Suite synthesis parity:
+- **Drift**: Minimalist subtractive synthesizer pairing dual drifting analog-modeled oscillators with a 4-pole ZDF lowpass filter and cycling envelope.
+- **Wavetable**: Dual wavetable synth with 280+ harmonic tables, sub oscillator, FM/warp modulators, and an interactive 16x16 modulation matrix.
+- **Meld**: Bi-engine macro-oscillator synthesizer pairing experimental DSP models with dual ZDF Cytomic filters and microtonal scale quantization.
+- **Operator**: 4-operator FM synthesis workstation offering 11 algorithmic routing configurations, additive overtone drawing, and dedicated envelope loops.
+- **Physical Modeling Suite**:
+  - `Collision`: Physical modeling of mallets, membranes, plates, bars, and marimba resonators.
+  - `Tension`: Physical modeling of bowed, plucked, and struck strings with acoustic body resonance.
+  - `Electric`: Electromechanical electric piano modeling tines, reeds, hammer pickups, and damper felt acoustics.
+
+### 2. Studio Audio FX & Generative MIDI FX
+- **Roar Multi-Stage Saturation**: 3 saturation stages with routing topologies (Single, Serial, Parallel, Multi-band, Mid/Side, Feedback).
+- **Hybrid Reverb**: Convolution engine loaded with 40+ impulse responses blended seamlessly with algorithmic hall/shimmer tails.
+- **Spectral Audio Processing**: `Spectral Time` (frequency-delay resynthesis) and `Spectral Blur` (spectral freeze and phase dispersion).
+- **Generative MIDI FX Racks**: Arpeggiator, Chord, Scale, Velocity, Random, Note Length, Pitch, and Strum.
+- **Modular Patch Graph**: Lock-free parameter modulation graph routing LFOs, Shapers, and Envelope Followers to any DSP parameter at audio rate.
+
+### 3. Relevant MCP Tools
+- `synth_list_presets`: Enumerate presets across all native synthesis engines.
+- `synth_load_preset`: Load synthesized sound design patch into track.
+- `synth_set_parameter`: Mutate oscillator, filter, or envelope parameters.
+- `synth_set_macro`: Drive high-level XY performance macros.
+- `device_add_to_track` / `device_remove_from_track`: Dynamic device chain insertion.
+- `fx_set_saturator` / `fx_set_delay` / `fx_set_reverb`: Direct studio effect parameter manipulation.
+
+---
+
+## OKF-10: CLAP/VST3/AU Sandboxing, Push 3 Control Surfaces, Audio-to-MIDI, Freeze/Flatten & .alp/DAWproject Formats
+
+### 1. Plugin Sandboxing & Hardware Control Surfaces
+- **Out-of-Process Plugin Sandboxing (CLAP, VST3, AU)**:
+  - Isolated subprocess worker architecture communicating via high-speed shared memory (IPC).
+  - Rogue plugin crashes, memory leaks, and GUI hangs are isolated without terminating or corrupting the real-time audio playback thread.
+- **Push 3 Hardware Control Surface Integration**:
+  - Full bidirectional support for Ableton Push 3 standalone/controller hardware.
+  - 64 MPE-enabled velocity and expressive polyphonic aftertouch pads.
+  - 8 touch-sensitive endless rotary encoders mapped to Device Rack macros.
+  - Real-time OLED display telemetry (oscilloscope waveforms, FFT spectra, and track mixer strips).
+
+### 2. Polyphonic Audio-to-MIDI & Real-Time Groove Extraction
+- **Audio-to-MIDI Transcription Engine**:
+  - `Convert Drums to MIDI`: Classifies transient onsets into Kick (C1 = 36), Snare (D1 = 38), and Closed/Open Hi-Hat (F#1 = 42).
+  - `Convert Melody to MIDI`: Monophonic pitch estimation via YIN fundamental tracking ($f_0$) generating MIDI notes and pitch bends.
+  - `Convert Harmony to MIDI`: Multi-band polyphonic chord detection with harmonic overtone cancellation transcribing triads and seventh chords.
+- **Groove Pool & .agr Extraction**:
+  - Analyzes audio rhythm loops to extract 16-step micro-timing offsets (-120..+120 ticks) and dynamic velocity profiles.
+  - Non-destructive application with Timing %, Random %, and Quantize % controls.
+
+### 3. Lossless Freeze Cache & DAWproject Exchange
+- **Lossless FLAC Freeze Cache**:
+  - Frozen track audio is compressed using Delta-LPC Rice lossless coding.
+  - Cuts disk usage by 50..60% while preserving bit-exact ($-\infty\text{ dBFS}$) sample fidelity.
+- **Ableton Live Pack (.alp) Bundler**:
+  - Packages and unpacks project sets, presets, and audio samples with CRC32 integrity verification.
+- **Open DAWproject (.dawproject) Bidirectional Exchange**:
+  - Universal XML/ZIP container compatible with Bitwig Studio, PreSonus Studio One, and Reaper.
+  - Losslessly preserves tracks, clips, MIDI notes, automation curves, and mixer fader levels.
+
+### 4. Relevant MCP Tools
+- `plugin_scan`: Scan system plugin directories for CLAP, VST3, and AU formats.
+- `bounce_wav` / `render_bounce_wav`: Render project audio or stem cache.
+- `clip_create_midi`: Create transcribed MIDI clips from audio analysis.
+- `project_save` / `project_load`: Save and load DAW sessions.
+- `project_import_als` / `project_export_als`: Ableton Live `.als` project interchange.
 
 ---
 

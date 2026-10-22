@@ -207,6 +207,7 @@ fn test_adv_drum_rack_choke_group_exponential_decay_and_clickless() {
         sample_rate: 44100,
     };
     rack.pads[10].decay_seconds = 2.0;
+    rack.sync_visible_to_all();
 
     // Trigger Open HH
     rack.trigger_pad(10, 127);
@@ -224,6 +225,7 @@ fn test_adv_drum_rack_choke_group_exponential_decay_and_clickless() {
     // Step 2: Choke it by triggering Closed HH (pad 6, choke group 1) with volume = 0
     // so we can isolate the fading out voice
     rack.pads[6].volume = 0.0;
+    rack.sync_visible_to_all();
     rack.trigger_pad(6, 127);
 
     // Verify voice entered fading out state

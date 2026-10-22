@@ -20,11 +20,23 @@ pub mod meld;
 pub mod operator;
 pub mod oscillator;
 pub mod parameters;
+pub mod patch_graph;
 pub mod physical;
 pub mod presets;
 pub mod synth;
 pub mod voice;
+pub mod warp_engine;
 pub mod wavetable;
+
+pub use patch_graph::{
+    ModularPatchGraph, NodeDspState, PatchCable, PatchFilterMode, PatchGraphError, PatchNode,
+    PatchNodeKind, PatchOscShape, MAX_DELAY_SAMPLES, MAX_PATCH_CABLES, MAX_PATCH_NODES,
+};
+pub use warp_engine::{
+    BeatsLoopMode, BeatsParams, ComplexProParams, Radix2Fft2048, SpectralWarpProcessor,
+    StreamingDiskCache, TextureParams, WarpMode as AudioWarpMode, WarpPrng, FFT_SIZE, HOP_SIZE,
+    PAGE_SIZE,
+};
 
 pub use cytomic::{CircuitModel, CytomicFilterType, CytomicSvfStage, CytomicZdfFilter, DualCytomicFilter, FilterRouting};
 pub use drift::{DriftDevice, DriftOsc2Waveform, DriftVoice, DriftVoiceMode};
@@ -48,3 +60,41 @@ pub use synth::SynthEngine;
 pub use voice::{
     MonophonicVoice, NoteEvent, NoteStack, VoiceReleaseAction, VoiceTriggerAction,
 };
+pub use ableton_core::{GlobalScale, ScaleMode, TuningSystem, TuningType};
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_dsp_microtonal_tuning_integration() {
+        // Verify all 7 tuning types can be utilized by DSP frequency pipelines
+        let systems = [
+            TuningType::TwelveTet,
+            TuningType::NineteenEdo,
+            TuningType::TwentyFourEdo,
+            TuningType::ThirtyOneEdo,
+            TuningType::BohlenPierce,
+            TuningType::JustIntonation,
+            TuningType::Scala,
+        ];
+
+        for &tt in &systems {
+            let mut tuning = TuningSystem::new(tt);
+            if tt == TuningType::Scala {
+                let scl = "! test\ntest\n2\n!\n600.0\n1200.0\n";
+                tuning.load_scala(scl).expect("Scala load");
+            }
+            let table = tuning.generate_frequency_table_f32();
+            assert_eq!(table.len(), 128);
+            // Reference pitch at note 69 must be 440 Hz
+            assert!((table[69] - 440.0).abs() < 1e-4);
+            // All generated frequencies must be positive non-zero and non-NaN
+            for (idx, &freq) in table.iter().enumerate() {
+                assert!(freq > 0.0, "Frequency at note {} must be positive: {}", idx, freq);
+                assert!(!freq.is_nan(), "Frequency must not be NaN");
+                assert!(!freq.is_infinite(), "Frequency must not be infinite");
+            }
+        }
+    }
+}

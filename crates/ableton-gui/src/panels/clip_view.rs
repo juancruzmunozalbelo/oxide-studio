@@ -19,9 +19,14 @@ use egui::{
 use ableton_core::GlobalScale;
 use ableton_timeline::{
     generate::{generate_euclidean, generate_seed, generate_stacks, StacksChordType, StacksVoicing},
-    transform::{transform_connect, transform_ornament, transform_quantize, transform_recombine, transform_strum, StrumDirection},
+    interpolate_automation,
+    transform::{
+        transform_connect, transform_humanize, transform_invert, transform_legato,
+        transform_ornament, transform_quantize, transform_recombine, transform_reverse,
+        transform_strum, StrumDirection,
+    },
     warping::{WarpMarker, WarpMode},
-    MidiNote, MidiPattern,
+    AutomationPoint, ClipEnvelopeTarget, EnvelopeMode, MidiNote, MidiPattern,
 };
 use crate::theme::{
     COLOR_AMBER, COLOR_BG_PANEL_ALT, COLOR_BG_SURFACE, COLOR_BORDER, COLOR_CYAN,
@@ -34,6 +39,7 @@ pub enum ClipViewSubTab {
     Transform,
     Generate,
     Warping,
+    Envelopes,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -93,6 +99,14 @@ pub struct ClipViewState {
     pub transpose_semitones: i8,
     pub clip_gain_db: f32,
     pub warp_markers: Vec<WarpMarker>,
+
+    // Clip Envelopes & Modulation (Chapter 30 & OKF-05)
+    pub envelope_target: ClipEnvelopeTarget,
+    pub envelope_mode: EnvelopeMode,
+    pub envelope_linked: bool,
+    pub envelope_loop_bars: usize,
+    pub envelope_unlinked_length_beats: f64,
+    pub envelope_breakpoints: Vec<AutomationPoint>,
 }
 
 impl Default for ClipViewState {
@@ -130,6 +144,16 @@ impl Default for ClipViewState {
                 WarpMarker::new(8.0, 3.871),
                 WarpMarker::new(16.0, 7.742),
             ],
+            envelope_target: ClipEnvelopeTarget::PitchBend,
+            envelope_mode: EnvelopeMode::Modulation,
+            envelope_linked: true,
+            envelope_loop_bars: 4,
+            envelope_unlinked_length_beats: 3.0,
+            envelope_breakpoints: vec![
+                AutomationPoint::new(0.0, 0.5, 0.0),
+                AutomationPoint::new(2.0, 1.0, 0.0),
+                AutomationPoint::new(4.0, 0.0, 0.0),
+            ],
         }
     }
 }
@@ -141,6 +165,7 @@ pub struct ClipViewAction {
     pub warp_marker_moved: bool,
     pub audition_note: Option<(u8, u8)>, // (pitch, velocity)
     pub loop_length_changed: Option<f64>,
+    pub envelope_mutated: bool,
 }
 
 /// Ableton Live 12 Side-by-Side Clip View: Left Inspector (~220px) + Right Canvas.
@@ -158,6 +183,7 @@ pub fn render_clip_view(
         warp_marker_moved: false,
         audition_note: None,
         loop_length_changed: None,
+        envelope_mutated: false,
     };
 
     let total_avail_h = (ui.available_height() - 2.0).max(60.0);
@@ -193,6 +219,8 @@ pub fn render_clip_view(
                     |ui| {
                         if state.is_audio || state.sub_tab == ClipViewSubTab::Warping {
                             render_audio_warp_canvas(ui, state, &mut action);
+                        } else if state.sub_tab == ClipViewSubTab::Envelopes {
+                            render_envelope_canvas(ui, state, midi_pattern, current_beat, &mut action);
                         } else {
                             if render_interactive_piano_roll(
                                 ui,
@@ -255,6 +283,14 @@ pub fn render_clip_inspector(
             .fill(if gen_active { COLOR_BG_PANEL_ALT } else { COLOR_BG_SURFACE });
         if ui.add(gen_btn).clicked() {
             state.sub_tab = ClipViewSubTab::Generate;
+            state.is_audio = false;
+        }
+
+        let env_active = state.sub_tab == ClipViewSubTab::Envelopes;
+        let env_btn = Button::new(RichText::new("Env").size(10.0).strong().color(if env_active { COLOR_AMBER } else { COLOR_TEXT_MUTED }))
+            .fill(if env_active { COLOR_BG_PANEL_ALT } else { COLOR_BG_SURFACE });
+        if ui.add(env_btn).clicked() {
+            state.sub_tab = ClipViewSubTab::Envelopes;
             state.is_audio = false;
         }
 
@@ -395,6 +431,26 @@ pub fn render_clip_inspector(
                 }
             });
 
+            // 4. Reverse, Invert, Legato & Humanize
+            ui.horizontal(|ui| {
+                if ui.add(Button::new(RichText::new("Rev").size(row_font_size).color(COLOR_CYAN))).clicked() {
+                    transform_reverse(midi_pattern);
+                    action.pattern_mutated = true;
+                }
+                if ui.add(Button::new(RichText::new("Inv").size(row_font_size).color(COLOR_CYAN))).clicked() {
+                    transform_invert(midi_pattern, None);
+                    action.pattern_mutated = true;
+                }
+                if ui.add(Button::new(RichText::new("Legato").size(row_font_size).color(COLOR_CYAN))).clicked() {
+                    transform_legato(midi_pattern);
+                    action.pattern_mutated = true;
+                }
+                if ui.add(Button::new(RichText::new("Human").size(row_font_size).color(COLOR_CYAN))).clicked() {
+                    transform_humanize(midi_pattern, 15.0 / 960.0, 8, 42);
+                    action.pattern_mutated = true;
+                }
+            });
+
             if ui.available_height() >= 16.0 {
                 ui.separator();
                 let hint_size = if is_compact_h { 7.5 } else { 8.5 };
@@ -514,6 +570,231 @@ pub fn render_clip_inspector(
                     state.is_audio = !state.is_audio;
                 }
             });
+        }
+        ClipViewSubTab::Envelopes => {
+            render_envelopes_inspector_tab(ui, state, is_compact_h, action);
+        }
+    }
+}
+
+pub fn render_envelopes_inspector_tab(
+    ui: &mut Ui,
+    state: &mut ClipViewState,
+    is_compact_h: bool,
+    action: &mut ClipViewAction,
+) {
+    let font_size = if is_compact_h { 8.5 } else { 9.5 };
+    ui.label(RichText::new("CLIP ENVELOPES & MOD").size(font_size).color(COLOR_AMBER).strong());
+
+    // 1. Envelope Target Chooser
+    ui.horizontal(|ui| {
+        ui.label(RichText::new("Target:").size(8.5).color(COLOR_TEXT_MUTED));
+        let targets = [
+            (ClipEnvelopeTarget::PitchBend, "Pitch"),
+            (ClipEnvelopeTarget::ModulationWheel, "ModWhl"),
+            (ClipEnvelopeTarget::ContinuousController(74), "CC 74"),
+            (ClipEnvelopeTarget::ContinuousController(7), "Vol"),
+            (ClipEnvelopeTarget::MixerPan, "Pan"),
+        ];
+        for (target, label) in targets {
+            let is_sel = state.envelope_target == target;
+            let btn = Button::new(RichText::new(label).size(8.0).color(if is_sel { COLOR_AMBER } else { COLOR_TEXT_MUTED }))
+                .fill(if is_sel { COLOR_BG_PANEL_ALT } else { COLOR_BG_SURFACE });
+            if ui.add(btn).clicked() {
+                state.envelope_target = target;
+                action.envelope_mutated = true;
+            }
+        }
+    });
+
+    // 2. Mode Selector: Modulation vs Automation
+    ui.horizontal(|ui| {
+        ui.label(RichText::new("Mode:").size(8.5).color(COLOR_TEXT_MUTED));
+        let is_mod = state.envelope_mode == EnvelopeMode::Modulation;
+        let mod_btn = Button::new(RichText::new("Mod (Rel)").size(8.0).color(if is_mod { COLOR_CYAN } else { COLOR_TEXT_MUTED }))
+            .fill(if is_mod { COLOR_BG_PANEL_ALT } else { COLOR_BG_SURFACE });
+        if ui.add(mod_btn).clicked() {
+            state.envelope_mode = EnvelopeMode::Modulation;
+            action.envelope_mutated = true;
+        }
+
+        let is_auto = state.envelope_mode == EnvelopeMode::Automation;
+        let auto_btn = Button::new(RichText::new("Auto (Abs)").size(8.0).color(if is_auto { COLOR_CYAN } else { COLOR_TEXT_MUTED }))
+            .fill(if is_auto { COLOR_BG_PANEL_ALT } else { COLOR_BG_SURFACE });
+        if ui.add(auto_btn).clicked() {
+            state.envelope_mode = EnvelopeMode::Automation;
+            action.envelope_mutated = true;
+        }
+    });
+
+    // 3. Loop Linked vs Unlinked Selector (Live 12 Polymetric Phasing)
+    ui.horizontal(|ui| {
+        ui.label(RichText::new("Loop:").size(8.5).color(COLOR_TEXT_MUTED));
+        let link_txt = if state.envelope_linked { "Linked (Clip)" } else { "Unlinked (Free)" };
+        let link_col = if state.envelope_linked { COLOR_GREEN } else { COLOR_AMBER };
+        let linked_btn = Button::new(RichText::new(link_txt).size(8.5).color(link_col))
+            .fill(COLOR_BG_PANEL_ALT);
+        if ui.add(linked_btn).clicked() {
+            state.envelope_linked = !state.envelope_linked;
+            action.envelope_mutated = true;
+        }
+    });
+
+    // 4. Unlinked Loop Length Controls (e.g. 3-beat polymetric modulation)
+    if !state.envelope_linked {
+        ui.horizontal(|ui| {
+            ui.label(RichText::new("Env Len:").size(8.5).color(COLOR_TEXT_MUTED));
+            let len_options = [(1.0, "1B"), (2.0, "2B"), (3.0, "3B Poly"), (4.0, "4B"), (6.0, "6B")];
+            for (beats, label) in len_options {
+                let is_sel = (state.envelope_unlinked_length_beats - beats).abs() < 1e-4;
+                let btn = Button::new(RichText::new(label).size(8.0).color(if is_sel { COLOR_AMBER } else { COLOR_TEXT_MUTED }))
+                    .fill(if is_sel { COLOR_BG_PANEL_ALT } else { COLOR_BG_SURFACE });
+                if ui.add(btn).clicked() {
+                    state.envelope_unlinked_length_beats = beats;
+                    action.envelope_mutated = true;
+                }
+            }
+        });
+    }
+
+    // 5. Breakpoint Manipulation Buttons
+    ui.horizontal(|ui| {
+        if ui.add(Button::new(RichText::new("+ Pt").size(8.5).color(COLOR_TEXT_PRIMARY))).clicked() {
+            let next_beat = if let Some(last) = state.envelope_breakpoints.last() {
+                last.beat + 1.0
+            } else {
+                0.0
+            };
+            state.envelope_breakpoints.push(AutomationPoint::new(next_beat, 0.5, 0.0));
+            action.envelope_mutated = true;
+        }
+        if ui.add(Button::new(RichText::new("Clear").size(8.5).color(COLOR_TEXT_DIM))).clicked() {
+            state.envelope_breakpoints.clear();
+            action.envelope_mutated = true;
+        }
+        if ui.add(Button::new(RichText::new("Center").size(8.5).color(COLOR_CYAN))).clicked() {
+            state.envelope_breakpoints = vec![
+                AutomationPoint::new(0.0, 0.5, 0.0),
+                AutomationPoint::new(4.0, 0.5, 0.0),
+            ];
+            action.envelope_mutated = true;
+        }
+    });
+}
+
+pub fn render_envelope_canvas(
+    ui: &mut Ui,
+    state: &mut ClipViewState,
+    midi_pattern: &MidiPattern,
+    current_beat: f64,
+    action: &mut ClipViewAction,
+) {
+    let available_w = ui.available_width().max(300.0);
+    let total_h = (ui.available_height() - 2.0).max(50.0);
+    let (canvas_rect, response) =
+        ui.allocate_exact_size(vec2(available_w, total_h), Sense::click_and_drag());
+    let painter = ui.painter_at(canvas_rect);
+
+    // Dark surface background
+    painter.rect_filled(canvas_rect, 0.0, COLOR_BG_SURFACE);
+
+    let total_beats = if state.envelope_linked {
+        midi_pattern.length_beats.max(4.0)
+    } else {
+        state.envelope_unlinked_length_beats.max(midi_pattern.length_beats).max(4.0)
+    };
+
+    let beat_to_x = |b: f64| -> f32 {
+        canvas_rect.min.x + (b as f32 / total_beats as f32) * canvas_rect.width()
+    };
+    let val_to_y = |v: f32| -> f32 {
+        canvas_rect.max.y - v * canvas_rect.height()
+    };
+
+    // Grid lines for bars and beats
+    let mut b = 0.0;
+    while b <= total_beats {
+        let x = beat_to_x(b);
+        let is_bar = (b % 4.0).abs() < 1e-4;
+        let col = if is_bar {
+            Color32::from_rgb(0x33, 0x33, 0x33)
+        } else {
+            Color32::from_rgb(0x22, 0x22, 0x22)
+        };
+        painter.line_segment(
+            [pos2(x, canvas_rect.min.y), pos2(x, canvas_rect.max.y)],
+            Stroke::new(1.0_f32, col),
+        );
+        b += 1.0;
+    }
+
+    // Center reference line (0% modulation / 0 pitch bend)
+    let center_y = val_to_y(0.5);
+    painter.line_segment(
+        [pos2(canvas_rect.min.x, center_y), pos2(canvas_rect.max.x, center_y)],
+        Stroke::new(1.0_f32, Color32::from_rgb(0x44, 0x44, 0x44)),
+    );
+
+    // If unlinked, highlight the unlinked envelope loop boundary
+    if !state.envelope_linked {
+        let unlinked_end_x = beat_to_x(state.envelope_unlinked_length_beats);
+        painter.line_segment(
+            [pos2(unlinked_end_x, canvas_rect.min.y), pos2(unlinked_end_x, canvas_rect.max.y)],
+            Stroke::new(1.5_f32, COLOR_AMBER),
+        );
+    }
+
+    // Envelope curve connecting breakpoints
+    if state.envelope_breakpoints.len() >= 2 {
+        for i in 0..state.envelope_breakpoints.len() - 1 {
+            let p0 = &state.envelope_breakpoints[i];
+            let p1 = &state.envelope_breakpoints[i + 1];
+            let steps = 16;
+            for s in 0..steps {
+                let t0 = s as f64 / steps as f64;
+                let t1 = (s + 1) as f64 / steps as f64;
+                let b0 = p0.beat + t0 * (p1.beat - p0.beat);
+                let b1 = p0.beat + t1 * (p1.beat - p0.beat);
+                let v0 = interpolate_automation(p0, p1, b0);
+                let v1 = interpolate_automation(p0, p1, b1);
+                painter.line_segment(
+                    [pos2(beat_to_x(b0), val_to_y(v0)), pos2(beat_to_x(b1), val_to_y(v1))],
+                    Stroke::new(2.0_f32, COLOR_CYAN),
+                );
+            }
+        }
+    }
+
+    // Breakpoint handles
+    for pt in &state.envelope_breakpoints {
+        let x = beat_to_x(pt.beat);
+        let y = val_to_y(pt.value_norm);
+        painter.circle_filled(pos2(x, y), 4.0, COLOR_AMBER);
+        painter.circle_stroke(pos2(x, y), 4.0, Stroke::new(1.0_f32, Color32::WHITE));
+    }
+
+    // Current playhead phase line
+    let phase = if state.envelope_linked {
+        let clip_len = midi_pattern.length_beats.max(1e-4);
+        (current_beat % clip_len + clip_len) % clip_len
+    } else {
+        let env_len = state.envelope_unlinked_length_beats.max(1e-4);
+        (current_beat % env_len + env_len) % env_len
+    };
+    let playhead_x = beat_to_x(phase);
+    painter.line_segment(
+        [pos2(playhead_x, canvas_rect.min.y), pos2(playhead_x, canvas_rect.max.y)],
+        Stroke::new(1.5_f32, Color32::from_rgb(0xff, 0xaa, 0x00)),
+    );
+
+    // Interactive breakpoint click to insert
+    if response.clicked() {
+        if let Some(pos) = response.interact_pointer_pos() {
+            let beat = ((pos.x - canvas_rect.min.x) / canvas_rect.width() * total_beats as f32) as f64;
+            let val = ((canvas_rect.max.y - pos.y) / canvas_rect.height()).clamp(0.0, 1.0);
+            let idx = state.envelope_breakpoints.partition_point(|p| p.beat < beat);
+            state.envelope_breakpoints.insert(idx, AutomationPoint::new(beat, val, 0.0));
+            action.envelope_mutated = true;
         }
     }
 }
@@ -945,6 +1226,26 @@ pub fn render_interactive_piano_roll(
             }
         }
 
+        // Live 12 Arrow Key Note Nudge & Transposition
+        if let Some(sel) = state.selected_note_idx {
+            if sel < midi_pattern.notes.len() {
+                let q = state.quantize_grid.max(0.0625);
+                if ui.input(|i| i.key_pressed(egui::Key::ArrowLeft)) {
+                    pattern_mutated |= midi_pattern.nudge_note(sel, -q);
+                } else if ui.input(|i| i.key_pressed(egui::Key::ArrowRight)) {
+                    pattern_mutated |= midi_pattern.nudge_note(sel, q);
+                } else if ui.input(|i| i.key_pressed(egui::Key::ArrowUp)) {
+                    let note = &mut midi_pattern.notes[sel];
+                    note.pitch = note.pitch.saturating_add(1).min(127);
+                    pattern_mutated = true;
+                } else if ui.input(|i| i.key_pressed(egui::Key::ArrowDown)) {
+                    let note = &mut midi_pattern.notes[sel];
+                    note.pitch = note.pitch.saturating_sub(1);
+                    pattern_mutated = true;
+                }
+            }
+        }
+
         // --- 8. Drag Velocity / Chance Lanes ---
         if response.dragged() && state.note_drag_state.is_none() {
             if let Some(pos) = response.interact_pointer_pos() {
@@ -1356,6 +1657,7 @@ mod tests {
             warp_marker_moved: false,
             audition_note: state.last_audition_note.take(),
             loop_length_changed: None,
+            envelope_mutated: false,
         };
 
         assert_eq!(action.audition_note, Some((60, 100)));
@@ -1429,5 +1731,131 @@ mod tests {
         assert_eq!(detail_bg_col, Color32::from_rgb(62, 62, 62));
         assert_eq!(surface_bg_col, Color32::from_rgb(54, 54, 54));
         assert_eq!(frame_border_col, Color32::from_rgb(17, 17, 17));
+    }
+
+    #[test]
+    fn test_piano_roll_arrow_key_nudge_and_transpose() {
+        let ctx = egui::Context::default();
+        let mut state = ClipViewState::default();
+        let mut pattern = MidiPattern::new(8.0);
+        pattern.add_note(MidiNote::new(60, 100, 2.0, 1.0));
+        state.selected_note_idx = Some(0);
+        state.quantize_grid = 0.25;
+        let scale = GlobalScale::default();
+
+        // 1. Right Arrow: Nudge forward by +0.25 beats
+        let mut input_right = egui::RawInput::default();
+        input_right.events.push(egui::Event::Key {
+            key: egui::Key::ArrowRight,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers: egui::Modifiers::default(),
+        });
+        let _ = ctx.run(input_right, |ctx| {
+            egui::CentralPanel::default().show(ctx, |ui| {
+                let mutated = render_interactive_piano_roll(ui, &mut pattern, &mut state, &scale, 0.0);
+                assert!(mutated);
+            });
+        });
+        assert_eq!(pattern.notes[0].start_beat, 2.25);
+
+        // 2. Left Arrow: Nudge backward by -0.25 beats
+        let mut input_left = egui::RawInput::default();
+        input_left.events.push(egui::Event::Key {
+            key: egui::Key::ArrowLeft,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers: egui::Modifiers::default(),
+        });
+        let _ = ctx.run(input_left, |ctx| {
+            egui::CentralPanel::default().show(ctx, |ui| {
+                let mutated = render_interactive_piano_roll(ui, &mut pattern, &mut state, &scale, 0.0);
+                assert!(mutated);
+            });
+        });
+        assert_eq!(pattern.notes[0].start_beat, 2.0);
+
+        // 3. Up Arrow: Transpose pitch +1 semitone (60 -> 61)
+        let mut input_up = egui::RawInput::default();
+        input_up.events.push(egui::Event::Key {
+            key: egui::Key::ArrowUp,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers: egui::Modifiers::default(),
+        });
+        let _ = ctx.run(input_up, |ctx| {
+            egui::CentralPanel::default().show(ctx, |ui| {
+                let mutated = render_interactive_piano_roll(ui, &mut pattern, &mut state, &scale, 0.0);
+                assert!(mutated);
+            });
+        });
+        assert_eq!(pattern.notes[0].pitch, 61);
+
+        // 4. Down Arrow: Transpose pitch -1 semitone (61 -> 60)
+        let mut input_down = egui::RawInput::default();
+        input_down.events.push(egui::Event::Key {
+            key: egui::Key::ArrowDown,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers: egui::Modifiers::default(),
+        });
+        let _ = ctx.run(input_down, |ctx| {
+            egui::CentralPanel::default().show(ctx, |ui| {
+                let mutated = render_interactive_piano_roll(ui, &mut pattern, &mut state, &scale, 0.0);
+                assert!(mutated);
+            });
+        });
+        assert_eq!(pattern.notes[0].pitch, 60);
+    }
+
+    #[test]
+    fn test_envelopes_subtab_inspector_and_target_selection() {
+        let mut state = ClipViewState::default();
+        let mut pattern = MidiPattern::new(8.0);
+        let scale = GlobalScale::default();
+
+        state.sub_tab = ClipViewSubTab::Envelopes;
+        assert_eq!(state.envelope_target, ClipEnvelopeTarget::PitchBend);
+        assert_eq!(state.envelope_mode, EnvelopeMode::Modulation);
+        assert!(state.envelope_linked);
+
+        let ctx = egui::Context::default();
+        let _ = ctx.run(egui::RawInput::default(), |ctx| {
+            egui::CentralPanel::default().show(ctx, |ui| {
+                let action = render_clip_view(ui, &mut state, &mut pattern, &scale, 0.0);
+                assert!(!action.envelope_mutated);
+            });
+        });
+    }
+
+    #[test]
+    fn test_envelopes_linked_vs_unlinked_toggle_and_polymetric_beats() {
+        let mut state = ClipViewState::default();
+        assert!(state.envelope_linked);
+
+        // Toggle to unlinked polymetric mode
+        state.envelope_linked = false;
+        state.envelope_unlinked_length_beats = 3.0; // 3-beat polymetric modulation
+        state.envelope_breakpoints = vec![
+            AutomationPoint::new(0.0, 0.0, 0.0),
+            AutomationPoint::new(1.5, 1.0, 0.0),
+            AutomationPoint::new(3.0, 0.0, 0.0),
+        ];
+
+        let mut pattern = MidiPattern::new(4.0);
+        let scale = GlobalScale::default();
+        state.sub_tab = ClipViewSubTab::Envelopes;
+
+        let ctx = egui::Context::default();
+        let _ = ctx.run(egui::RawInput::default(), |ctx| {
+            egui::CentralPanel::default().show(ctx, |ui| {
+                let action = render_clip_view(ui, &mut state, &mut pattern, &scale, 1.5);
+                assert!(!action.pattern_mutated);
+            });
+        });
     }
 }

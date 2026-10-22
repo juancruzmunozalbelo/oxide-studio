@@ -2,6 +2,7 @@
 
 use serde::{Deserialize, Serialize};
 use crate::automation::AutomationLane;
+use crate::{ClipEnvelopeCollection, ClipEnvelopeTarget};
 use crate::pattern::ClipPattern;
 
 /// A clip placed horizontally on the linear arrangement timeline.
@@ -14,6 +15,8 @@ pub struct ArrangementClip {
     pub pattern_offset_beats: f64,
     pub muted: bool,
     pub pattern: ClipPattern,
+    #[serde(default)]
+    pub envelopes: ClipEnvelopeCollection,
 }
 
 impl ArrangementClip {
@@ -32,6 +35,7 @@ impl ArrangementClip {
             pattern_offset_beats: 0.0,
             muted: false,
             pattern,
+            envelopes: ClipEnvelopeCollection::default(),
         }
     }
 
@@ -55,6 +59,43 @@ impl ArrangementClip {
         let pattern_len = self.pattern.length_beats().max(1e-6);
         let rel_beat = (timeline_beat - self.timeline_start_beat) + self.pattern_offset_beats;
         ((rel_beat % pattern_len) + pattern_len) % pattern_len
+    }
+
+    /// Evaluate effective parameter value at `timeline_beat`.
+    pub fn evaluate_envelope(
+        &self,
+        target: &ClipEnvelopeTarget,
+        timeline_beat: f64,
+        base_val: f32,
+    ) -> f32 {
+        let pattern_phase = self.pattern_phase_at_beat(timeline_beat);
+        let pattern_len = self.pattern.length_beats().max(1e-4);
+        self.envelopes
+            .evaluate_effective(target, pattern_phase, 0.0, pattern_len, base_val)
+    }
+
+    /// Evaluate 14-bit MIDI pitch bend (-8192 .. +8191) at `timeline_beat`.
+    pub fn evaluate_pitch_bend(&self, timeline_beat: f64) -> i16 {
+        let pattern_phase = self.pattern_phase_at_beat(timeline_beat);
+        let pattern_len = self.pattern.length_beats().max(1e-4);
+        self.envelopes
+            .evaluate_pitch_bend_14bit(pattern_phase, 0.0, pattern_len)
+    }
+
+    /// Evaluate modulation wheel CC 1 (0 .. 127) at `timeline_beat`.
+    pub fn evaluate_mod_wheel(&self, timeline_beat: f64) -> u8 {
+        let pattern_phase = self.pattern_phase_at_beat(timeline_beat);
+        let pattern_len = self.pattern.length_beats().max(1e-4);
+        self.envelopes
+            .evaluate_mod_wheel_7bit(pattern_phase, 0.0, pattern_len)
+    }
+
+    /// Evaluate MIDI Continuous Controller (0 .. 127) at `timeline_beat`.
+    pub fn evaluate_cc(&self, cc_num: u8, timeline_beat: f64) -> u8 {
+        let pattern_phase = self.pattern_phase_at_beat(timeline_beat);
+        let pattern_len = self.pattern.length_beats().max(1e-4);
+        self.envelopes
+            .evaluate_cc_7bit(cc_num, pattern_phase, 0.0, pattern_len)
     }
 }
 
@@ -111,6 +152,170 @@ impl ArrangementTrack {
             self.automation_lanes.last_mut().unwrap()
         }
     }
+
+    /// Split a clip covering `split_beat` on this track into two distinct clips.
+    /// The first clip's duration is truncated to `split_beat - timeline_start_beat`.
+    /// The second clip starts at `split_beat` with the remaining duration and adjusted pattern offset.
+    /// Returns `true` if an active clip was split.
+    pub fn split_clip_at(&mut self, split_beat: f64, new_clip_id: u32) -> bool {
+        let mut split_clip = None;
+        for clip in self.clips.iter_mut() {
+            if clip.timeline_start_beat < split_beat && clip.timeline_end_beat() > split_beat {
+                let first_dur = split_beat - clip.timeline_start_beat;
+                let second_dur = clip.duration_beats - first_dur;
+                let second_offset = clip.pattern_offset_beats + first_dur;
+
+                let mut second = ArrangementClip::new(
+                    new_clip_id,
+                    format!("{}_part2", clip.name),
+                    split_beat,
+                    second_dur,
+                    clip.pattern.clone(),
+                );
+                second.pattern_offset_beats = second_offset;
+                clip.duration_beats = first_dur;
+                split_clip = Some(second);
+                break;
+            }
+        }
+
+        if let Some(second) = split_clip {
+            self.clips.push(second);
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Consolidate arrangement clips overlapping `[start_beat, end_beat)` into a single unified clip (Cmd+J).
+    /// Gathers all MIDI notes from overlapping MIDI clips into a unified pattern.
+    /// Returns the new consolidated clip if any clips overlapped the range.
+    pub fn consolidate_range(
+        &mut self,
+        start_beat: f64,
+        end_beat: f64,
+        consolidated_id: u32,
+        new_name: impl Into<String>,
+    ) -> Option<ArrangementClip> {
+        if end_beat <= start_beat {
+            return None;
+        }
+        let duration = end_beat - start_beat;
+
+        let overlapping_indices: Vec<usize> = self
+            .clips
+            .iter()
+            .enumerate()
+            .filter(|(_, c)| c.timeline_start_beat < end_beat && c.timeline_end_beat() > start_beat)
+            .map(|(i, _)| i)
+            .collect();
+
+        if overlapping_indices.is_empty() {
+            return None;
+        }
+
+        let mut merged_midi = crate::pattern::MidiPattern::new(duration);
+        let mut has_midi = false;
+        let mut audio_data = None;
+
+        for &idx in &overlapping_indices {
+            let clip = &self.clips[idx];
+            match &clip.pattern {
+                ClipPattern::Midi(midi) => {
+                    has_midi = true;
+                    for note in &midi.notes {
+                        let note_abs_beat = clip.timeline_start_beat + note.start_beat - clip.pattern_offset_beats;
+                        if note_abs_beat >= clip.timeline_start_beat
+                            && note_abs_beat < clip.timeline_end_beat()
+                            && note_abs_beat >= start_beat
+                            && note_abs_beat < end_beat
+                        {
+                            let mut n = note.clone();
+                            n.start_beat = note_abs_beat - start_beat;
+                            if n.start_beat + n.duration_beats > duration {
+                                n.duration_beats = duration - n.start_beat;
+                            }
+                            merged_midi.add_note(n);
+                        }
+                    }
+                }
+                ClipPattern::Audio(audio) => {
+                    if audio_data.is_none() {
+                        let mut a = audio.clone();
+                        a.length_beats = duration;
+                        audio_data = Some(a);
+                    }
+                }
+                ClipPattern::Drum(_) => {}
+            }
+        }
+
+        let pattern = if has_midi {
+            ClipPattern::Midi(merged_midi)
+        } else if let Some(aud) = audio_data {
+            ClipPattern::Audio(aud)
+        } else {
+            ClipPattern::Midi(merged_midi)
+        };
+
+        // Remove fully encompassed clips; trim partially overlapping clips
+        let mut i = 0;
+        while i < self.clips.len() {
+            let c = &self.clips[i];
+            if c.timeline_start_beat >= start_beat && c.timeline_end_beat() <= end_beat {
+                self.clips.remove(i);
+            } else if c.timeline_start_beat < start_beat && c.timeline_end_beat() > start_beat && c.timeline_end_beat() <= end_beat {
+                self.clips[i].duration_beats = start_beat - self.clips[i].timeline_start_beat;
+                i += 1;
+            } else if c.timeline_start_beat >= start_beat && c.timeline_start_beat < end_beat && c.timeline_end_beat() > end_beat {
+                let trim = end_beat - self.clips[i].timeline_start_beat;
+                self.clips[i].timeline_start_beat = end_beat;
+                self.clips[i].duration_beats = (self.clips[i].duration_beats - trim).max(0.0);
+                self.clips[i].pattern_offset_beats += trim;
+                i += 1;
+            } else {
+                i += 1;
+            }
+        }
+
+        let consolidated = ArrangementClip::new(
+            consolidated_id,
+            new_name,
+            start_beat,
+            duration,
+            pattern,
+        );
+        self.clips.push(consolidated.clone());
+        Some(consolidated)
+    }
+}
+
+/// A named song section locator or marker on the linear timeline ruler.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct TimelineLocator {
+    pub beat: f64,
+    pub name: String,
+}
+
+impl TimelineLocator {
+    pub fn new(beat: f64, name: impl Into<String>) -> Self {
+        Self {
+            beat,
+            name: name.into(),
+        }
+    }
+}
+
+impl From<(f64, String)> for TimelineLocator {
+    fn from((beat, name): (f64, String)) -> Self {
+        Self::new(beat, name)
+    }
+}
+
+impl From<(f64, &str)> for TimelineLocator {
+    fn from((beat, name): (f64, &str)) -> Self {
+        Self::new(beat, name)
+    }
 }
 
 /// Loop region bounds on the linear timeline.
@@ -160,6 +365,8 @@ pub struct ArrangementTimeline {
     pub loop_region: LoopRegion,
     pub playhead_beat: f64,
     pub is_playing: bool,
+    #[serde(default)]
+    pub locators: Vec<TimelineLocator>,
 }
 
 impl Default for ArrangementTimeline {
@@ -169,6 +376,7 @@ impl Default for ArrangementTimeline {
             loop_region: LoopRegion::default(),
             playhead_beat: 0.0,
             is_playing: false,
+            locators: Vec::new(),
         }
     }
 }
@@ -189,6 +397,98 @@ impl ArrangementTimeline {
     /// Seek playhead to specified beat position.
     pub fn seek(&mut self, beat: f64) {
         self.playhead_beat = beat.max(0.0);
+    }
+
+    /// Add a locator at `beat` with `name`, maintaining ascending beat order.
+    pub fn add_locator(&mut self, beat: f64, name: impl Into<String>) {
+        let loc = TimelineLocator::new(beat, name);
+        let pos = self.locators.partition_point(|l| l.beat <= beat);
+        self.locators.insert(pos, loc);
+    }
+
+    /// Remove locator by index.
+    pub fn remove_locator(&mut self, index: usize) -> Option<TimelineLocator> {
+        if index < self.locators.len() {
+            Some(self.locators.remove(index))
+        } else {
+            None
+        }
+    }
+
+    /// Jump playhead to locator at `index`.
+    pub fn jump_to_locator(&mut self, index: usize) -> bool {
+        if let Some(loc) = self.locators.get(index) {
+            self.playhead_beat = loc.beat;
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Jump playhead to locator matching `name` (case-insensitive).
+    pub fn jump_to_locator_by_name(&mut self, name: &str) -> bool {
+        if let Some(loc) = self.locators.iter().find(|l| l.name.eq_ignore_ascii_case(name)) {
+            self.playhead_beat = loc.beat;
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Navigate to the next locator strictly ahead of the current playhead.
+    pub fn next_locator(&mut self) -> Option<&TimelineLocator> {
+        const EPSILON: f64 = 1e-4;
+        let target = self.locators.iter().find(|l| l.beat > self.playhead_beat + EPSILON);
+        if let Some(loc) = target {
+            self.playhead_beat = loc.beat;
+        }
+        target
+    }
+
+    /// Navigate to the previous locator strictly behind the current playhead.
+    pub fn prev_locator(&mut self) -> Option<&TimelineLocator> {
+        const EPSILON: f64 = 1e-4;
+        let target = self.locators.iter().rev().find(|l| l.beat < self.playhead_beat - EPSILON);
+        if let Some(loc) = target {
+            self.playhead_beat = loc.beat;
+        }
+        target
+    }
+
+    /// Split active clips across all tracks at `split_beat`.
+    /// Returns the number of clips split.
+    pub fn split_at(&mut self, split_beat: f64, next_id_start: u32) -> usize {
+        let mut count = 0;
+        let mut id = next_id_start;
+        for track in &mut self.tracks {
+            if track.split_clip_at(split_beat, id) {
+                count += 1;
+                id += 1;
+            }
+        }
+        count
+    }
+
+    /// Split clips across all tracks at current playhead position.
+    pub fn split_at_playhead(&mut self, next_id_start: u32) -> usize {
+        let beat = self.playhead_beat;
+        self.split_at(beat, next_id_start)
+    }
+
+    /// Consolidate range on a specific track.
+    pub fn consolidate_track_range(
+        &mut self,
+        track_id: u32,
+        start_beat: f64,
+        end_beat: f64,
+        new_clip_id: u32,
+        new_name: impl Into<String>,
+    ) -> Option<ArrangementClip> {
+        if let Some(track) = self.tracks.iter_mut().find(|t| t.id == track_id) {
+            track.consolidate_range(start_beat, end_beat, new_clip_id, new_name)
+        } else {
+            None
+        }
     }
 }
 
@@ -232,5 +532,96 @@ mod tests {
         // Advance 0.2: hits 12.1 -> wraps to 4.1
         timeline.advance_beats(0.2);
         assert!((timeline.playhead_beat - 4.1).abs() < 1e-9);
+    }
+
+    #[test]
+    fn test_arrangement_fractional_beat_placement() {
+        let mut midi = MidiPattern::new(4.0);
+        midi.add_note(MidiNote::new(60, 100, 0.0, 1.0));
+        let clip = ArrangementClip::new(1, "HiHat", 1.25, 2.75, ClipPattern::Midi(midi));
+
+        // Spans 1.25 .. 4.0
+        assert_eq!(clip.timeline_start_beat, 1.25);
+        assert_eq!(clip.duration_beats, 2.75);
+        assert_eq!(clip.timeline_end_beat(), 4.0);
+
+        assert!(!clip.contains_beat(1.24));
+        assert!(clip.contains_beat(1.25));
+        assert!(clip.contains_beat(2.5));
+        assert!(clip.contains_beat(3.99));
+        assert!(!clip.contains_beat(4.0));
+
+        // Sub-beat phase
+        assert_eq!(clip.pattern_phase_at_beat(1.25), 0.0);
+        assert_eq!(clip.pattern_phase_at_beat(2.5), 1.25);
+    }
+
+    #[test]
+    fn test_arrangement_locator_navigation() {
+        let mut timeline = ArrangementTimeline::new();
+        timeline.add_locator(0.0, "1. Intro");
+        timeline.add_locator(16.5, "2. Build");
+        timeline.add_locator(32.25, "3. Drop");
+        timeline.add_locator(48.0, "4. Outro");
+
+        assert_eq!(timeline.locators.len(), 4);
+        assert_eq!(timeline.locators[1].beat, 16.5);
+        assert_eq!(timeline.locators[1].name, "2. Build");
+
+        // Initial playhead at 0.0
+        assert_eq!(timeline.playhead_beat, 0.0);
+
+        // Next locator jumps to 16.5
+        let next1 = timeline.next_locator().unwrap();
+        assert_eq!(next1.name, "2. Build");
+        assert_eq!(timeline.playhead_beat, 16.5);
+
+        // Next locator jumps to 32.25
+        let next2 = timeline.next_locator().unwrap();
+        assert_eq!(next2.name, "3. Drop");
+        assert_eq!(timeline.playhead_beat, 32.25);
+
+        // Previous locator jumps back to 16.5
+        let prev1 = timeline.prev_locator().unwrap();
+        assert_eq!(prev1.name, "2. Build");
+        assert_eq!(timeline.playhead_beat, 16.5);
+
+        // Jump by name
+        assert!(timeline.jump_to_locator_by_name("4. Outro"));
+        assert_eq!(timeline.playhead_beat, 48.0);
+
+        // Jump by index
+        assert!(timeline.jump_to_locator(0));
+        assert_eq!(timeline.playhead_beat, 0.0);
+    }
+
+    #[test]
+    fn test_arrangement_track_split_and_consolidate() {
+        let mut track = ArrangementTrack::new(1, "Synth", "MidiSynth");
+        let mut pattern1 = MidiPattern::new(4.0);
+        pattern1.add_note(MidiNote::new(60, 100, 0.5, 1.0));
+        let clip1 = ArrangementClip::new(10, "Lead_PartA", 0.0, 4.0, ClipPattern::Midi(pattern1));
+        track.add_clip(clip1);
+
+        // Split at beat 2.0
+        let did_split = track.split_clip_at(2.0, 11);
+        assert!(did_split);
+        assert_eq!(track.clips.len(), 2);
+        assert_eq!(track.clips[0].duration_beats, 2.0);
+        assert_eq!(track.clips[1].timeline_start_beat, 2.0);
+        assert_eq!(track.clips[1].duration_beats, 2.0);
+
+        // Consolidate back over [0.0, 4.0)
+        let consolidated = track.consolidate_range(0.0, 4.0, 20, "Lead_Consolidated").unwrap();
+        assert_eq!(consolidated.timeline_start_beat, 0.0);
+        assert_eq!(consolidated.duration_beats, 4.0);
+        assert_eq!(track.clips.len(), 1);
+        if let ClipPattern::Midi(m) = &track.clips[0].pattern {
+            assert_eq!(m.notes.len(), 1);
+            assert_eq!(m.notes[0].pitch, 60);
+            assert_eq!(m.notes[0].start_beat, 0.5);
+        } else {
+            panic!("Expected Midi pattern in consolidated clip");
+        }
     }
 }

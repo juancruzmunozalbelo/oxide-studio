@@ -8,24 +8,33 @@ use serde::{Deserialize, Serialize};
 #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
 pub enum TuningType {
     TwelveTet,
-    JustIntonation,
+    NineteenEdo,
     TwentyFourEdo,
+    ThirtyOneEdo,
+    BohlenPierce,
+    JustIntonation,
     Scala,
 }
 
 impl TuningType {
-    pub const ALL: [TuningType; 4] = [
+    pub const ALL: [TuningType; 7] = [
         TuningType::TwelveTet,
-        TuningType::JustIntonation,
+        TuningType::NineteenEdo,
         TuningType::TwentyFourEdo,
+        TuningType::ThirtyOneEdo,
+        TuningType::BohlenPierce,
+        TuningType::JustIntonation,
         TuningType::Scala,
     ];
 
     pub fn name(&self) -> &'static str {
         match self {
             TuningType::TwelveTet => "12-TET (Equal)",
-            TuningType::JustIntonation => "Just Intonation (5-Limit)",
+            TuningType::NineteenEdo => "19-EDO",
             TuningType::TwentyFourEdo => "24-EDO (Quarter-Tone)",
+            TuningType::ThirtyOneEdo => "31-EDO",
+            TuningType::BohlenPierce => "Bohlen-Pierce (Tri-Scale)",
+            TuningType::JustIntonation => "Just Intonation (5-Limit)",
             TuningType::Scala => "Scala Custom (.scl)",
         }
     }
@@ -57,6 +66,23 @@ impl TuningSystem {
                 let semitones = note as f64 - self.reference_note as f64;
                 self.reference_pitch * 2.0_f64.powf(semitones / 12.0)
             }
+            TuningType::NineteenEdo => {
+                let steps = note as f64 - self.reference_note as f64;
+                self.reference_pitch * 2.0_f64.powf(steps / 19.0)
+            }
+            TuningType::TwentyFourEdo => {
+                let steps = note as f64 - self.reference_note as f64;
+                self.reference_pitch * 2.0_f64.powf(steps / 24.0)
+            }
+            TuningType::ThirtyOneEdo => {
+                let steps = note as f64 - self.reference_note as f64;
+                self.reference_pitch * 2.0_f64.powf(steps / 31.0)
+            }
+            TuningType::BohlenPierce => {
+                // Bohlen-Pierce equal temperament (13-EDT): 13 equal divisions of the tritave (3:1)
+                let steps = note as f64 - self.reference_note as f64;
+                self.reference_pitch * 3.0_f64.powf(steps / 13.0)
+            }
             TuningType::JustIntonation => {
                 // 5-limit Just Intonation ratios relative to C
                 // 1/1, 16/15, 9/8, 6/5, 5/4, 4/3, 45/32, 3/2, 8/5, 5/3, 9/5, 15/8
@@ -80,10 +106,6 @@ impl TuningSystem {
                 let ratio = RATIOS[note_pc] / RATIOS[ref_pc];
                 self.reference_pitch * ratio * 2.0_f64.powi(octave)
             }
-            TuningType::TwentyFourEdo => {
-                let steps = note as f64 - self.reference_note as f64;
-                self.reference_pitch * 2.0_f64.powf(steps / 24.0)
-            }
             TuningType::Scala => {
                 if self.scala_cents.is_empty() {
                     let semitones = note as f64 - self.reference_note as f64;
@@ -104,6 +126,24 @@ impl TuningSystem {
                 }
             }
         }
+    }
+
+    /// Generate a 128-element frequency lookup table for MIDI notes 0..127 in Hz (f64).
+    pub fn generate_frequency_table(&self) -> [f64; 128] {
+        let mut table = [0.0; 128];
+        for note in 0..128 {
+            table[note] = self.frequency_for_note(note as u8);
+        }
+        table
+    }
+
+    /// Generate a 128-element frequency lookup table for MIDI notes 0..127 in Hz (f32).
+    pub fn generate_frequency_table_f32(&self) -> [f32; 128] {
+        let mut table = [0.0f32; 128];
+        for note in 0..128 {
+            table[note] = self.frequency_for_note(note as u8) as f32;
+        }
+        table
     }
 
     pub fn cents_deviation_from_12tet(&self, note: u8) -> f64 {
@@ -235,5 +275,65 @@ mod tests {
         assert!(tuning.load_scala("Div Zero\n1\n5/0\n").is_err());
         // Negative ratio
         assert!(tuning.load_scala("Negative\n1\n-3/2\n").is_err());
+    }
+
+    #[test]
+    fn test_19edo_tuning() {
+        let tuning = TuningSystem::new(TuningType::NineteenEdo);
+        let f69 = tuning.frequency_for_note(69);
+        assert!((f69 - 440.0).abs() < 1e-6);
+        let f88 = tuning.frequency_for_note(88); // 19 steps up = 1 octave
+        assert!((f88 - 880.0).abs() < 1e-6);
+        let f70 = tuning.frequency_for_note(70);
+        let expected_f70 = 440.0 * 2.0_f64.powf(1.0 / 19.0);
+        assert!((f70 - expected_f70).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_31edo_tuning() {
+        let tuning = TuningSystem::new(TuningType::ThirtyOneEdo);
+        let f69 = tuning.frequency_for_note(69);
+        assert!((f69 - 440.0).abs() < 1e-6);
+        let f100 = tuning.frequency_for_note(100); // 31 steps up = 1 octave
+        assert!((f100 - 880.0).abs() < 1e-6);
+        let f70 = tuning.frequency_for_note(70);
+        let expected_f70 = 440.0 * 2.0_f64.powf(1.0 / 31.0);
+        assert!((f70 - expected_f70).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_bohlen_pierce_tuning() {
+        let tuning = TuningSystem::new(TuningType::BohlenPierce);
+        let f69 = tuning.frequency_for_note(69);
+        assert!((f69 - 440.0).abs() < 1e-6);
+        let f82 = tuning.frequency_for_note(82); // 13 steps up = 1 tritave (3:1)
+        assert!((f82 - 1320.0).abs() < 1e-6); // 440 * 3.0 = 1320.0
+        let f70 = tuning.frequency_for_note(70);
+        let expected_f70 = 440.0 * 3.0_f64.powf(1.0 / 13.0);
+        assert!((f70 - expected_f70).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_just_intonation_tuning() {
+        let tuning = TuningSystem::new(TuningType::JustIntonation);
+        let f69 = tuning.frequency_for_note(69); // A4
+        assert!((f69 - 440.0).abs() < 1e-6);
+        let f60 = tuning.frequency_for_note(60); // C4: 440 * (1.0 / (5/3)) = 264.0
+        assert!((f60 - 264.0).abs() < 1e-6);
+        let f72 = tuning.frequency_for_note(72); // C5: 264.0 * 2.0 = 528.0
+        assert!((f72 - 528.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_frequency_lookup_table() {
+        let tuning = TuningSystem::new(TuningType::TwelveTet);
+        let table = tuning.generate_frequency_table();
+        assert_eq!(table.len(), 128);
+        assert!((table[69] - 440.0).abs() < 1e-6);
+        assert!((table[81] - 880.0).abs() < 1e-6);
+
+        let table_f32 = tuning.generate_frequency_table_f32();
+        assert_eq!(table_f32.len(), 128);
+        assert!((table_f32[69] - 440.0).abs() < 1e-4);
     }
 }

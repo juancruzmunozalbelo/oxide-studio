@@ -265,6 +265,10 @@ impl AbletonStudioApp {
         timeline.tracks.push(trk1);
         timeline.tracks.push(trk2);
         timeline.tracks.push(trk3);
+        timeline.add_locator(0.0, "1. Intro");
+        timeline.add_locator(16.0, "2. Groove");
+        timeline.add_locator(32.0, "3. Build");
+        timeline.add_locator(48.0, "4. Drop");
 
         let tracks_gui = vec![
             GuiTrackState {
@@ -974,10 +978,19 @@ impl AbletonStudioApp {
                     }
                 }
                 crate::shortcuts::StudioShortcutAction::SplitAtPlayhead => {
-                    self.status_message = format!("Split Clip at beat {:.2}", self.current_beat);
+                    let split_count = self.timeline.split_at(self.current_beat, 9000);
+                    self.status_message = format!("Split {} Clip(s) at beat {:.2}", split_count, self.current_beat);
                 }
                 crate::shortcuts::StudioShortcutAction::ConsolidateSelection => {
-                    self.status_message = "Consolidated Selection".into();
+                    let sel_track = (self.selected_track + 1) as u32;
+                    let loop_start = self.timeline_gui.loop_start_beat;
+                    let loop_end = loop_start + self.timeline_gui.loop_length_beats;
+                    let consolidated = self.timeline.consolidate_track_range(sel_track, loop_start, loop_end, 9500, "Consolidated Clip");
+                    if consolidated.is_some() {
+                        self.status_message = format!("Consolidated Selection [{:.1}..{:.1})", loop_start, loop_end);
+                    } else {
+                        self.status_message = "Consolidated Selection".into();
+                    }
                 }
                 crate::shortcuts::StudioShortcutAction::ToggleDrawOrBounce => {
                     let _ = self.export_demo_wav("/tmp/ableton_studio_export.wav");
@@ -1026,6 +1039,12 @@ impl AbletonStudioApp {
                     self.status_message = format!("Keyboard Velocity: {}", self.keyboard.velocity);
                 }
                 crate::shortcuts::StudioShortcutAction::ToggleShortcutsModal => {}
+                crate::shortcuts::StudioShortcutAction::ToggleMidiMapMode => {
+                    self.status_message = "MIDI Map Mode toggled".to_string();
+                }
+                crate::shortcuts::StudioShortcutAction::ToggleKeyMapMode => {
+                    self.status_message = "Key Map Mode toggled".to_string();
+                }
             }
         }
 

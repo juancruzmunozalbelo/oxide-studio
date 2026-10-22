@@ -16,6 +16,7 @@ pub mod layout_guard;
 pub mod live_rpc;
 pub mod okf_knowledge;
 pub mod panels;
+pub mod routing;
 pub mod shortcuts;
 pub mod theme;
 pub mod visualizers;
@@ -25,6 +26,7 @@ pub use app::{AbletonStudioApp, DeckTab, WorkspaceView};
 pub use keyboard::{ComputerKeyboardController, KeyboardMode};
 pub use layout::{BoundedCard, SessionSplitBudget, SplitRegion, StudioComponent, StudioPanelSpec, ViewportBudget};
 pub use live_rpc::ArustonGuiRpcServer;
+pub use routing::{RoutingValidationError, SignalEdge, SignalRoutingGraph, SignalRoutingNode};
 pub use shortcuts::{StudioShortcutAction, StudioShortcutManager};
 pub use theme::apply_dark_carbon_theme;
 

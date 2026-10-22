@@ -1,14 +1,35 @@
 //! Core domain models and audio interfaces for ableton-rust.
 
+pub mod control_surfaces;
 pub mod device;
+pub mod plugin_host;
 pub mod scale;
+pub mod transport;
 pub mod tuning;
 
 #[cfg(feature = "serde")]
 use serde::{Deserialize, Serialize};
 
-pub use device::{AudioEffectDevice, Device, DeviceCategory, DeviceChain, InstrumentDevice, MidiEffectDevice};
+pub use control_surfaces::{
+    Apc40State, ControlSurfaceModel, KeyLearnRegistry, KeyLearnTarget, LaunchpadProState,
+    MidiLearnRegistry, MidiLearnTarget, PushDisplayFrameBuffer, PushDisplayStrip, PushPadColor,
+    PushPadMatrixState, PushTouchStrip, PushTouchStripMode, PushTrackStripTelemetry, TakeoverMode,
+};
+pub use device::{
+    AudioEffectDevice, Device, DeviceCategory, DeviceChain, InstrumentDevice, MidiEffectDevice,
+    DEFAULT_RACK_MACROS, MAX_RACK_MACROS, MacroMappingRange, MacroVariation, RackMacro,
+    RackMacroSystem,
+};
+pub use plugin_host::{
+    EditorWindowRect, HostedPluginInstance, PluginDescriptor, PluginFormat, PluginSandboxHost,
+    PluginShmRingBuffer, SandboxMode,
+};
 pub use scale::{GlobalScale, ScaleMode, ROOT_NAMES};
+pub use transport::{
+    FollowerState, LinkSyncEngine, MetronomeClick, MidiClockMessage, MidiClockSync, MidiSyncMode,
+    NudgeState, SyncSource, TempoFollowerEngine, TransportAdvanceReport, TransportController,
+    MIDI_PPQN,
+};
 pub use tuning::{TuningSystem, TuningType};
 
 /// Fixed-size zero-allocation audio buffer holding up to 1024 stereo frames.
@@ -154,6 +175,145 @@ pub enum AudioCommand {
     TriggerScene(usize),
 }
 
+/// Canonical track archetypes corresponding to Ableton Live 12 Chapter 3 architecture.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
+pub enum TrackArchetype {
+    /// Audio track: records and plays back audio clips, hosts audio effect chains.
+    Audio,
+    /// MIDI track: records and plays back MIDI clips, feeds virtual instruments or hardware MIDI.
+    Midi,
+    /// Return track: receives auxiliary sends from audio/MIDI tracks, hosts shared effects (reverb/delay).
+    Return,
+    /// Master track: final summing bus receiving all audio, hosts master volume fader and limiter.
+    Master,
+    /// Group track: submix summing bus grouping multiple tracks with collective processing.
+    Group,
+}
+
+impl TrackArchetype {
+    #[inline]
+    pub const fn is_audio(&self) -> bool {
+        matches!(self, Self::Audio)
+    }
+
+    #[inline]
+    pub const fn is_midi(&self) -> bool {
+        matches!(self, Self::Midi)
+    }
+
+    #[inline]
+    pub const fn is_return(&self) -> bool {
+        matches!(self, Self::Return)
+    }
+
+    #[inline]
+    pub const fn is_master(&self) -> bool {
+        matches!(self, Self::Master)
+    }
+
+    #[inline]
+    pub const fn is_group(&self) -> bool {
+        matches!(self, Self::Group)
+    }
+
+    #[inline]
+    pub const fn can_host_instruments(&self) -> bool {
+        matches!(self, Self::Midi)
+    }
+
+    #[inline]
+    pub const fn can_record_audio(&self) -> bool {
+        matches!(self, Self::Audio)
+    }
+
+    #[inline]
+    pub const fn can_receive_sends(&self) -> bool {
+        matches!(self, Self::Return)
+    }
+
+    pub const fn display_name(&self) -> &'static str {
+        match self {
+            Self::Audio => "Audio",
+            Self::Midi => "MIDI",
+            Self::Return => "Return",
+            Self::Master => "Master",
+            Self::Group => "Group",
+        }
+    }
+
+    pub const fn default_color_hex(&self) -> &'static str {
+        match self {
+            Self::Audio => "#00e676",  // Studio Green
+            Self::Midi => "#ffbe00",   // Amber / Gold
+            Self::Return => "#00d2ff", // Cyan / Reverb
+            Self::Master => "#ff5559", // Crimson / Red
+            Self::Group => "#954eb2",  // Royal Purple
+        }
+    }
+}
+
+/// Lock-free command queue dispatcher for routing UI/API commands to the audio engine.
+#[derive(Debug, Clone, Default)]
+pub struct CommandDispatcher {
+    queue: std::collections::VecDeque<AudioCommand>,
+    dispatched_count: usize,
+}
+
+impl CommandDispatcher {
+    pub fn new() -> Self {
+        Self {
+            queue: std::collections::VecDeque::new(),
+            dispatched_count: 0,
+        }
+    }
+
+    /// Enqueue a command for dispatch to the audio thread.
+    pub fn send(&mut self, cmd: AudioCommand) {
+        self.queue.push_back(cmd);
+        self.dispatched_count += 1;
+    }
+
+    /// Enqueue multiple commands in batch.
+    pub fn send_batch(&mut self, cmds: impl IntoIterator<Item = AudioCommand>) {
+        for cmd in cmds {
+            self.send(cmd);
+        }
+    }
+
+    /// Drain all queued commands and pass to a handler.
+    pub fn drain_to<F>(&mut self, mut handler: F) -> usize
+    where
+        F: FnMut(AudioCommand),
+    {
+        let count = self.queue.len();
+        while let Some(cmd) = self.queue.pop_front() {
+            handler(cmd);
+        }
+        count
+    }
+
+    /// Drain queued commands as a vector.
+    pub fn drain(&mut self) -> Vec<AudioCommand> {
+        self.queue.drain(..).collect()
+    }
+
+    /// Number of commands currently queued.
+    pub fn len(&self) -> usize {
+        self.queue.len()
+    }
+
+    /// Check if queue is empty.
+    pub fn is_empty(&self) -> bool {
+        self.queue.is_empty()
+    }
+
+    /// Total number of commands ever sent through this dispatcher.
+    pub fn total_dispatched(&self) -> usize {
+        self.dispatched_count
+    }
+}
+
 /// Real-time telemetry snapshot returned from the audio thread for UI metering and visualizers.
 #[derive(Debug, Clone, PartialEq)]
 pub struct AudioTelemetry {
@@ -264,4 +424,68 @@ mod tests {
         assert_eq!(telemetry.oscilloscope_slice.len(), 256);
         assert_eq!(telemetry.spectrum_bins.len(), 64);
     }
+
+    #[test]
+    fn test_track_archetypes_chapter_03_invariants() {
+        let audio = TrackArchetype::Audio;
+        let midi = TrackArchetype::Midi;
+        let ret = TrackArchetype::Return;
+        let master = TrackArchetype::Master;
+        let group = TrackArchetype::Group;
+
+        // Capabilities
+        assert!(audio.can_record_audio());
+        assert!(!audio.can_host_instruments());
+        assert!(midi.can_host_instruments());
+        assert!(!midi.can_record_audio());
+        assert!(ret.can_receive_sends());
+        assert!(master.is_master());
+        assert!(group.is_group());
+
+        // Names and colors
+        assert_eq!(audio.display_name(), "Audio");
+        assert_eq!(midi.display_name(), "MIDI");
+        assert_eq!(ret.display_name(), "Return");
+        assert_eq!(master.display_name(), "Master");
+        assert_eq!(group.display_name(), "Group");
+
+        assert_eq!(audio.default_color_hex(), "#00e676");
+        assert_eq!(midi.default_color_hex(), "#ffbe00");
+        assert_eq!(ret.default_color_hex(), "#00d2ff");
+        assert_eq!(master.default_color_hex(), "#ff5559");
+        assert_eq!(group.default_color_hex(), "#954eb2");
+    }
+
+    #[test]
+    fn test_command_dispatcher_lifecycle() {
+        let mut dispatcher = CommandDispatcher::new();
+        assert!(dispatcher.is_empty());
+        assert_eq!(dispatcher.len(), 0);
+        assert_eq!(dispatcher.total_dispatched(), 0);
+
+        dispatcher.send(AudioCommand::Play);
+        dispatcher.send(AudioCommand::SetTempo(128.0));
+        dispatcher.send_batch([
+            AudioCommand::NoteOn { track_id: 0, note: 60, velocity: 100 },
+            AudioCommand::Stop,
+        ]);
+
+        assert_eq!(dispatcher.len(), 4);
+        assert_eq!(dispatcher.total_dispatched(), 4);
+        assert!(!dispatcher.is_empty());
+
+        let mut received = Vec::new();
+        let drained = dispatcher.drain_to(|cmd| received.push(cmd));
+        assert_eq!(drained, 4);
+        assert_eq!(received.len(), 4);
+        assert_eq!(received[0], AudioCommand::Play);
+        assert_eq!(received[1], AudioCommand::SetTempo(128.0));
+        assert_eq!(received[2], AudioCommand::NoteOn { track_id: 0, note: 60, velocity: 100 });
+        assert_eq!(received[3], AudioCommand::Stop);
+
+        assert!(dispatcher.is_empty());
+        assert_eq!(dispatcher.len(), 0);
+        assert_eq!(dispatcher.total_dispatched(), 4);
+    }
 }
+

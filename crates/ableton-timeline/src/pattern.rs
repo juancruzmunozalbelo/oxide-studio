@@ -240,6 +240,46 @@ impl MidiPattern {
             .filter(|n| n.start_beat >= start && n.start_beat < end)
             .collect()
     }
+
+    /// Nudge a specific note by `delta_beats`, clamping within `[0.0, length_beats - duration]`.
+    pub fn nudge_note(&mut self, note_idx: usize, delta_beats: f64) -> bool {
+        if let Some(note) = self.notes.get_mut(note_idx) {
+            let max_start = (self.length_beats - note.duration_beats).max(0.0);
+            note.start_beat = (note.start_beat + delta_beats).clamp(0.0, max_start);
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Nudge all notes in the pattern by `delta_beats`, clamping each within `[0.0, length_beats - duration]`.
+    pub fn nudge_all(&mut self, delta_beats: f64) {
+        let len = self.length_beats;
+        for note in &mut self.notes {
+            let max_start = (len - note.duration_beats).max(0.0);
+            note.start_beat = (note.start_beat + delta_beats).clamp(0.0, max_start);
+        }
+    }
+
+    /// Stretch all notes relative to an `origin_beat` by `factor` (> 0.0).
+    /// Both note start positions and durations are scaled, clamped within pattern length.
+    pub fn stretch_notes(&mut self, factor: f64, origin_beat: f64) {
+        let f = factor.max(0.01);
+        let len = self.length_beats;
+        for note in &mut self.notes {
+            let rel_start = note.start_beat - origin_beat;
+            note.start_beat = (origin_beat + rel_start * f).clamp(0.0, len);
+            note.duration_beats = (note.duration_beats * f).max(0.0625);
+            if note.end_beat() > len {
+                note.duration_beats = (len - note.start_beat).max(0.0625);
+            }
+        }
+    }
+
+    /// Quantize all note start times and durations to `grid_beats` with strength and swing.
+    pub fn quantize(&mut self, grid_beats: f64, strength: f32, swing: f32) {
+        crate::transform::transform_quantize(self, grid_beats, strength, swing);
+    }
 }
 
 /// Audio sample clip metadata for timeline playback.
@@ -331,5 +371,64 @@ mod tests {
         let starting = midi.notes_starting_in_range(1.5, 3.0);
         assert_eq!(starting.len(), 1);
         assert_eq!(starting[0].pitch, 67);
+    }
+
+    #[test]
+    fn test_midi_note_nudge() {
+        let mut midi = MidiPattern::new(8.0);
+        midi.add_note(MidiNote::new(60, 100, 2.0, 1.0));
+        assert!(midi.nudge_note(0, 0.5));
+        assert_eq!(midi.notes[0].start_beat, 2.5);
+
+        // Nudge backwards past 0.0 clamps to 0.0
+        assert!(midi.nudge_note(0, -5.0));
+        assert_eq!(midi.notes[0].start_beat, 0.0);
+
+        // Nudge forward past length clamps to length - duration
+        assert!(midi.nudge_note(0, 10.0));
+        assert_eq!(midi.notes[0].start_beat, 7.0);
+
+        // Invalid index returns false
+        assert!(!midi.nudge_note(99, 1.0));
+
+        // Nudge all notes
+        midi.add_note(MidiNote::new(64, 100, 1.0, 1.0));
+        midi.nudge_all(-1.0);
+        assert_eq!(midi.notes[0].start_beat, 6.0);
+        assert_eq!(midi.notes[1].start_beat, 0.0);
+    }
+
+    #[test]
+    fn test_midi_note_stretch() {
+        let mut midi = MidiPattern::new(16.0);
+        midi.add_note(MidiNote::new(60, 100, 2.0, 1.0));
+        midi.add_note(MidiNote::new(64, 100, 4.0, 2.0));
+
+        // 2x stretch relative to origin 0.0
+        midi.stretch_notes(2.0, 0.0);
+        assert_eq!(midi.notes[0].start_beat, 4.0);
+        assert_eq!(midi.notes[0].duration_beats, 2.0);
+        assert_eq!(midi.notes[1].start_beat, 8.0);
+        assert_eq!(midi.notes[1].duration_beats, 4.0);
+
+        // 0.5x stretch relative to origin 0.0
+        midi.stretch_notes(0.5, 0.0);
+        assert_eq!(midi.notes[0].start_beat, 2.0);
+        assert_eq!(midi.notes[0].duration_beats, 1.0);
+        assert_eq!(midi.notes[1].start_beat, 4.0);
+        assert_eq!(midi.notes[1].duration_beats, 2.0);
+    }
+
+    #[test]
+    fn test_midi_note_quantize() {
+        let mut midi = MidiPattern::new(8.0);
+        midi.add_note(MidiNote::new(60, 100, 0.23, 0.26));
+        midi.add_note(MidiNote::new(64, 100, 0.98, 0.52));
+
+        midi.quantize(0.25, 1.0, 0.0);
+        assert!((midi.notes[0].start_beat - 0.25).abs() < 1e-4);
+        assert!((midi.notes[0].duration_beats - 0.25).abs() < 1e-4);
+        assert!((midi.notes[1].start_beat - 1.0).abs() < 1e-4);
+        assert!((midi.notes[1].duration_beats - 0.5).abs() < 1e-4);
     }
 }

@@ -17,7 +17,7 @@ use ableton_audio::{PARAM_SYNTH_CUTOFF, PARAM_SYNTH_RESONANCE};
 use ableton_gui::{
     app::{AbletonStudioApp, DeckTab, WorkspaceView},
     panels::{
-        device_rack::{DeviceChainViewState, DeviceKind, GuiDeviceModule},
+        device_rack::{DeviceChainViewState, DeviceKind, DeviceRouting, GuiDeviceModule, HotSwapState},
         sequencer::{
             render_drum_sequencer, DrumBank, DrumSequencerState, BANK_A_PAD_NAMES, BANK_B_PAD_NAMES,
         },
@@ -45,6 +45,8 @@ fn test_f9_independent_per_track_device_chains() {
         ],
         selected_device_idx: 0,
         quick_picker_open: false,
+        hot_swap: HotSwapState::default(),
+        routing: DeviceRouting::Serial,
     };
 
     // 2. Track 2: "909 House Kit" (Drum Machine & Dynamics)
@@ -57,6 +59,8 @@ fn test_f9_independent_per_track_device_chains() {
         ],
         selected_device_idx: 0,
         quick_picker_open: false,
+        hot_swap: HotSwapState::default(),
+        routing: DeviceRouting::Serial,
     };
 
     // 3. Track 3: "Offbeat Sub Bass" (FM 4-Op Operator Bass)
@@ -69,6 +73,8 @@ fn test_f9_independent_per_track_device_chains() {
         ],
         selected_device_idx: 0,
         quick_picker_open: false,
+        hot_swap: HotSwapState::default(),
+        routing: DeviceRouting::Serial,
     };
 
     // Verify distinct device counts and kinds

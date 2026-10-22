@@ -1,8 +1,9 @@
 //! Session Clip Matrix: Grid of tracks (columns) x scenes (rows), quantized triggering, and slot states.
 
 use serde::{Deserialize, Serialize};
+use crate::{ClipEnvelopeCollection, ClipEnvelopeTarget};
 use crate::pattern::ClipPattern;
-use crate::quantization::{calculate_launch_beat, QuantizeMode};
+use crate::quantization::{calculate_launch_beat, QuantizeMode, TriggerMode};
 use crate::slot::SlotState;
 
 /// An individual clip residing in a Session slot.
@@ -15,6 +16,10 @@ pub struct SessionClip {
     pub loop_start_beat: f64,
     pub loop_end_beat: f64,
     pub pattern: ClipPattern,
+    #[serde(default)]
+    pub trigger_mode: TriggerMode,
+    #[serde(default)]
+    pub envelopes: ClipEnvelopeCollection,
 }
 
 impl SessionClip {
@@ -28,7 +33,15 @@ impl SessionClip {
             loop_start_beat: 0.0,
             loop_end_beat: length,
             pattern,
+            trigger_mode: TriggerMode::Trigger,
+            envelopes: ClipEnvelopeCollection::default(),
         }
+    }
+
+    /// Builder to configure trigger mode (Trigger, Gate, Toggle, Repeat).
+    pub fn with_trigger_mode(mut self, trigger_mode: TriggerMode) -> Self {
+        self.trigger_mode = trigger_mode;
+        self
     }
 
     /// Effective loop length in beats.
@@ -39,6 +52,45 @@ impl SessionClip {
         } else {
             self.pattern.length_beats().max(4.0)
         }
+    }
+
+    /// Evaluate effective parameter value from clip envelopes.
+    pub fn evaluate_envelope(
+        &self,
+        target: &ClipEnvelopeTarget,
+        clip_beat: f64,
+        base_val: f32,
+    ) -> f32 {
+        self.envelopes
+            .evaluate_effective(target, clip_beat, self.loop_start_beat, self.loop_end_beat, base_val)
+    }
+
+    /// Evaluate 14-bit MIDI pitch bend (-8192 .. +8191).
+    pub fn evaluate_pitch_bend(&self, clip_beat: f64) -> i16 {
+        self.envelopes
+            .evaluate_pitch_bend_14bit(clip_beat, self.loop_start_beat, self.loop_end_beat)
+    }
+
+    /// Evaluate pitch bend in semitones given a bend range (e.g. ±2.0 or ±12.0 st).
+    pub fn evaluate_pitch_bend_semitones(&self, clip_beat: f64, bend_range_semitones: f32) -> f32 {
+        self.envelopes.evaluate_pitch_bend_semitones(
+            clip_beat,
+            self.loop_start_beat,
+            self.loop_end_beat,
+            bend_range_semitones,
+        )
+    }
+
+    /// Evaluate modulation wheel CC 1 (0 .. 127).
+    pub fn evaluate_mod_wheel(&self, clip_beat: f64) -> u8 {
+        self.envelopes
+            .evaluate_mod_wheel_7bit(clip_beat, self.loop_start_beat, self.loop_end_beat)
+    }
+
+    /// Evaluate MIDI Continuous Controller (0 .. 127).
+    pub fn evaluate_cc(&self, cc_num: u8, clip_beat: f64) -> u8 {
+        self.envelopes
+            .evaluate_cc_7bit(cc_num, clip_beat, self.loop_start_beat, self.loop_end_beat)
     }
 }
 
@@ -129,6 +181,64 @@ impl SessionTrack {
         }
 
         Some(target_beat)
+    }
+
+    /// Trigger a clip in this track's slot at `slot_idx` adhering to the specified `TriggerMode`.
+    ///
+    /// - `Trigger`: standard launch / restart.
+    /// - `Gate`: starts playback; releasing via `release_gate_slot` stops playback.
+    /// - `Toggle`: if playing or queued, clicking queues stop; if stopped, starts playback.
+    /// - `Repeat`: restarts / retriggers playback at the target beat.
+    pub fn trigger_slot_with_mode(
+        &mut self,
+        slot_idx: usize,
+        current_beat: f64,
+        mode: QuantizeMode,
+        trigger_mode: TriggerMode,
+    ) -> Option<f64> {
+        if slot_idx >= self.slots.len() || self.slots[slot_idx].clip.is_none() {
+            return None;
+        }
+
+        let is_active = self.slots[slot_idx].state.is_playing()
+            || self.slots[slot_idx].state.is_queued_launch();
+
+        match trigger_mode {
+            TriggerMode::Toggle => {
+                if is_active {
+                    let target_beat = self.stop(current_beat, mode);
+                    return Some(target_beat);
+                }
+            }
+            TriggerMode::Gate | TriggerMode::Repeat | TriggerMode::Trigger => {}
+        }
+
+        self.trigger_slot(slot_idx, current_beat, mode)
+    }
+
+    /// Stop playback on a Gate-mode slot when the user or MIDI trigger releases.
+    pub fn release_gate_slot(
+        &mut self,
+        slot_idx: usize,
+        current_beat: f64,
+        mode: QuantizeMode,
+    ) -> Option<f64> {
+        if slot_idx >= self.slots.len() {
+            return None;
+        }
+        let is_active = self.slots[slot_idx].state.is_playing()
+            || self.slots[slot_idx].state.is_queued_launch();
+        if is_active {
+            let target_beat = calculate_launch_beat(current_beat, mode);
+            if mode == QuantizeMode::Immediate {
+                self.slots[slot_idx].state.stop_immediate();
+            } else {
+                self.slots[slot_idx].state.queue_stop(target_beat);
+            }
+            Some(target_beat)
+        } else {
+            None
+        }
     }
 
     /// Stop playback on this track at the next quantization boundary.
@@ -225,6 +335,37 @@ impl SessionMatrix {
         }
     }
 
+    /// Trigger an individual clip slot at (track_idx, scene_idx) with trigger mode.
+    pub fn trigger_clip_with_mode(
+        &mut self,
+        track_idx: usize,
+        scene_idx: usize,
+        current_beat: f64,
+        mode: QuantizeMode,
+        trigger_mode: TriggerMode,
+    ) -> Option<f64> {
+        if let Some(track) = self.tracks.get_mut(track_idx) {
+            track.trigger_slot_with_mode(scene_idx, current_beat, mode, trigger_mode)
+        } else {
+            None
+        }
+    }
+
+    /// Release a Gate-mode clip slot at (track_idx, scene_idx).
+    pub fn release_gate_clip(
+        &mut self,
+        track_idx: usize,
+        scene_idx: usize,
+        current_beat: f64,
+        mode: QuantizeMode,
+    ) -> Option<f64> {
+        if let Some(track) = self.tracks.get_mut(track_idx) {
+            track.release_gate_slot(scene_idx, current_beat, mode)
+        } else {
+            None
+        }
+    }
+
     /// Stop playback on a given track.
     pub fn stop_track(&mut self, track_idx: usize, current_beat: f64, mode: QuantizeMode) -> Option<f64> {
         self.tracks.get_mut(track_idx).map(|t| t.stop(current_beat, mode))
@@ -293,5 +434,101 @@ mod tests {
         assert!(matrix.tracks[0].slots[0].state.is_stopped());
         // Track 1 is still playing
         assert!(matrix.tracks[1].slots[0].state.is_playing());
+    }
+
+    #[test]
+    fn test_session_matrix_trigger_modes_lifecycle() {
+        let mut matrix = SessionMatrix::new(2, 4);
+
+        // Track 0, Slot 0: Toggle mode clip
+        let m0 = MidiPattern::new(4.0);
+        let clip_toggle = SessionClip::new(1, "Toggle Clip", ClipPattern::Midi(m0))
+            .with_trigger_mode(TriggerMode::Toggle);
+        matrix.tracks[0].slots[0].set_clip(Some(clip_toggle));
+
+        // Track 1, Slot 0: Gate mode clip
+        let m1 = MidiPattern::new(4.0);
+        let clip_gate = SessionClip::new(2, "Gate Clip", ClipPattern::Midi(m1))
+            .with_trigger_mode(TriggerMode::Gate);
+        matrix.tracks[1].slots[0].set_clip(Some(clip_gate));
+
+        // 1. Toggle mode: First trigger queues launch
+        let t1 = matrix.trigger_clip_with_mode(0, 0, 1.0, QuantizeMode::FourBars, TriggerMode::Toggle);
+        assert_eq!(t1, Some(16.0), "4 Bars launch quantization schedules to beat 16.0");
+        assert_eq!(matrix.tracks[0].slots[0].state, SlotState::QueuedLaunch(16.0));
+
+        // Second trigger while queued/playing triggers stop in Toggle mode!
+        let t2 = matrix.trigger_clip_with_mode(0, 0, 2.0, QuantizeMode::OneBar, TriggerMode::Toggle);
+        assert_eq!(t2, Some(4.0));
+        assert_eq!(matrix.tracks[0].slots[0].state, SlotState::QueuedStop(4.0));
+
+        // Tick to beat 4.0: becomes stopped
+        matrix.tick(4.0);
+        assert_eq!(matrix.tracks[0].slots[0].state, SlotState::Stopped);
+
+        // 2. Gate mode: trigger starts playback
+        let g1 = matrix.trigger_clip_with_mode(1, 0, 4.0, QuantizeMode::Immediate, TriggerMode::Gate);
+        assert_eq!(g1, Some(4.0));
+        assert!(matrix.tracks[1].slots[0].state.is_playing());
+
+        // Gate release stops playback
+        let g2 = matrix.release_gate_clip(1, 0, 6.0, QuantizeMode::Immediate);
+        assert_eq!(g2, Some(6.0));
+        assert_eq!(matrix.tracks[1].slots[0].state, SlotState::Stopped);
+    }
+
+    #[test]
+    fn test_session_matrix_trigger_and_repeat_modes_and_quantization() {
+        let mut matrix = SessionMatrix::new(2, 4);
+
+        let m0 = MidiPattern::new(4.0);
+        let clip_trigger = SessionClip::new(1, "Trigger Clip", ClipPattern::Midi(m0))
+            .with_trigger_mode(TriggerMode::Trigger);
+        matrix.tracks[0].slots[0].set_clip(Some(clip_trigger));
+
+        let m1 = MidiPattern::new(4.0);
+        let clip_repeat = SessionClip::new(2, "Repeat Clip", ClipPattern::Midi(m1))
+            .with_trigger_mode(TriggerMode::Repeat);
+        matrix.tracks[1].slots[0].set_clip(Some(clip_repeat));
+
+        // 1. Trigger mode: launches with 1 Bar quantization
+        let t1 = matrix.trigger_clip_with_mode(0, 0, 1.5, QuantizeMode::OneBar, TriggerMode::Trigger);
+        assert_eq!(t1, Some(4.0));
+        assert_eq!(matrix.tracks[0].slots[0].state, SlotState::QueuedLaunch(4.0));
+
+        // Tick to beat 4.0: starts playing
+        matrix.tick(4.0);
+        assert!(matrix.tracks[0].slots[0].state.is_playing());
+
+        // Retriggering while playing re-queues launch at next 1 Bar boundary (beat 8.0)
+        let t2 = matrix.trigger_clip_with_mode(0, 0, 4.5, QuantizeMode::OneBar, TriggerMode::Trigger);
+        assert_eq!(t2, Some(8.0));
+        assert_eq!(matrix.tracks[0].slots[0].state, SlotState::QueuedLaunch(8.0));
+
+        // 2. Repeat mode: re-triggers at quantization rate
+        let r1 = matrix.trigger_clip_with_mode(1, 0, 0.1, QuantizeMode::Quarter, TriggerMode::Repeat);
+        assert_eq!(r1, Some(1.0));
+        assert_eq!(matrix.tracks[1].slots[0].state, SlotState::QueuedLaunch(1.0));
+        matrix.tick(1.0);
+        assert!(matrix.tracks[1].slots[0].state.is_playing());
+
+        let r2 = matrix.trigger_clip_with_mode(1, 0, 1.1, QuantizeMode::Quarter, TriggerMode::Repeat);
+        assert_eq!(r2, Some(2.0));
+        assert_eq!(matrix.tracks[1].slots[0].state, SlotState::QueuedLaunch(2.0));
+
+        // 3. Verify all QuantizeMode intervals (None to 4 Bars)
+        let modes = [
+            (QuantizeMode::Immediate, 1.25, 1.25),
+            (QuantizeMode::Sixteenth, 1.20, 1.25),
+            (QuantizeMode::Eighth, 1.20, 1.50),
+            (QuantizeMode::Quarter, 1.20, 2.00),
+            (QuantizeMode::Half, 1.20, 2.00),
+            (QuantizeMode::OneBar, 1.20, 4.00),
+            (QuantizeMode::TwoBars, 1.20, 8.00),
+            (QuantizeMode::FourBars, 1.20, 16.00),
+        ];
+        for (mode, cur, expected) in modes {
+            assert_eq!(calculate_launch_beat(cur, mode), expected);
+        }
     }
 }

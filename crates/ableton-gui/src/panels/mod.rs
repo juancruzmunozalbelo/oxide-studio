@@ -1,6 +1,7 @@
 pub mod ai_chat;
 pub mod browser;
 pub mod clip_view;
+pub mod device_chain;
 pub mod device_rack;
 pub mod sequencer;
 pub mod session_matrix;
@@ -17,10 +18,11 @@ pub use browser::{
 pub use clip_view::{
     render_clip_view, render_interactive_piano_roll, ClipViewAction, ClipViewState, ClipViewSubTab,
 };
-pub use device_rack::{
-    render_device_chain_view, render_device_rack, DeviceChainAction, DeviceChainViewState,
-    DeviceKind, DeviceRackAction, GuiDeviceModule, SynthControlsState,
+pub use device_chain::{
+    render_device_chain_view, DeviceCategory, DeviceChainAction, DeviceChainViewState,
+    DeviceKind, DeviceRouting, GuiDeviceModule, HotSwapState,
 };
+pub use device_rack::{render_device_rack, DeviceRackAction, SynthControlsState};
 pub use sequencer::{render_drum_sequencer, render_piano_roll, SequencerAction};
 pub use session_matrix::{
     render_clip_slot, render_session_matrix, CrossfaderAssign, GuiReturnTrack, GuiTrackState,

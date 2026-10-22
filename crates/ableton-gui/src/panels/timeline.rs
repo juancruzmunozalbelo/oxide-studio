@@ -24,6 +24,7 @@ pub struct TimelineGuiState {
     pub locators: Vec<(f64, String)>, // (beat, name)
     pub automation_points: Vec<AutomationPoint>,
     pub selected_take_region: Option<(usize, f64, f64)>, // (take_idx, start_beat, end_beat)
+    pub audition_take: Option<usize>,
     pub selected_track: usize,
     pub selected_clip: Option<(usize, usize)>, // (track_idx, clip_idx)
 }
@@ -51,6 +52,7 @@ impl Default for TimelineGuiState {
                 AutomationPoint::new(32.0, 0.95, 0.3),
             ],
             selected_take_region: Some((0, 4.0, 12.0)),
+            audition_take: None,
             selected_track: 0,
             selected_clip: None,
         }
@@ -63,6 +65,7 @@ pub struct TimelineAction {
     pub loop_toggled: bool,
     pub track_selected: Option<usize>,
     pub clip_selected: Option<(usize, usize)>, // (track_idx, clip_idx)
+    pub audition_take_toggled: Option<usize>,
 }
 
 pub fn render_arrangement_timeline(
@@ -78,6 +81,7 @@ pub fn render_arrangement_timeline(
         loop_toggled: false,
         track_selected: None,
         clip_selected: None,
+        audition_take_toggled: None,
     };
 
     ui.vertical(|ui| {
@@ -191,6 +195,23 @@ pub fn render_arrangement_timeline(
                             check_y += 32.0;
                         }
                         if gui_state.show_comping && t_idx == 1 {
+                            let comp_start_y = check_y;
+                            if pos.y >= comp_start_y && pos.y < comp_start_y + 48.0 {
+                                let take_idx = ((pos.y - comp_start_y) / 24.0) as usize;
+                                if take_idx < 2 {
+                                    if pos.x < track_start_x {
+                                        // Audition take lane header clicked
+                                        gui_state.audition_take = if gui_state.audition_take == Some(take_idx) { None } else { Some(take_idx) };
+                                        action.audition_take_toggled = Some(take_idx);
+                                    } else {
+                                        // Blade selection: set selected_take_region
+                                        let clicked_beat = ((pos.x - track_start_x) / pixels_per_beat).max(0.0) as f64;
+                                        let start_b = clicked_beat.floor();
+                                        gui_state.selected_take_region = Some((take_idx, start_b, start_b + 4.0));
+                                    }
+                                    break;
+                                }
+                            }
                             check_y += 56.0;
                         }
                     }
@@ -417,8 +438,14 @@ pub fn render_arrangement_timeline(
                 if gui_state.show_comping && t_idx == 1 {
                     let take_h = 24.0;
                     for take_idx in 0..2 {
+                        let is_audition = gui_state.audition_take == Some(take_idx);
                         let take_rect = Rect::from_min_max(pos2(rect.left(), current_y), pos2(rect.right(), current_y + take_h));
-                        painter.rect_filled(take_rect, 0.0, Color32::from_rgb(0x10, 0x14, 0x1e));
+                        let bg_color = if is_audition {
+                            Color32::from_rgb(0x18, 0x24, 0x30)
+                        } else {
+                            Color32::from_rgb(0x10, 0x14, 0x1e)
+                        };
+                        painter.rect_filled(take_rect, 0.0, bg_color);
                         painter.line_segment([pos2(rect.left(), take_rect.bottom()), pos2(rect.right(), take_rect.bottom())], Stroke::new(1.0_f32, COLOR_BORDER));
 
                         painter.text(
@@ -426,7 +453,18 @@ pub fn render_arrangement_timeline(
                             egui::Align2::LEFT_CENTER,
                             format!("Take {}", take_idx + 1),
                             FontId::monospace(8.0),
-                            COLOR_GREEN,
+                            if is_audition { COLOR_AMBER } else { COLOR_GREEN },
+                        );
+
+                        // Take Lane Audition Button Indicator
+                        let aud_text = if is_audition { "▶ AUD" } else { "Aud" };
+                        let aud_color = if is_audition { COLOR_AMBER } else { COLOR_TEXT_MUTED };
+                        painter.text(
+                            pos2(take_rect.left() + 52.0, take_rect.center().y),
+                            egui::Align2::LEFT_CENTER,
+                            aud_text,
+                            FontId::monospace(7.5),
+                            aud_color,
                         );
 
                         // Region comp selection highlight & micro-crossfade markers
@@ -497,6 +535,34 @@ mod tests {
                     false,
                 );
                 assert!(!action.back_to_arrangement);
+            });
+        });
+    }
+
+    #[test]
+    fn test_timeline_render_with_take_lane_comping_and_audition() {
+        let ctx = egui::Context::default();
+        let mut timeline = ArrangementTimeline::new();
+        timeline.tracks.push(ArrangementTrack::new(1, "Lead Vocal", "Audio"));
+        timeline.tracks.push(ArrangementTrack::new(2, "Backing Vocal", "Audio"));
+
+        let mut gui_state = TimelineGuiState::default();
+        gui_state.show_comping = true;
+        gui_state.audition_take = Some(1); // Take 2 auditioned
+        gui_state.selected_take_region = Some((1, 4.0, 8.0));
+
+        let _ = ctx.run(egui::RawInput::default(), |ctx| {
+            egui::CentralPanel::default().show(ctx, |ui| {
+                let action = render_arrangement_timeline(
+                    ui,
+                    &mut timeline,
+                    &mut gui_state,
+                    4.0,
+                    false,
+                );
+                assert_eq!(gui_state.audition_take, Some(1));
+                assert_eq!(gui_state.selected_take_region, Some((1, 4.0, 8.0)));
+                assert!(action.seek_beat.is_none());
             });
         });
     }

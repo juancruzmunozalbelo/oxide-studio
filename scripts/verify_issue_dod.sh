@@ -75,7 +75,7 @@ if [[ ! -f "$OKF_RUST" ]]; then
     exit 1
 fi
 
-for section in OKF-01 OKF-02 OKF-03 OKF-04 OKF-05 OKF-06 OKF-07 OKF-08; do
+for section in OKF-01 OKF-02 OKF-03 OKF-04 OKF-05 OKF-06 OKF-07 OKF-08 OKF-09 OKF-10; do
     if ! grep -q "$section" "$OKF_DOC"; then
         echo "❌ Gate 1 Fail: Section $section missing in $OKF_DOC"
         exit 1
@@ -172,7 +172,7 @@ cat <<EOF > "$EVIDENCE_FILE"
 
 | Gate | Verification Domain | Test Target | Status | Passing Tests |
 | :--- | :--- | :--- | :---: | :---: |
-| **Gate 1** | **Ableton Manual & OKF Doc Sync** | \`docs/okf/OXIDE_STUDIO_MANUAL_OKF.md\` & \`okf_knowledge.rs\` (\`OKF-01..08\`) | **${GATE1_STATUS}** | ${GATE1_TESTS} tests |
+| **Gate 1** | **Ableton Manual & OKF Doc Sync** | \`docs/okf/OXIDE_STUDIO_MANUAL_OKF.md\` & \`okf_knowledge.rs\` (\`OKF-01..10\`) | **${GATE1_STATUS}** | ${GATE1_TESTS} tests |
 | **Gate 2** | **End-to-End Manual & Real-Time DSP Audio** | \`e2e_ableton_manual_verification_test\` & \`ableton-drums\` / \`ableton-audio\` | **${GATE2_STATUS}** | ${GATE2_TESTS} tests |
 | **Gate 3** | **Anti-Breakage Layout Guard (576-Frame Matrix)** | \`e2e_live12_layout_audit_test\` & \`adversarial_acoustic_layout_stress_test\` | **${GATE3_STATUS}** | ${GATE3_TESTS} tests |
 | **Total** | **Comprehensive Full Suite DoD Gate** | **All 3 Verification Gates Combined** | **PASS** | **${TOTAL_PASSED} tests** |
@@ -181,7 +181,7 @@ cat <<EOF > "$EVIDENCE_FILE"
 
 ## 2. Gate 1 Evidence: Ableton Manual & OKF Copilot Sync
 
-- **Census Verification:** All 8 OKF Knowledge Sections (\`OKF-01\` through \`OKF-08\`) verified present in both documentation markdown and native Rust copilot registry.
+- **Census Verification:** All 10 OKF Knowledge Sections (\`OKF-01\` through \`OKF-10\`) verified present in both documentation markdown and native Rust copilot registry.
 - **Bilingual Intent Querying:** Tested and verified bilingual query roundtrip across English and Argentine Spanish producer terminology.
 - **Test Output Summary:**
 \`\`\`text

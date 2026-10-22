@@ -9,8 +9,12 @@
 //! - Span (legato, tenuto, staccato length sculpting)
 //! - Strum (micro-delay chord strumming)
 //! - Time Warp (non-linear accelerando/ritardando timing warp)
+//! - Invert (mirror pitch direction vertically)
+//! - Reverse (mirror note timings horizontally)
+//! - Legato (extend durations to next note onset)
+//! - Humanize (organic micro-timing jitter and velocity variance)
 
-use crate::generate::ScaleLock;
+use crate::generate::{Rng, ScaleLock};
 use crate::pattern::{MidiNote, MidiPattern};
 
 /// 1. Arpeggiate: Spreads chord clusters across sequential grid steps.
@@ -284,6 +288,188 @@ pub fn transform_time_warp(pattern: &mut MidiPattern, exponent: f64) {
     }
 }
 
+/// 9. Invert: Reflects note pitches vertically across a center pitch axis.
+/// If `pivot_pitch` is None, the midpoint of the minimum and maximum note pitch in the pattern is used.
+pub fn transform_invert(pattern: &mut MidiPattern, pivot_pitch: Option<u8>) {
+    if pattern.notes.is_empty() {
+        return;
+    }
+    let pivot = match pivot_pitch {
+        Some(p) => p as i16,
+        None => {
+            let min_p = pattern.notes.iter().map(|n| n.pitch).min().unwrap() as i16;
+            let max_p = pattern.notes.iter().map(|n| n.pitch).max().unwrap() as i16;
+            (min_p + max_p) / 2
+        }
+    };
+    for note in &mut pattern.notes {
+        let inverted = 2 * pivot - note.pitch as i16;
+        note.pitch = inverted.clamp(0, 127) as u8;
+    }
+}
+
+/// 10. Reverse: Horizontally mirrors note timings across the pattern timeline.
+pub fn transform_reverse(pattern: &mut MidiPattern) {
+    if pattern.notes.is_empty() {
+        return;
+    }
+    let total_len = if pattern.length_beats > 0.0 {
+        pattern.length_beats
+    } else {
+        pattern.notes.iter().map(|n| n.end_beat()).fold(0.0, f64::max)
+    };
+
+    for note in &mut pattern.notes {
+        let new_start = (total_len - (note.start_beat + note.duration_beats)).max(0.0);
+        note.start_beat = new_start;
+    }
+    pattern.notes.sort_by(|a, b| a.start_beat.partial_cmp(&b.start_beat).unwrap());
+}
+
+/// 11. Legato: Extends note durations so that each note rings until the next note onset (or pattern end).
+pub fn transform_legato(pattern: &mut MidiPattern) {
+    if pattern.notes.is_empty() {
+        return;
+    }
+    pattern.notes.sort_by(|a, b| a.start_beat.partial_cmp(&b.start_beat).unwrap());
+    let len = pattern.notes.len();
+    for i in 0..len - 1 {
+        let next_start = pattern.notes[i + 1].start_beat;
+        if next_start > pattern.notes[i].start_beat {
+            pattern.notes[i].duration_beats = next_start - pattern.notes[i].start_beat;
+        }
+    }
+    if let Some(last) = pattern.notes.last_mut() {
+        if pattern.length_beats > last.start_beat {
+            last.duration_beats = pattern.length_beats - last.start_beat;
+        }
+    }
+}
+
+/// 12. Humanize: Injects subtle organic micro-timing jitter (default ±15 ticks / ~0.0156 beats)
+/// and velocity randomization (default ±8 velocity units) to emulate human performance.
+pub fn transform_humanize(
+    pattern: &mut MidiPattern,
+    timing_jitter_beats: f64,
+    velocity_jitter: i16,
+    seed: u64,
+) {
+    if pattern.notes.is_empty() {
+        return;
+    }
+    let mut rng = Rng::new(seed);
+    for note in &mut pattern.notes {
+        let r_time = (rng.next_f32() * 2.0 - 1.0) as f64 * timing_jitter_beats;
+        note.start_beat = (note.start_beat + r_time).max(0.0);
+
+        let r_vel = ((rng.next_f32() * 2.0 - 1.0) * velocity_jitter as f32).round() as i16;
+        let new_vel = (note.velocity as i16 + r_vel).clamp(1, 127) as u8;
+        note.velocity = new_vel;
+    }
+    pattern.notes.sort_by(|a, b| a.start_beat.partial_cmp(&b.start_beat).unwrap());
+}
+
+/// Unified Live 12 MIDI Transform & Generative Engine facade.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct MidiTransformEngine;
+
+impl MidiTransformEngine {
+    pub fn arpeggiate(pattern: &mut MidiPattern, step_duration_beats: f64, downwards: bool) {
+        transform_arpeggiate(pattern, step_duration_beats, downwards);
+    }
+
+    pub fn invert(pattern: &mut MidiPattern, pivot_pitch: Option<u8>) {
+        transform_invert(pattern, pivot_pitch);
+    }
+
+    pub fn reverse(pattern: &mut MidiPattern) {
+        transform_reverse(pattern);
+    }
+
+    pub fn legato(pattern: &mut MidiPattern) {
+        transform_legato(pattern);
+    }
+
+    pub fn humanize(
+        pattern: &mut MidiPattern,
+        timing_jitter_beats: f64,
+        velocity_jitter: i16,
+        seed: u64,
+    ) {
+        transform_humanize(pattern, timing_jitter_beats, velocity_jitter, seed);
+    }
+
+    pub fn quantize(pattern: &mut MidiPattern, grid_beats: f64, strength: f32, swing: f32) {
+        transform_quantize(pattern, grid_beats, strength, swing);
+    }
+
+    pub fn connect(pattern: &mut MidiPattern, scale: ScaleLock, max_step_beats: f64) {
+        transform_connect(pattern, scale, max_step_beats);
+    }
+
+    pub fn ornament(
+        pattern: &mut MidiPattern,
+        grace_offset_beats: f64,
+        semitone_offset: i8,
+        velocity_scale: f32,
+    ) {
+        transform_ornament(pattern, grace_offset_beats, semitone_offset, velocity_scale);
+    }
+
+    pub fn recombine(
+        pattern: &mut MidiPattern,
+        pitch_rot: isize,
+        velocity_rot: isize,
+        duration_rot: isize,
+    ) {
+        transform_recombine(pattern, pitch_rot, velocity_rot, duration_rot);
+    }
+
+    pub fn strum(pattern: &mut MidiPattern, delay_per_note_beats: f64, direction: StrumDirection) {
+        transform_strum(pattern, delay_per_note_beats, direction);
+    }
+
+    pub fn time_warp(pattern: &mut MidiPattern, exponent: f64) {
+        transform_time_warp(pattern, exponent);
+    }
+
+    pub fn euclidean(
+        pulses: usize,
+        total_steps: usize,
+        rotation: usize,
+        pitch: u8,
+        step_duration_beats: f64,
+        velocity: u8,
+    ) -> MidiPattern {
+        crate::generate::generate_euclidean(
+            pulses,
+            total_steps,
+            rotation,
+            pitch,
+            step_duration_beats,
+            velocity,
+        )
+    }
+
+    pub fn chord(
+        roots: &[u8],
+        chord_type: crate::generate::StacksChordType,
+        voicing: crate::generate::StacksVoicing,
+        inversion: usize,
+        duration_beats: f64,
+        velocity: u8,
+    ) -> MidiPattern {
+        crate::generate::generate_stacks(
+            roots,
+            chord_type,
+            voicing,
+            inversion,
+            duration_beats,
+            velocity,
+        )
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -324,5 +510,105 @@ mod tests {
         transform_quantize(&mut pat, 0.25, 1.0, 0.0);
         assert!((pat.notes[0].start_beat - 0.25).abs() < 1e-4);
         assert!((pat.notes[0].duration_beats - 0.25).abs() < 1e-4);
+    }
+
+    #[test]
+    fn test_transform_invert() {
+        let mut pat = MidiPattern::new(4.0);
+        pat.add_note(MidiNote::new(60, 100, 0.0, 1.0)); // C4
+        pat.add_note(MidiNote::new(64, 100, 1.0, 1.0)); // E4
+        pat.add_note(MidiNote::new(67, 100, 2.0, 1.0)); // G4
+
+        // Invert with explicit pivot at 60 (C4)
+        transform_invert(&mut pat, Some(60));
+        assert_eq!(pat.notes[0].pitch, 60); // 2*60 - 60 = 60
+        assert_eq!(pat.notes[1].pitch, 56); // 2*60 - 64 = 56 (Ab3)
+        assert_eq!(pat.notes[2].pitch, 53); // 2*60 - 67 = 53 (F3)
+
+        // Invert back with explicit pivot at 60
+        transform_invert(&mut pat, Some(60));
+        assert_eq!(pat.notes[0].pitch, 60);
+        assert_eq!(pat.notes[1].pitch, 64);
+        assert_eq!(pat.notes[2].pitch, 67);
+    }
+
+    #[test]
+    fn test_transform_reverse() {
+        let mut pat = MidiPattern::new(4.0);
+        pat.add_note(MidiNote::new(60, 100, 0.0, 1.0));
+        pat.add_note(MidiNote::new(64, 90, 1.0, 1.0));
+        pat.add_note(MidiNote::new(67, 110, 3.0, 0.5));
+
+        transform_reverse(&mut pat);
+
+        // Note 67 was at 3.0..3.5 -> new start = 4.0 - 3.5 = 0.5
+        assert_eq!(pat.notes[0].pitch, 67);
+        assert!((pat.notes[0].start_beat - 0.5).abs() < 1e-4);
+        assert_eq!(pat.notes[0].duration_beats, 0.5);
+
+        // Note 64 was at 1.0..2.0 -> new start = 4.0 - 2.0 = 2.0
+        assert_eq!(pat.notes[1].pitch, 64);
+        assert!((pat.notes[1].start_beat - 2.0).abs() < 1e-4);
+
+        // Note 60 was at 0.0..1.0 -> new start = 4.0 - 1.0 = 3.0
+        assert_eq!(pat.notes[2].pitch, 60);
+        assert!((pat.notes[2].start_beat - 3.0).abs() < 1e-4);
+    }
+
+    #[test]
+    fn test_transform_legato() {
+        let mut pat = MidiPattern::new(4.0);
+        pat.add_note(MidiNote::new(60, 100, 0.0, 0.5));
+        pat.add_note(MidiNote::new(62, 100, 1.0, 0.5));
+        pat.add_note(MidiNote::new(64, 100, 2.5, 0.5));
+
+        transform_legato(&mut pat);
+
+        // Note 0: extended from 0.0 to 1.0 (dur = 1.0)
+        assert!((pat.notes[0].duration_beats - 1.0).abs() < 1e-4);
+        // Note 1: extended from 1.0 to 2.5 (dur = 1.5)
+        assert!((pat.notes[1].duration_beats - 1.5).abs() < 1e-4);
+        // Note 2: extended from 2.5 to 4.0 (pattern length) (dur = 1.5)
+        assert!((pat.notes[2].duration_beats - 1.5).abs() < 1e-4);
+    }
+
+    #[test]
+    fn test_transform_humanize() {
+        let mut pat = MidiPattern::new(4.0);
+        pat.add_note(MidiNote::new(60, 100, 1.0, 0.5));
+        pat.add_note(MidiNote::new(64, 100, 2.0, 0.5));
+
+        // 15 ticks = 15 / 960 beats ~ 0.015625 beats
+        let timing_jitter = 15.0 / 960.0;
+        transform_humanize(&mut pat, timing_jitter, 8, 12345);
+
+        assert!((pat.notes[0].start_beat - 1.0).abs() <= timing_jitter + 1e-5);
+        assert!((pat.notes[0].velocity as i16 - 100).abs() <= 8);
+        assert!((pat.notes[1].start_beat - 2.0).abs() <= timing_jitter + 1e-5);
+        assert!((pat.notes[1].velocity as i16 - 100).abs() <= 8);
+    }
+
+    #[test]
+    fn test_midi_transform_engine_facade() {
+        let mut pat = MidiPattern::new(4.0);
+        pat.add_note(MidiNote::new(60, 100, 0.0, 1.0));
+        pat.add_note(MidiNote::new(64, 100, 1.0, 1.0));
+
+        MidiTransformEngine::invert(&mut pat, Some(62));
+        assert_eq!(pat.notes[0].pitch, 64);
+        assert_eq!(pat.notes[1].pitch, 60);
+
+        let euclid = MidiTransformEngine::euclidean(4, 16, 0, 36, 0.25, 100);
+        assert_eq!(euclid.notes.len(), 4);
+
+        let chords = MidiTransformEngine::chord(
+            &[60],
+            crate::generate::StacksChordType::MajorTriad,
+            crate::generate::StacksVoicing::Closed,
+            0,
+            1.0,
+            100,
+        );
+        assert_eq!(chords.notes.len(), 3);
     }
 }

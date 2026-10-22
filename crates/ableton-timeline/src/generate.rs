@@ -53,21 +53,21 @@ impl ScaleLock {
 }
 
 // Simple LCG PRNG for deterministic generative reproducibility
-struct Rng {
+pub(crate) struct Rng {
     state: u64,
 }
 
 impl Rng {
-    fn new(seed: u64) -> Self {
+    pub(crate) fn new(seed: u64) -> Self {
         Self { state: seed.wrapping_add(0x9E3779B97F4A7C15) }
     }
 
-    fn next_u32(&mut self) -> u32 {
+    pub(crate) fn next_u32(&mut self) -> u32 {
         self.state = self.state.wrapping_mul(6364136223846793005).wrapping_add(1);
         (self.state >> 32) as u32
     }
 
-    fn next_f32(&mut self) -> f32 {
+    pub(crate) fn next_f32(&mut self) -> f32 {
         (self.next_u32() >> 8) as f32 / 16777216.0
     }
 }

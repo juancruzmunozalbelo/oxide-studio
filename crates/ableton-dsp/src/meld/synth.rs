@@ -164,6 +164,11 @@ pub struct MeldVoice {
     pub plate_a: PlateResonator,
     pub plate_b: PlateResonator,
 
+    // MPE per-voice expression
+    pub pitch_bend_semitones: f32,
+    pub slide: f32,    // CC74 [0.0, 1.0]
+    pub pressure: f32, // Aftertouch [0.0, 1.0]
+
     // PRNG
     pub rng: XorShift32,
 }
@@ -179,6 +184,9 @@ impl MeldVoice {
             phase_b: 0.0,
             swarm_phases_a: [0.0; 4],
             swarm_phases_b: [0.0; 4],
+            pitch_bend_semitones: 0.0,
+            slide: 0.0,
+            pressure: 0.0,
             env_a: AdsrEnvelope::new(sample_rate),
             env_b: AdsrEnvelope::new(sample_rate),
             filter_a: CytomicZdfFilter::new(sample_rate),
@@ -195,6 +203,9 @@ impl MeldVoice {
         self.phase_b = 0.0;
         self.swarm_phases_a = [0.0; 4];
         self.swarm_phases_b = [0.0; 4];
+        self.pitch_bend_semitones = 0.0;
+        self.slide = 0.0;
+        self.pressure = 0.0;
         self.env_a.reset();
         self.env_b.reset();
         self.filter_a.reset();
@@ -414,6 +425,35 @@ impl MeldDevice {
         }
     }
 
+    /// Set MPE pitch bend in semitones for all active voices.
+    pub fn set_pitch_bend(&mut self, semitones: f32) {
+        for v in &mut self.voices {
+            if v.active {
+                v.pitch_bend_semitones = semitones;
+            }
+        }
+    }
+
+    /// Set MPE slide [0.0, 1.0] (CC74 timbre / Y-axis) for all active voices.
+    pub fn set_mpe_slide(&mut self, slide: f32) {
+        let s = slide.clamp(0.0, 1.0);
+        for v in &mut self.voices {
+            if v.active {
+                v.slide = s;
+            }
+        }
+    }
+
+    /// Set MPE pressure [0.0, 1.0] (aftertouch / Z-axis) for all active voices.
+    pub fn set_mpe_pressure(&mut self, pressure: f32) {
+        let p = pressure.clamp(0.0, 1.0);
+        for v in &mut self.voices {
+            if v.active {
+                v.pressure = p;
+            }
+        }
+    }
+
     /// Process a stereo sample frame.
     #[inline(always)]
     pub fn process_stereo_sample(&mut self) -> (f32, f32) {
@@ -446,15 +486,15 @@ impl MeldDevice {
                 continue;
             }
 
-            // Scale Harmonic Quantization
-            let raw_pitch = voice.note as f32;
+            // Scale Harmonic Quantization with MPE pitch bend
+            let raw_pitch = voice.note as f32 + voice.pitch_bend_semitones;
             let eff_pitch = if self.scale_quantize_active {
                 self.scale.quantize_pitch(raw_pitch)
             } else {
                 raw_pitch
             };
 
-            let base_freq = 440.0 * 2.0f32.powf((eff_pitch - 69.0) / 12.0);
+            let base_freq = (440.0 * 2.0f32.powf((eff_pitch - 69.0) / 12.0)).clamp(10.0, sr * 0.48);
 
             // Engine A synthesis
             let sig_a = Self::render_macro_engine(
@@ -480,26 +520,33 @@ impl MeldDevice {
                 sr,
             ) * self.engine_b_gain;
 
-            // Filter A or Plate A
+            // Filter A or Plate A with MPE slide & pressure modulation
+            let mod_a_cutoff = (self.filter_a_cutoff + voice.slide * 2000.0).clamp(20.0, 20000.0);
+            let mod_a_res = (self.filter_a_res + voice.pressure * 0.3).clamp(0.0, 1.0);
             let out_proc_a = if self.use_plate_a {
-                voice.plate_a.process(sig_a, base_freq, self.plate_decay, self.plate_damping, sr)
+                let eff_decay = (self.plate_decay + voice.slide * 0.2).clamp(0.05, 0.98);
+                let eff_damping = (self.plate_damping + voice.pressure * 0.2).clamp(0.0, 0.95);
+                voice.plate_a.process(sig_a, base_freq, eff_decay, eff_damping, sr)
             } else {
                 voice.filter_a.filter_type = CytomicFilterType::Lowpass24;
                 voice.filter_a.circuit_model = CircuitModel::Clean;
-                voice.filter_a.process_sample(sig_a, self.filter_a_cutoff, self.filter_a_res, 0.0, 0.0)
+                voice.filter_a.process_sample(sig_a, mod_a_cutoff, mod_a_res, 0.0, 0.0)
             };
 
             // Cross-Modulation: Engine A modulating Filter B cutoff
             let cross_mod_offset = out_proc_a * self.cross_mod_amount * 1000.0;
-            let mod_b_cutoff = (self.filter_b_cutoff + cross_mod_offset).clamp(20.0, 20000.0);
+            let mod_b_cutoff = (self.filter_b_cutoff + cross_mod_offset + voice.slide * 2000.0).clamp(20.0, 20000.0);
+            let mod_b_res = (self.filter_b_res + voice.pressure * 0.3).clamp(0.0, 1.0);
 
             // Filter B or Plate B
             let out_proc_b = if self.use_plate_b {
-                voice.plate_b.process(sig_b, base_freq, self.plate_decay, self.plate_damping, sr)
+                let eff_decay = (self.plate_decay + voice.slide * 0.2).clamp(0.05, 0.98);
+                let eff_damping = (self.plate_damping + voice.pressure * 0.2).clamp(0.0, 0.95);
+                voice.plate_b.process(sig_b, base_freq, eff_decay, eff_damping, sr)
             } else {
                 voice.filter_b.filter_type = CytomicFilterType::Lowpass24;
                 voice.filter_b.circuit_model = CircuitModel::MS2;
-                voice.filter_b.process_sample(sig_b, mod_b_cutoff, self.filter_b_res, 0.0, 0.0)
+                voice.filter_b.process_sample(sig_b, mod_b_cutoff, mod_b_res, 0.0, 0.0)
             };
 
             // Panning & summing
@@ -558,7 +605,19 @@ impl InstrumentDevice for MeldDevice {
                 MidiEvent::NoteOff { note, .. } => {
                     self.trigger_note_off(note);
                 }
-                _ => {}
+                MidiEvent::PitchBend { value, .. } => {
+                    let semitones = (value as f32 / 8192.0) * 12.0;
+                    self.set_pitch_bend(semitones);
+                }
+                MidiEvent::ControlChange { controller, value, .. } => {
+                    if controller == 74 {
+                        // MPE Slide (CC74)
+                        self.set_mpe_slide(value as f32 / 127.0);
+                    } else if controller == 11 {
+                        // MPE Pressure / Expression (CC11)
+                        self.set_mpe_pressure(value as f32 / 127.0);
+                    }
+                }
             }
         }
 
@@ -612,5 +671,41 @@ mod tests {
         let q = scale.quantize_pitch(66.0);
         let semi = ((q.round() as i32 % 12 + 12) % 12) as u8;
         assert!(scale.is_in_scale(semi), "Quantized pitch must be in scale");
+    }
+
+    #[test]
+    fn test_meld_mpe_voice_expression() {
+        let mut meld = MeldDevice::new(44100.0);
+        meld.trigger_note_on(60, 100);
+
+        // Verify active voice initialized with default MPE values
+        assert_eq!(meld.voices[0].pitch_bend_semitones, 0.0);
+        assert_eq!(meld.voices[0].slide, 0.0);
+        assert_eq!(meld.voices[0].pressure, 0.0);
+
+        // Apply MPE Pitch Bend (+2 semitones)
+        meld.set_pitch_bend(2.0);
+        assert_eq!(meld.voices[0].pitch_bend_semitones, 2.0);
+
+        // Apply MPE Slide (CC74 = 0.75)
+        meld.set_mpe_slide(0.75);
+        assert_eq!(meld.voices[0].slide, 0.75);
+
+        // Apply MPE Pressure (0.8)
+        meld.set_mpe_pressure(0.8);
+        assert_eq!(meld.voices[0].pressure, 0.8);
+
+        // Process audio with MPE active and verify finite audible sound
+        let mut buf = AudioBuffer::silence(256);
+        let time = MusicalTime::default();
+        meld.process(&[], &mut buf, &time);
+
+        let mut energy = 0.0f32;
+        for i in 0..256 {
+            assert!(buf.left[i].is_finite());
+            assert!(buf.right[i].is_finite());
+            energy += buf.left[i] * buf.left[i];
+        }
+        assert!(energy > 0.0001, "Meld with MPE modulation must generate audible sound");
     }
 }

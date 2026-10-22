@@ -53,6 +53,7 @@ pub struct AudioTrackChannel {
     pub arm: bool,
     pub crossfade_assign: CrossfadeAssign,
     pub track_delay_ms: f32, // -100.0 .. +100.0 ms
+    pub phase_invert: bool,
     pub output_destination: OutputDestination,
     pub sends: Vec<AudioSendState>,
 
@@ -86,6 +87,7 @@ impl AudioTrackChannel {
             arm: false,
             crossfade_assign: CrossfadeAssign::Off,
             track_delay_ms: 0.0,
+            phase_invert: false,
             output_destination: OutputDestination::Master,
             sends: Vec::new(),
             delay_buf_l: vec![0.0; max_delay_frames],
@@ -99,6 +101,11 @@ impl AudioTrackChannel {
             sum_sq_l: 0.0,
             sum_sq_r: 0.0,
         }
+    }
+
+    /// Sets polarity/phase inversion ($180^\circ$ flip) for null tests and phase alignment.
+    pub fn set_phase_invert(&mut self, invert: bool) {
+        self.phase_invert = invert;
     }
 
     pub fn set_volume_db(&mut self, db: f32) {
@@ -230,6 +237,8 @@ pub struct ModularAudioMixer {
     // Internal scratch summing buffers
     master_bus_l: Vec<f32>,
     master_bus_r: Vec<f32>,
+    master_bus_l_f64: Vec<f64>,
+    master_bus_r_f64: Vec<f64>,
     resampling_bus_l: Vec<f32>,
     resampling_bus_r: Vec<f32>,
 
@@ -267,6 +276,8 @@ impl ModularAudioMixer {
             master_sum_sq_r: 0.0,
             master_bus_l: vec![0.0; 1024],
             master_bus_r: vec![0.0; 1024],
+            master_bus_l_f64: vec![0.0; 1024],
+            master_bus_r_f64: vec![0.0; 1024],
             resampling_bus_l: vec![0.0; 1024],
             resampling_bus_r: vec![0.0; 1024],
             sample_rate: sr,
@@ -380,6 +391,8 @@ impl ModularAudioMixer {
         if self.master_bus_l.len() < frames {
             self.master_bus_l.resize(frames, 0.0);
             self.master_bus_r.resize(frames, 0.0);
+            self.master_bus_l_f64.resize(frames, 0.0);
+            self.master_bus_r_f64.resize(frames, 0.0);
             self.resampling_bus_l.resize(frames, 0.0);
             self.resampling_bus_r.resize(frames, 0.0);
         }
@@ -387,6 +400,8 @@ impl ModularAudioMixer {
         for i in 0..frames {
             self.master_bus_l[i] = 0.0;
             self.master_bus_r[i] = 0.0;
+            self.master_bus_l_f64[i] = 0.0;
+            self.master_bus_r_f64[i] = 0.0;
         }
 
         for ret in &mut self.returns {
@@ -440,7 +455,8 @@ impl ModularAudioMixer {
         let theta = (ch.pan + 1.0) * 0.25 * PI;
         let pan_l = theta.cos();
         let pan_r = theta.sin();
-        let fader_gain = if is_audible { ch.volume_linear } else { 0.0 };
+        let phase_mult = if ch.phase_invert { -1.0_f32 } else { 1.0_f32 };
+        let fader_gain = if is_audible { ch.volume_linear * phase_mult } else { 0.0 };
 
         // 3. Track Delay application via circular buffer
         let delay_samps = ch.delay_samples;
@@ -507,12 +523,14 @@ impl ModularAudioMixer {
 
         let output_dest = ch.output_destination.clone();
 
-        // 7. Routing accumulation (ch borrow is released)
+        // 7. Routing accumulation into 64-bit float summing accumulator
         match output_dest {
             OutputDestination::Master => {
                 for i in 0..len {
-                    self.master_bus_l[i] += left[i];
-                    self.master_bus_r[i] += right[i];
+                    self.master_bus_l_f64[i] += left[i] as f64;
+                    self.master_bus_r_f64[i] += right[i] as f64;
+                    self.master_bus_l[i] = self.master_bus_l_f64[i] as f32;
+                    self.master_bus_r[i] = self.master_bus_r_f64[i] as f32;
                 }
             }
             OutputDestination::GroupTrack(grp_id) => {
@@ -526,8 +544,10 @@ impl ModularAudioMixer {
                     }
                 } else {
                     for i in 0..len {
-                        self.master_bus_l[i] += left[i];
-                        self.master_bus_r[i] += right[i];
+                        self.master_bus_l_f64[i] += left[i] as f64;
+                        self.master_bus_r_f64[i] += right[i] as f64;
+                        self.master_bus_l[i] = self.master_bus_l_f64[i] as f32;
+                        self.master_bus_r[i] = self.master_bus_r_f64[i] as f32;
                     }
                 }
             }
@@ -536,8 +556,10 @@ impl ModularAudioMixer {
                 for i in 0..len {
                     left[i] = self.resampling_bus_l[i];
                     right[i] = self.resampling_bus_r[i];
-                    self.master_bus_l[i] += left[i];
-                    self.master_bus_r[i] += right[i];
+                    self.master_bus_l_f64[i] += left[i] as f64;
+                    self.master_bus_r_f64[i] += right[i] as f64;
+                    self.master_bus_l[i] = self.master_bus_l_f64[i] as f32;
+                    self.master_bus_r[i] = self.master_bus_r_f64[i] as f32;
                 }
             }
             OutputDestination::External(_) => {}
@@ -584,8 +606,10 @@ impl ModularAudioMixer {
             ret.buffer_l[i] = l;
             ret.buffer_r[i] = r;
 
-            self.master_bus_l[i] += l;
-            self.master_bus_r[i] += r;
+            self.master_bus_l_f64[i] += l as f64;
+            self.master_bus_r_f64[i] += r as f64;
+            self.master_bus_l[i] = self.master_bus_l_f64[i] as f32;
+            self.master_bus_r[i] = self.master_bus_r_f64[i] as f32;
 
             let pl = l.abs();
             let pr = r.abs();
@@ -607,13 +631,15 @@ impl ModularAudioMixer {
         let len = out_left.len().min(out_right.len()).min(self.master_bus_l.len());
 
         let theta = (self.master_pan + 1.0) * 0.25 * PI;
-        let pan_l = theta.cos();
-        let pan_r = theta.sin();
-        let gain = self.master_volume_linear;
+        let pan_l = theta.cos() as f64;
+        let pan_r = theta.sin() as f64;
+        let gain = self.master_volume_linear as f64;
 
         for i in 0..len {
-            self.master_bus_l[i] *= gain * pan_l;
-            self.master_bus_r[i] *= gain * pan_r;
+            self.master_bus_l_f64[i] *= gain * pan_l;
+            self.master_bus_r_f64[i] *= gain * pan_r;
+            self.master_bus_l[i] = self.master_bus_l_f64[i] as f32;
+            self.master_bus_r[i] = self.master_bus_r_f64[i] as f32;
         }
 
         // Run master brickwall limiter (-0.3 dBFS ceiling)
@@ -642,6 +668,12 @@ impl ModularAudioMixer {
 
         self.master_rms_l = self.master_sum_sq_l.max(0.0).sqrt();
         self.master_rms_r = self.master_sum_sq_r.max(0.0).sqrt();
+    }
+
+    /// Returns references to the internal 64-bit floating point master summing accumulators (Left, Right).
+    #[inline]
+    pub fn master_bus_f64(&self) -> (&[f64], &[f64]) {
+        (&self.master_bus_l_f64, &self.master_bus_r_f64)
     }
 }
 
@@ -741,5 +773,59 @@ mod tests {
         }
         // Sample 44 onwards should have the delayed signal
         assert!(l[44] > 0.0);
+    }
+
+    #[test]
+    fn test_modular_mixer_phase_inversion_mathematical_null() {
+        let mut mixer = ModularAudioMixer::new(44100.0);
+        let ch0 = mixer.add_channel("NormalTrack", TrackType::Audio);
+        let ch1 = mixer.add_channel("PhaseInvertedTrack", TrackType::Audio);
+
+        // Turn on 180-deg phase inversion on Track 1
+        mixer.channels[ch1].set_phase_invert(true);
+
+        let frames = 512;
+        mixer.begin_block(frames);
+
+        // Feed identical sine wave signal to both channels
+        let mut l0 = vec![0.0f32; frames];
+        let mut r0 = vec![0.0f32; frames];
+        let mut l1 = vec![0.0f32; frames];
+        let mut r1 = vec![0.0f32; frames];
+
+        for i in 0..frames {
+            let s = ((i as f32) * 0.05).sin() * 0.8;
+            l0[i] = s;
+            r0[i] = s;
+            l1[i] = s;
+            r1[i] = s;
+        }
+
+        mixer.process_channel(ch0, &mut l0, &mut r0);
+        mixer.process_channel(ch1, &mut l1, &mut r1);
+
+        // 64-bit float summing accumulator must be bit-exact 0.0
+        let (bus_l_f64, bus_r_f64) = mixer.master_bus_f64();
+        for i in 0..frames {
+            assert_eq!(
+                bus_l_f64[i], 0.0,
+                "Master bus 64-bit accumulator L must be bit-exact 0.0 at frame {}",
+                i
+            );
+            assert_eq!(
+                bus_r_f64[i], 0.0,
+                "Master bus 64-bit accumulator R must be bit-exact 0.0 at frame {}",
+                i
+            );
+        }
+
+        let mut out_l = vec![0.0f32; frames];
+        let mut out_r = vec![0.0f32; frames];
+        mixer.end_block(&mut out_l, &mut out_r);
+
+        for i in 0..frames {
+            assert_eq!(out_l[i], 0.0, "Master out L must be exact 0.0 at frame {}", i);
+            assert_eq!(out_r[i], 0.0, "Master out R must be exact 0.0 at frame {}", i);
+        }
     }
 }

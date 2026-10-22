@@ -46,6 +46,8 @@ pub enum StudioShortcutAction {
     VelocityDown,               // C
     VelocityUp,                 // V
     ToggleShortcutsModal,       // ? or F1
+    ToggleMidiMapMode,          // Cmd+M
+    ToggleKeyMapMode,           // Cmd+K
 }
 
 /// Controller managing keyboard shortcuts and the interactive shortcut guide modal.
@@ -104,6 +106,12 @@ impl StudioShortcutManager {
 
                 if shift && i.key_pressed(Key::M) {
                     actions.push(StudioShortcutAction::NewMidiClip);
+                } else if !shift && !alt && i.key_pressed(Key::M) {
+                    actions.push(StudioShortcutAction::ToggleMidiMapMode);
+                }
+
+                if !shift && !alt && i.key_pressed(Key::K) {
+                    actions.push(StudioShortcutAction::ToggleKeyMapMode);
                 }
 
                 if i.key_pressed(Key::D) && !shift && !alt {
@@ -192,6 +200,8 @@ impl StudioShortcutManager {
                             ("Cmd + Shift + T", "Insert MIDI Track"),
                             ("Cmd + Option + T", "Insert Return Track"),
                             ("Cmd + Shift + M", "Insert New MIDI Clip"),
+                            ("Cmd + M", "Toggle MIDI Map Mode"),
+                            ("Cmd + K", "Toggle Key Map Mode"),
                             ("Cmd + D", "Duplicate Selected Track / Clip"),
                             ("Cmd + E", "Split Clip at Playhead"),
                             ("Cmd + J", "Consolidate Selection"),
@@ -258,6 +268,12 @@ impl StudioShortcutManager {
             }
             if shift && key == Key::M {
                 return Some(StudioShortcutAction::NewMidiClip);
+            }
+            if !shift && !alt && key == Key::M {
+                return Some(StudioShortcutAction::ToggleMidiMapMode);
+            }
+            if !shift && !alt && key == Key::K {
+                return Some(StudioShortcutAction::ToggleKeyMapMode);
             }
             if key == Key::D && !shift && !alt {
                 return Some(StudioShortcutAction::DuplicateSelected);
@@ -461,5 +477,29 @@ mod tests {
         assert!(ctx.wants_keyboard_input());
         let actions2 = manager.process_input(&ctx);
         assert!(actions2.is_empty(), "Expected single-key shortcuts to be suppressed when text input has focus, got {:?}", actions2);
+    }
+
+    #[test]
+    fn test_shortcuts_chapter31_midi_and_key_map_modes() {
+        let cmd = Modifiers::COMMAND;
+        let cmd_shift = Modifiers::COMMAND | Modifiers::SHIFT;
+
+        // Cmd+M: Toggle MIDI Map Mode
+        assert_eq!(
+            StudioShortcutManager::evaluate_shortcut(Key::M, cmd),
+            Some(StudioShortcutAction::ToggleMidiMapMode)
+        );
+
+        // Cmd+Shift+M: Insert New MIDI Clip (disambiguation)
+        assert_eq!(
+            StudioShortcutManager::evaluate_shortcut(Key::M, cmd_shift),
+            Some(StudioShortcutAction::NewMidiClip)
+        );
+
+        // Cmd+K: Toggle Key Map Mode
+        assert_eq!(
+            StudioShortcutManager::evaluate_shortcut(Key::K, cmd),
+            Some(StudioShortcutAction::ToggleKeyMapMode)
+        );
     }
 }

@@ -50,6 +50,27 @@ impl MicroCrossfade {
         let frac = (n as f32 / total_frames as f32).clamp(0.0, 1.0);
         (0.5 * PI * frac).cos()
     }
+
+    /// Calculate the number of audio frames corresponding to this crossfade duration at a given sample rate.
+    pub fn frames_at_sample_rate(&self, sample_rate: f64) -> usize {
+        ((self.duration_ms as f64 * sample_rate) / 1000.0).round().max(1.0) as usize
+    }
+
+    /// Apply equal-power crossfade between two overlapping audio slices in-place.
+    /// `out_buffer` is faded out, `in_buffer` is faded in, and the summed result is written to `output`.
+    pub fn apply_crossfade(
+        &self,
+        out_buffer: &[f32],
+        in_buffer: &[f32],
+        output: &mut [f32],
+    ) {
+        let len = out_buffer.len().min(in_buffer.len()).min(output.len());
+        for i in 0..len {
+            let fade_out = Self::fade_out_gain(i, len);
+            let fade_in = Self::fade_in_gain(i, len);
+            output[i] = out_buffer[i] * fade_out + in_buffer[i] * fade_in;
+        }
+    }
 }
 
 /// An individual take lane holding recorded or generated audio/MIDI phrase takes.
@@ -58,6 +79,7 @@ pub struct TakeLane {
     pub id: u32,
     pub name: String,
     pub is_muted: bool,
+    pub is_auditioning: bool,
     pub color_rgb: [u8; 3],
     pub clips: Vec<ArrangementClip>,
 }
@@ -68,6 +90,7 @@ impl TakeLane {
             id,
             name: name.into(),
             is_muted: false,
+            is_auditioning: false,
             color_rgb: [120, 150, 200],
             clips: Vec::new(),
         }
@@ -84,6 +107,38 @@ impl TakeLane {
             .iter()
             .filter(|c| c.timeline_start_beat < end_beat && c.timeline_end_beat() > start_beat)
             .collect()
+    }
+
+    /// Split any clip overlapping `split_beat` into two contiguous clips (Blade Tool).
+    pub fn split_at_beat(&mut self, split_beat: f64, next_clip_id: &mut u32) -> bool {
+        let mut split_occurred = false;
+        let mut new_clips = Vec::new();
+        for clip in self.clips.drain(..) {
+            if clip.timeline_start_beat < split_beat && clip.timeline_end_beat() > split_beat {
+                let orig_start = clip.timeline_start_beat;
+                let orig_dur = clip.duration_beats;
+                let left_dur = split_beat - orig_start;
+                let right_dur = orig_dur - left_dur;
+
+                let mut left_clip = clip.clone();
+                left_clip.duration_beats = left_dur;
+
+                let mut right_clip = clip;
+                *next_clip_id += 1;
+                right_clip.id = *next_clip_id;
+                right_clip.timeline_start_beat = split_beat;
+                right_clip.duration_beats = right_dur;
+                right_clip.pattern_offset_beats += left_dur;
+
+                new_clips.push(left_clip);
+                new_clips.push(right_clip);
+                split_occurred = true;
+            } else {
+                new_clips.push(clip);
+            }
+        }
+        self.clips = new_clips;
+        split_occurred
     }
 }
 
@@ -131,6 +186,50 @@ impl TrackCompingManager {
         self.take_lanes.iter().find(|l| l.id == lane_id)
     }
 
+    /// Set or clear the actively auditioned take lane.
+    /// When a take lane is auditioned, only its clips are heard in place of the main track clips.
+    pub fn set_audition_take(&mut self, lane_id: Option<u32>) {
+        self.active_take_id = lane_id;
+        for lane in &mut self.take_lanes {
+            lane.is_auditioning = Some(lane.id) == lane_id;
+        }
+    }
+
+    /// Toggle auditioning for a take lane.
+    pub fn toggle_audition_take(&mut self, lane_id: u32) {
+        if self.active_take_id == Some(lane_id) {
+            self.set_audition_take(None);
+        } else {
+            self.set_audition_take(Some(lane_id));
+        }
+    }
+
+    /// Returns true if a specific take lane is currently auditioned.
+    pub fn is_lane_auditioning(&self, lane_id: u32) -> bool {
+        self.active_take_id == Some(lane_id)
+    }
+
+    /// Retrieve the clips that should be rendered: either the auditioned take lane's clips,
+    /// or the main track's clips if no take lane is being auditioned.
+    pub fn get_effective_clips<'a>(&'a self, main_clips: &'a [ArrangementClip]) -> &'a [ArrangementClip] {
+        if let Some(lane_id) = self.active_take_id {
+            if let Some(lane) = self.get_take_lane(lane_id) {
+                return &lane.clips;
+            }
+        }
+        main_clips
+    }
+
+    /// Blade slice tool on a specific take lane: splits any clip overlapping `split_beat`.
+    pub fn blade_split_take_lane(&mut self, lane_id: u32, split_beat: f64) -> Result<bool, String> {
+        let next_id = &mut self.next_clip_id;
+        if let Some(lane) = self.take_lanes.iter_mut().find(|l| l.id == lane_id) {
+            Ok(lane.split_at_beat(split_beat, next_id))
+        } else {
+            Err(format!("Take lane {} not found", lane_id))
+        }
+    }
+
     /// Non-destructively comp a timeline region `[start_beat, end_beat)` from `lane_id` into `main_clips`.
     ///
     /// 1. Slices and clears existing clips on the main track in `[start_beat, end_beat)`.
@@ -162,6 +261,8 @@ impl TrackCompingManager {
         let mut new_main_clips = Vec::new();
         let mut split_left_id = None;
         let mut split_right_id = None;
+        let mut adjacent_left_id = None;
+        let mut adjacent_right_id = None;
 
         for clip in main_clips.drain(..) {
             let c_start = clip.timeline_start_beat;
@@ -169,6 +270,12 @@ impl TrackCompingManager {
 
             if c_end <= start_beat || c_start >= end_beat {
                 // Completely outside range: keep unmodified
+                if (c_end - start_beat).abs() < 1e-4 {
+                    adjacent_left_id = Some(clip.id);
+                }
+                if (c_start - end_beat).abs() < 1e-4 {
+                    adjacent_right_id = Some(clip.id);
+                }
                 new_main_clips.push(clip);
             } else if c_start < start_beat && c_end > end_beat {
                 // Surrounds the comp region: split into left piece and right piece
@@ -238,11 +345,13 @@ impl TrackCompingManager {
 
         // --- Step 3: Insert automatic micro-crossfades at splice junctions ---
         let fade_ms = crossfade_ms.clamp(4.0, 10.0);
+        let outbound_left = split_left_id.or(adjacent_left_id);
+        let inbound_right = split_right_id.or(adjacent_right_id);
 
-        if let (Some(left_id), Some(first_id)) = (split_left_id, first_comped_id) {
+        if let (Some(left_id), Some(first_id)) = (outbound_left, first_comped_id) {
             self.crossfades.push(MicroCrossfade::new(fade_ms, start_beat, left_id, first_id));
         }
-        if let (Some(last_id), Some(right_id)) = (last_comped_id, split_right_id) {
+        if let (Some(last_id), Some(right_id)) = (last_comped_id, inbound_right) {
             self.crossfades.push(MicroCrossfade::new(fade_ms, end_beat, last_id, right_id));
         }
 
@@ -310,5 +419,97 @@ mod tests {
         let out_gain = MicroCrossfade::fade_out_gain(50, 100);
         let power = in_gain * in_gain + out_gain * out_gain;
         assert!((power - 1.0).abs() < 1e-4, "Equal-power crossfade must sum to 1.0 power");
+    }
+
+    #[test]
+    fn test_take_lane_auditioning_and_effective_clips() {
+        let mut manager = TrackCompingManager::new();
+        let lane1_id = manager.add_take_lane("Vocal Take 1");
+        let lane2_id = manager.add_take_lane("Vocal Take 2");
+
+        let clip1 = ArrangementClip::new(101, "T1", 0.0, 4.0, ClipPattern::Midi(MidiPattern::new(4.0)));
+        let clip2 = ArrangementClip::new(102, "T2", 0.0, 4.0, ClipPattern::Midi(MidiPattern::new(4.0)));
+        manager.get_take_lane_mut(lane1_id).unwrap().add_clip(clip1.clone());
+        manager.get_take_lane_mut(lane2_id).unwrap().add_clip(clip2.clone());
+
+        let main_clip = ArrangementClip::new(1, "Main Comp", 0.0, 4.0, ClipPattern::Midi(MidiPattern::new(4.0)));
+        let main_clips = vec![main_clip];
+
+        // Initially no lane auditioned: effective clips must be main track clips
+        assert!(!manager.is_lane_auditioning(lane1_id));
+        assert!(!manager.is_lane_auditioning(lane2_id));
+        assert_eq!(manager.get_effective_clips(&main_clips)[0].id, 1);
+
+        // Audition Take 1
+        manager.set_audition_take(Some(lane1_id));
+        assert!(manager.is_lane_auditioning(lane1_id));
+        assert!(!manager.is_lane_auditioning(lane2_id));
+        assert!(manager.get_take_lane(lane1_id).unwrap().is_auditioning);
+        assert!(!manager.get_take_lane(lane2_id).unwrap().is_auditioning);
+        assert_eq!(manager.get_effective_clips(&main_clips)[0].id, 101);
+
+        // Toggle audition to Take 2
+        manager.toggle_audition_take(lane2_id);
+        assert!(!manager.is_lane_auditioning(lane1_id));
+        assert!(manager.is_lane_auditioning(lane2_id));
+        assert_eq!(manager.get_effective_clips(&main_clips)[0].id, 102);
+
+        // Toggle Take 2 off: back to main clips
+        manager.toggle_audition_take(lane2_id);
+        assert!(!manager.is_lane_auditioning(lane1_id));
+        assert!(!manager.is_lane_auditioning(lane2_id));
+        assert_eq!(manager.get_effective_clips(&main_clips)[0].id, 1);
+    }
+
+    #[test]
+    fn test_take_lane_blade_splicing_and_4ms_audio_crossfade() {
+        let mut manager = TrackCompingManager::new();
+        let lane_id = manager.add_take_lane("Guitar Take");
+
+        let clip = ArrangementClip::new(50, "Full Take", 0.0, 16.0, ClipPattern::Midi(MidiPattern::new(16.0)));
+        manager.get_take_lane_mut(lane_id).unwrap().add_clip(clip);
+
+        // Blade slice at beat 6.0
+        let split = manager.blade_split_take_lane(lane_id, 6.0).expect("Blade slice must succeed");
+        assert!(split, "Clip should be split at beat 6.0");
+
+        let lane = manager.get_take_lane(lane_id).unwrap();
+        assert_eq!(lane.clips.len(), 2);
+        assert_eq!(lane.clips[0].timeline_start_beat, 0.0);
+        assert_eq!(lane.clips[0].duration_beats, 6.0);
+        assert_eq!(lane.clips[1].timeline_start_beat, 6.0);
+        assert_eq!(lane.clips[1].duration_beats, 10.0);
+
+        // Verify 4ms crossfade audio frames calculation and buffer crossfade
+        let xfade = MicroCrossfade::new(4.0, 6.0, lane.clips[0].id, lane.clips[1].id);
+        assert_eq!(xfade.duration_ms, 4.0);
+        assert_eq!(xfade.beat_position, 6.0);
+
+        let frames_44k = xfade.frames_at_sample_rate(44100.0);
+        assert_eq!(frames_44k, 176, "4ms @ 44.1 kHz = 176 frames");
+
+        let frames_48k = xfade.frames_at_sample_rate(48000.0);
+        assert_eq!(frames_48k, 192, "4ms @ 48.0 kHz = 192 frames");
+
+        let frames_96k = xfade.frames_at_sample_rate(96000.0);
+        assert_eq!(frames_96k, 384, "4ms @ 96.0 kHz = 384 frames");
+
+        // Apply equal power crossfade to audio buffers
+        let out_buf = vec![1.0f32; frames_44k];
+        let in_buf = vec![0.5f32; frames_44k];
+        let mut mixed = vec![0.0f32; frames_44k];
+
+        xfade.apply_crossfade(&out_buf, &in_buf, &mut mixed);
+
+        // At frame 0: out_buf full (1.0), in_buf zero (0.0) -> result ~1.0
+        assert!((mixed[0] - 1.0).abs() < 1e-4);
+
+        // At midpoint: out_buf * 0.7071 + in_buf * 0.7071 = 1.0 * 0.7071 + 0.5 * 0.7071 = 1.0606
+        let mid = frames_44k / 2;
+        let expected_mid = 1.0 * (0.25 * PI).cos() + 0.5 * (0.25 * PI).sin();
+        assert!((mixed[mid] - expected_mid).abs() < 1e-3);
+
+        // At end: out_buf zero (0.0), in_buf full (0.5) -> result ~0.5
+        assert!((mixed[frames_44k - 1] - 0.5).abs() < 1e-2);
     }
 }

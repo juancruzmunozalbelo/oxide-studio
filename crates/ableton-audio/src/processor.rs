@@ -14,6 +14,9 @@ pub const MAX_BLOCK_FRAMES: usize = 1024;
 
 // Parameter IDs for AudioCommand::SetParameter
 pub const PARAM_ID_MASTER_VOL: u32 = 1;
+pub const PARAM_ID_TEST_TONE_ENABLE: u32 = 2;
+pub const PARAM_ID_TEST_TONE_FREQ: u32 = 3;
+pub const PARAM_ID_TEST_TONE_VOL: u32 = 4;
 pub const PARAM_ID_TRACK_VOL_BASE: u32 = 1000;
 pub const PARAM_ID_TRACK_PAN_BASE: u32 = 1100;
 pub const PARAM_ID_TRACK_MUTE_BASE: u32 = 1200;
@@ -35,6 +38,11 @@ pub struct AudioEngineProcessor {
     pub send_a: [f32; 16],
     pub send_b: [f32; 16],
     pub crossfader: f32,
+    pub test_tone_enabled: bool,
+    pub test_tone_freq: f32,
+    pub test_tone_volume: f32,
+    pub test_tone_phase: f32,
+    pub cpu_meter: crate::engine::CpuLoadMeter,
     handles: AudioThreadHandles,
 
     // Pre-allocated zero-allocation planar scratch buffers
@@ -73,6 +81,11 @@ impl AudioEngineProcessor {
             send_a: [0.0; 16],
             send_b: [0.0; 16],
             crossfader: 0.0,
+            test_tone_enabled: false,
+            test_tone_freq: 440.0,
+            test_tone_volume: 0.1,
+            test_tone_phase: 0.0,
+            cpu_meter: crate::engine::CpuLoadMeter::new(),
             handles,
             scratch_l: [0.0; MAX_BLOCK_FRAMES],
             scratch_r: [0.0; MAX_BLOCK_FRAMES],
@@ -83,6 +96,13 @@ impl AudioEngineProcessor {
             osc_buffer: [0.0; 256],
             osc_write_pos: 0,
         }
+    }
+
+    /// Enable or disable the Chapter 2 test tone generator (default 440 Hz standard pitch).
+    pub fn enable_test_tone(&mut self, enabled: bool, freq_hz: f32, volume: f32) {
+        self.test_tone_enabled = enabled;
+        self.test_tone_freq = freq_hz.clamp(20.0, 20000.0);
+        self.test_tone_volume = volume.clamp(0.0, 1.0);
     }
 
     /// Process incoming commands from the SPSC ring buffer. Zero allocations.
@@ -97,6 +117,9 @@ impl AudioEngineProcessor {
         let send_a = &mut self.send_a;
         let send_b = &mut self.send_b;
         let crossfader = &mut self.crossfader;
+        let test_tone_enabled = &mut self.test_tone_enabled;
+        let test_tone_freq = &mut self.test_tone_freq;
+        let test_tone_volume = &mut self.test_tone_volume;
 
         self.handles.drain_commands(|cmd| match cmd {
             AudioCommand::Play => {
@@ -223,26 +246,24 @@ impl AudioEngineProcessor {
                     }
                 } else if param_id == PARAM_ID_CROSSFADER {
                     *crossfader = value.clamp(-1.0, 1.0);
+                } else if param_id == PARAM_ID_TEST_TONE_ENABLE {
+                    *test_tone_enabled = value > 0.5;
+                } else if param_id == PARAM_ID_TEST_TONE_FREQ {
+                    *test_tone_freq = value.clamp(20.0, 20000.0);
+                } else if param_id == PARAM_ID_TEST_TONE_VOL {
+                    *test_tone_volume = value.clamp(0.0, 1.0);
                 }
             }
             _ => {}
         });
     }
 
-    /// Primary audio callback executing on real-time IOThread.
-    /// Interleaved output format: `[L0, R0, L1, R1, ...]`.
-    /// Zero heap allocations during steady-state playback.
-    pub fn process_interleaved(&mut self, output: &mut [f32]) {
-        let total_frames = output.len() / 2;
-        let frames = total_frames.min(MAX_BLOCK_FRAMES);
-
-        // 1. Drain SPSC commands
-        self.process_commands();
-
-        // 2. Advance transport
+    /// Process a sub-block of up to MAX_BLOCK_FRAMES frames.
+    fn process_sub_block(&mut self, output_chunk: &mut [f32], frames: usize) {
+        // 1. Advance transport
         self.transport.advance_frames(frames, self.sample_rate as f64);
 
-        // 3. Clear scratch buffers
+        // 2. Clear scratch buffers
         self.scratch_l[..frames].fill(0.0);
         self.scratch_r[..frames].fill(0.0);
         self.synth_buf_l[..frames].fill(0.0);
@@ -250,20 +271,20 @@ impl AudioEngineProcessor {
         self.drum_buf_l[..frames].fill(0.0);
         self.drum_buf_r[..frames].fill(0.0);
 
-        // 4. Render Synth Track (Track 0)
+        // 3. Render Synth Track (Track 0)
         for i in 0..frames {
             let s = self.synth.process_sample();
             self.synth_buf_l[i] = s;
             self.synth_buf_r[i] = s;
         }
 
-        // 5. Render Drum Rack (Track 1)
+        // 4. Render Drum Rack (Track 1)
         self.drum_rack.process_block(
             &mut self.drum_buf_l[..frames],
             &mut self.drum_buf_r[..frames],
         );
 
-        // 6. Process through Mixer tracks
+        // 5. Process through Mixer tracks
         let synth_audible = self.mixer.process_track(
             0,
             &mut self.synth_buf_l[..frames],
@@ -303,7 +324,7 @@ impl AudioEngineProcessor {
 
         let mut any_track_audible = false;
 
-        // 7. Sum audible tracks into Master Planar Scratch
+        // 6. Sum audible tracks into Master Planar Scratch
         if synth_audible && !self.mixer.tracks[0].mute && self.mixer.tracks[0].volume_linear > 0.001 {
             any_track_audible = true;
             for i in 0..frames {
@@ -319,7 +340,9 @@ impl AudioEngineProcessor {
             }
         }
 
-        if !any_track_audible {
+        let test_tone_active = self.test_tone_enabled && self.test_tone_volume > 0.0001;
+
+        if !any_track_audible && !test_tone_active {
             self.scratch_l[..frames].fill(0.0);
             self.scratch_r[..frames].fill(0.0);
             self.mixer.master_peak_l = 0.0;
@@ -327,21 +350,37 @@ impl AudioEngineProcessor {
             self.mixer.master_rms_l = 0.0;
             self.mixer.master_rms_r = 0.0;
         } else {
-            // 8. Process Master Insert FX (Saturator -> Delay -> Reverb)
-            self.saturator.process_block(
-                &mut self.scratch_l[..frames],
-                &mut self.scratch_r[..frames],
-            );
-            self.delay.process_block(
-                &mut self.scratch_l[..frames],
-                &mut self.scratch_r[..frames],
-            );
-            self.reverb.process_block(
-                &mut self.scratch_l[..frames],
-                &mut self.scratch_r[..frames],
-            );
+            if any_track_audible {
+                // 7. Process Master Insert FX (Saturator -> Delay -> Reverb)
+                self.saturator.process_block(
+                    &mut self.scratch_l[..frames],
+                    &mut self.scratch_r[..frames],
+                );
+                self.delay.process_block(
+                    &mut self.scratch_l[..frames],
+                    &mut self.scratch_r[..frames],
+                );
+                self.reverb.process_block(
+                    &mut self.scratch_l[..frames],
+                    &mut self.scratch_r[..frames],
+                );
+            } else {
+                self.scratch_l[..frames].fill(0.0);
+                self.scratch_r[..frames].fill(0.0);
+            }
 
-            // 9. Master Bus & Brickwall Limiter
+            // Test Tone Generator (Chapter 2: Pure reference sine tone injected into master output)
+            if test_tone_active {
+                let phase_step = (self.test_tone_freq * 2.0 * std::f32::consts::PI) / self.sample_rate;
+                for i in 0..frames {
+                    let tone = self.test_tone_phase.sin() * self.test_tone_volume;
+                    self.test_tone_phase = (self.test_tone_phase + phase_step).rem_euclid(2.0 * std::f32::consts::PI);
+                    self.scratch_l[i] += tone;
+                    self.scratch_r[i] += tone;
+                }
+            }
+
+            // 8. Master Bus & Brickwall Limiter
             let master_vol = self.params.get(PARAM_MASTER_VOL);
             self.mixer.master_volume_linear = master_vol;
             if master_vol <= 0.001 {
@@ -359,15 +398,57 @@ impl AudioEngineProcessor {
             }
         }
 
-        // 10. Update Oscilloscope & Spectrum Telemetry
+        // 9. Update Oscilloscope ring buffer
         for i in 0..frames {
             let mono_sample = 0.5 * (self.scratch_l[i] + self.scratch_r[i]);
             self.osc_buffer[self.osc_write_pos] = mono_sample;
             self.osc_write_pos = (self.osc_write_pos + 1) % 256;
         }
 
+        // 10. Interleave into output chunk slice
+        for (i, frame) in output_chunk.chunks_exact_mut(2).enumerate().take(frames) {
+            frame[0] = self.scratch_l[i];
+            frame[1] = self.scratch_r[i];
+        }
+    }
+
+    /// Primary audio callback executing on real-time IOThread.
+    /// Interleaved output format: `[L0, R0, L1, R1, ...]`.
+    /// Supports arbitrary buffer sizes (including standard Live 12 sizes 64..2048)
+    /// via zero-allocation sub-block processing.
+    pub fn process_interleaved(&mut self, output: &mut [f32]) {
+        let start_time = std::time::Instant::now();
+
+        // 1. Drain SPSC commands once at the start of callback
+        self.process_commands();
+
+        let total_frames = output.len() / 2;
+        if total_frames == 0 {
+            return;
+        }
+
+        // 2. Process in sub-blocks of up to MAX_BLOCK_FRAMES (1024)
+        let mut frame_offset = 0;
+        while frame_offset < total_frames {
+            let chunk_frames = (total_frames - frame_offset).min(MAX_BLOCK_FRAMES);
+            let sample_start = frame_offset * 2;
+            let sample_end = sample_start + chunk_frames * 2;
+            let output_chunk = &mut output[sample_start..sample_end];
+
+            self.process_sub_block(output_chunk, chunk_frames);
+            frame_offset += chunk_frames;
+        }
+
+        // 3. Compute real-time CPU load (callback duration / audio buffer duration)
+        let elapsed_sec = start_time.elapsed().as_secs_f32();
+        let buffer_sec = total_frames as f32 / self.sample_rate;
+        self.cpu_meter.record_block(elapsed_sec, buffer_sec);
+        let cpu_load = self.cpu_meter.current().min(1.0);
+
+        // 4. Update Telemetry
         let mut telemetry = AudioTelemetry::new();
         telemetry.playhead_beat = self.transport.beat;
+        telemetry.cpu_load = cpu_load;
         telemetry.master_peak_l = self.mixer.master_peak_l;
         telemetry.master_peak_r = self.mixer.master_peak_r;
         telemetry.master_rms_l = self.mixer.master_rms_l;
@@ -392,12 +473,6 @@ impl AudioEngineProcessor {
 
         // Push telemetry without blocking
         self.handles.push_telemetry(telemetry);
-
-        // 11. Interleave into output slice
-        for (i, frame) in output.chunks_exact_mut(2).enumerate().take(frames) {
-            frame[0] = self.scratch_l[i];
-            frame[1] = self.scratch_r[i];
-        }
     }
 }
 
@@ -583,6 +658,92 @@ mod tests {
         assert_eq!(energy, 0.0, "Master volume at 0 must render absolute silence");
         assert_eq!(proc.mixer.master_peak_l, 0.0);
         assert_eq!(proc.mixer.master_peak_r, 0.0);
+    }
+
+    #[test]
+    fn test_buffer_sizing_64_to_2048_frames() {
+        let buffer_sizes = [64, 128, 256, 512, 1024, 2048];
+        let sample_rates = [44100.0, 48000.0, 88200.0, 96000.0];
+
+        for &sr in &sample_rates {
+            for &bs in &buffer_sizes {
+                let queues = AudioQueues::new();
+                let (mut ui, audio) = queues.split();
+                let params = AtomicParameters::new();
+                let mut proc = AudioEngineProcessor::new(sr, audio, params);
+
+                ui.send_command(AudioCommand::Play);
+                ui.send_command(AudioCommand::NoteOn {
+                    track_id: 0,
+                    note: 60,
+                    velocity: 100,
+                });
+
+                // Buffer is stereo interleaved: len = bs * 2
+                let mut output = vec![0.0f32; bs * 2];
+
+                // Process enough blocks to prime the 128-sample lookahead buffer in MasterLimiter
+                let num_blocks = (256 / bs).max(1) + 1;
+                for _ in 0..num_blocks {
+                    output.fill(0.0);
+                    proc.process_interleaved(&mut output);
+                }
+
+                // Entire buffer must have energy rendered (especially at 2048 frames)
+                let half_samples = bs; // bs samples = bs / 2 stereo frames
+                let first_half_energy: f32 = output[..half_samples].iter().map(|s| s * s).sum();
+                let second_half_energy: f32 = output[half_samples..].iter().map(|s| s * s).sum();
+
+                assert!(
+                    first_half_energy > 1e-4,
+                    "First half must have audio at bs={}, sr={}",
+                    bs,
+                    sr
+                );
+                assert!(
+                    second_half_energy > 1e-4,
+                    "Second half must have audio at bs={}, sr={}",
+                    bs,
+                    sr
+                );
+
+                // Verify telemetry received
+                let telem = ui.poll_telemetry();
+                assert!(telem.is_some(), "Telemetry must be emitted at bs={}, sr={}", bs, sr);
+                let t = telem.unwrap();
+                assert!(t.cpu_load >= 0.0 && t.cpu_load <= 1.0, "CPU load must be valid percentage");
+            }
+        }
+    }
+
+    #[test]
+    fn test_test_tone_generator_and_cpu_load() {
+        let queues = AudioQueues::new();
+        let (mut ui, audio) = queues.split();
+        let params = AtomicParameters::new();
+        let mut proc = AudioEngineProcessor::new(44100.0, audio, params);
+
+        // Turn on 440 Hz test tone at 0.5 volume
+        proc.enable_test_tone(true, 440.0, 0.5);
+
+        let mut output = [0.0f32; 1024];
+        proc.process_interleaved(&mut output);
+
+        let energy: f32 = output.iter().map(|s| s * s).sum();
+        assert!(energy > 10.0, "Test tone must render strong audio energy");
+
+        let telem = ui.poll_telemetry().expect("Telemetry");
+        assert!(telem.master_peak_l > 0.1, "Test tone must trigger master VU meter");
+        assert!(telem.master_peak_r > 0.1, "Test tone must trigger master VU meter");
+
+        // Turn test tone off
+        proc.enable_test_tone(false, 440.0, 0.0);
+        let mut silent_output = [0.0f32; 1024];
+        // Process two blocks to flush lookahead buffer
+        proc.process_interleaved(&mut silent_output);
+        proc.process_interleaved(&mut silent_output);
+        let energy_off: f32 = silent_output.iter().map(|s| s * s).sum();
+        assert_eq!(energy_off, 0.0, "Disabling test tone must return to silence");
     }
 }
 

@@ -6,11 +6,37 @@
 //! - Lock-free SPSC command and telemetry queues via `rtrb`
 //! - Parameter smoothing with `portable-atomic::AtomicF32`
 
+pub mod engine;
+pub mod fact_sheet;
 pub mod mixer;
 pub mod parameters;
+pub mod preferences;
 pub mod processor;
 pub mod queues;
+pub mod recording;
 pub mod stream;
+
+pub use fact_sheet::{
+    compute_null_test, verify_64bit_summing_neutrality, verify_mixer_fader_mute_silence,
+    verify_phase_inversion_null, verify_sample_rate_conversion_neutrality,
+    verify_undithered_rendering_neutrality, NullTestReport,
+};
+
+pub use engine::{
+    CpuLoadMeter, EngineArchitectureState, MultiCoreDspDispatcher, WorkerScratchBuffer,
+    ZeroAllocAudit, CPU_LOAD_EMA_ALPHA, CPU_PEAK_DECAY,
+};
+
+pub use preferences::{
+    AudioHardwarePreferences, AudioLatencySummary, MAX_BUFFER_SIZE, MIN_BUFFER_SIZE,
+    SUPPORTED_BUFFER_SIZES, SUPPORTED_SAMPLE_RATES,
+};
+pub use recording::{
+    CommittedTake, DelayCompLine, DriverLatencyCompensator, HardwareInputBus, HardwareIoMatrix,
+    HardwareOutputBus, InputChannelMode, IoRoutingError, MultiTrackRecorder, RecordingMode,
+    TrackIoRoute, TrackRecorderState, DEFAULT_TAKE_CAPACITY_FRAMES, MAX_DELAY_COMP_FRAMES,
+    MAX_HARDWARE_INPUT_BUSES, MAX_HARDWARE_OUTPUT_BUSES, MAX_RECORDING_TRACKS,
+};
 
 pub use mixer::{
     AudioReturnChannel, AudioSendState, AudioTrackChannel, ModularAudioMixer, MAX_DELAY_MS,
@@ -22,7 +48,12 @@ pub use parameters::{
     PARAM_SYNTH_MACRO_X, PARAM_SYNTH_MACRO_Y, PARAM_SYNTH_RESONANCE, PARAM_TRACK_PAN_BASE,
     PARAM_TRACK_VOL_BASE,
 };
-pub use processor::{AudioEngineProcessor, MAX_BLOCK_FRAMES};
+pub use processor::{
+    AudioEngineProcessor, MAX_BLOCK_FRAMES, PARAM_ID_CROSSFADER, PARAM_ID_MASTER_VOL,
+    PARAM_ID_TEST_TONE_ENABLE, PARAM_ID_TEST_TONE_FREQ, PARAM_ID_TEST_TONE_VOL,
+    PARAM_ID_TRACK_MUTE_BASE, PARAM_ID_TRACK_PAN_BASE, PARAM_ID_TRACK_SEND_A_BASE,
+    PARAM_ID_TRACK_SEND_B_BASE, PARAM_ID_TRACK_SOLO_BASE, PARAM_ID_TRACK_VOL_BASE,
+};
 pub use queues::{
     AudioQueues, AudioThreadHandles, UiAudioHandles, DEFAULT_COMMAND_QUEUE_CAPACITY,
     DEFAULT_TELEMETRY_QUEUE_CAPACITY,

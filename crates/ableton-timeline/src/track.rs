@@ -10,6 +10,7 @@
 //! - Embedded Take Lanes comping manager and Multi-lane parameter automation.
 
 use serde::{Deserialize, Serialize};
+use ableton_core::TrackArchetype;
 use crate::arrangement::ArrangementClip;
 use crate::automation::MultiLaneAutomation;
 use crate::comping::TrackCompingManager;
@@ -22,6 +23,30 @@ pub enum TrackType {
     Group,
     Return,
     Master,
+}
+
+impl From<TrackArchetype> for TrackType {
+    fn from(arch: TrackArchetype) -> Self {
+        match arch {
+            TrackArchetype::Audio => TrackType::Audio,
+            TrackArchetype::Midi => TrackType::Midi,
+            TrackArchetype::Return => TrackType::Return,
+            TrackArchetype::Master => TrackType::Master,
+            TrackArchetype::Group => TrackType::Group,
+        }
+    }
+}
+
+impl From<TrackType> for TrackArchetype {
+    fn from(tt: TrackType) -> Self {
+        match tt {
+            TrackType::Audio => TrackArchetype::Audio,
+            TrackType::Midi => TrackArchetype::Midi,
+            TrackType::Return => TrackArchetype::Return,
+            TrackType::Master => TrackArchetype::Master,
+            TrackType::Group => TrackArchetype::Group,
+        }
+    }
 }
 
 /// 3-way DJ Crossfader assignment.
@@ -154,6 +179,28 @@ impl Track {
     /// Add an arrangement clip.
     pub fn add_clip(&mut self, clip: ArrangementClip) {
         self.clips.push(clip);
+    }
+
+    /// Comp a region from a take lane into this track's main arrangement clips with automatic micro-crossfades.
+    pub fn comp_take_region(
+        &mut self,
+        lane_id: u32,
+        start_beat: f64,
+        end_beat: f64,
+        crossfade_ms: f32,
+    ) -> Result<usize, String> {
+        self.comping
+            .comp_region_to_main(&mut self.clips, lane_id, start_beat, end_beat, crossfade_ms)
+    }
+
+    /// Set or clear the actively auditioned take lane for this track.
+    pub fn set_audition_take(&mut self, lane_id: Option<u32>) {
+        self.comping.set_audition_take(lane_id);
+    }
+
+    /// Returns the effective clips for playback (auditioned take lane's clips if active, otherwise main clips).
+    pub fn effective_clips(&self) -> &[ArrangementClip] {
+        self.comping.get_effective_clips(&self.clips)
     }
 }
 

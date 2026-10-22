@@ -31,7 +31,10 @@ use crate::theme::{
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LaunchQuantization {
+    Bar4,
+    Bar2,
     Bar1,
+    Half,
     Quarter,
     Eighth,
     Sixteenth,
@@ -41,11 +44,27 @@ pub enum LaunchQuantization {
 impl LaunchQuantization {
     pub fn name(&self) -> &'static str {
         match self {
+            LaunchQuantization::Bar4 => "4 Bars",
+            LaunchQuantization::Bar2 => "2 Bars",
             LaunchQuantization::Bar1 => "1 Bar",
+            LaunchQuantization::Half => "1/2",
             LaunchQuantization::Quarter => "1/4",
             LaunchQuantization::Eighth => "1/8",
             LaunchQuantization::Sixteenth => "1/16",
             LaunchQuantization::None => "None",
+        }
+    }
+
+    pub fn to_quantize_mode(&self) -> ableton_timeline::QuantizeMode {
+        match self {
+            LaunchQuantization::Bar4 => ableton_timeline::QuantizeMode::FourBars,
+            LaunchQuantization::Bar2 => ableton_timeline::QuantizeMode::TwoBars,
+            LaunchQuantization::Bar1 => ableton_timeline::QuantizeMode::OneBar,
+            LaunchQuantization::Half => ableton_timeline::QuantizeMode::Half,
+            LaunchQuantization::Quarter => ableton_timeline::QuantizeMode::Quarter,
+            LaunchQuantization::Eighth => ableton_timeline::QuantizeMode::Eighth,
+            LaunchQuantization::Sixteenth => ableton_timeline::QuantizeMode::Sixteenth,
+            LaunchQuantization::None => ableton_timeline::QuantizeMode::Immediate,
         }
     }
 }
@@ -307,7 +326,10 @@ pub fn render_session_matrix(
             .width(60.0)
             .show_ui(ui, |ui| {
                 for q in &[
+                    LaunchQuantization::Bar4,
+                    LaunchQuantization::Bar2,
                     LaunchQuantization::Bar1,
+                    LaunchQuantization::Half,
                     LaunchQuantization::Quarter,
                     LaunchQuantization::Eighth,
                     LaunchQuantization::Sixteenth,
@@ -2043,5 +2065,25 @@ mod tests {
             source.contains("ui.spacing_mut().item_spacing = vec2(0.0, 0.0);"),
             "session_matrix.rs must set item_spacing to vec2(0.0, 0.0)"
         );
+    }
+
+    #[test]
+    fn test_launch_quantization_modes_conversion() {
+        let cases = [
+            (LaunchQuantization::Bar4, "4 Bars", Some(16.0)),
+            (LaunchQuantization::Bar2, "2 Bars", Some(8.0)),
+            (LaunchQuantization::Bar1, "1 Bar", Some(4.0)),
+            (LaunchQuantization::Half, "1/2", Some(2.0)),
+            (LaunchQuantization::Quarter, "1/4", Some(1.0)),
+            (LaunchQuantization::Eighth, "1/8", Some(0.5)),
+            (LaunchQuantization::Sixteenth, "1/16", Some(0.25)),
+            (LaunchQuantization::None, "None", None),
+        ];
+
+        for (lq, expected_name, expected_interval) in cases {
+            assert_eq!(lq.name(), expected_name);
+            let qm = lq.to_quantize_mode();
+            assert_eq!(qm.interval_beats(), expected_interval);
+        }
     }
 }

@@ -396,6 +396,224 @@ impl AudioEffectDevice for DeviceChain {
     }
 }
 
+// -----------------------------------------------------------------------------
+// Live 12 Chapter 24 Rack Macro & Variation Domain Models
+// -----------------------------------------------------------------------------
+
+pub const MAX_RACK_MACROS: usize = 16;
+pub const DEFAULT_RACK_MACROS: usize = 8;
+
+/// Live 12 Rack Macro Knob model (1..16 macros per Rack).
+#[derive(Debug, Clone, PartialEq)]
+#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
+pub struct RackMacro {
+    pub name: String,
+    pub value: f32, // Normalized 0.0 .. 1.0
+    pub min_value: f32,
+    pub max_value: f32,
+    pub unit: String,
+    pub excluded_from_randomization: bool,
+}
+
+impl RackMacro {
+    pub fn new(name: impl Into<String>) -> Self {
+        Self {
+            name: name.into(),
+            value: 0.0,
+            min_value: 0.0,
+            max_value: 1.0,
+            unit: "%".to_string(),
+            excluded_from_randomization: false,
+        }
+    }
+
+    pub fn with_range(mut self, min: f32, max: f32, unit: impl Into<String>) -> Self {
+        self.min_value = min;
+        self.max_value = max;
+        self.unit = unit.into();
+        self
+    }
+
+    pub fn display_value(&self) -> f32 {
+        self.min_value + self.value.clamp(0.0, 1.0) * (self.max_value - self.min_value)
+    }
+
+    pub fn format_display(&self) -> String {
+        let val = self.display_value();
+        if self.unit == "Hz" {
+            if val >= 1000.0 {
+                format!("{:.2} kHz", val / 1000.0)
+            } else {
+                format!("{:.1} Hz", val)
+            }
+        } else if self.unit == "dB" {
+            format!("{:.1} dB", val)
+        } else if self.unit == "%" {
+            format!("{:.0}%", val * 100.0)
+        } else if self.unit == "st" {
+            format!("{:+.1} st", val)
+        } else {
+            format!("{:.2} {}", val, self.unit)
+        }
+    }
+}
+
+/// Macro snapshot variation (Live 11 & 12 Chapter 24).
+#[derive(Debug, Clone, PartialEq)]
+#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
+pub struct MacroVariation {
+    pub name: String,
+    pub values: Vec<f32>, // Snapshot of macro values [0.0 .. 1.0]
+}
+
+/// Linear / Inverted range mapping for macro-to-parameter modulation.
+#[derive(Debug, Clone, Copy, PartialEq)]
+#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
+pub struct MacroMappingRange {
+    pub min: f32,
+    pub max: f32,
+}
+
+impl MacroMappingRange {
+    pub const fn new(min: f32, max: f32) -> Self {
+        Self { min, max }
+    }
+
+    pub fn map(&self, norm: f32) -> f32 {
+        let t = norm.clamp(0.0, 1.0);
+        self.min + t * (self.max - self.min)
+    }
+}
+
+/// Dynamic 1..16 Macro system with Macro Variations and Randomization.
+#[derive(Debug, Clone, PartialEq)]
+#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
+pub struct RackMacroSystem {
+    pub macros: Vec<RackMacro>,
+    pub variations: Vec<MacroVariation>,
+    pub active_variation: Option<usize>,
+}
+
+impl RackMacroSystem {
+    pub fn new(num_macros: usize) -> Self {
+        let count = num_macros.clamp(1, MAX_RACK_MACROS);
+        let macros = (1..=count)
+            .map(|i| RackMacro::new(format!("Macro {}", i)))
+            .collect();
+        Self {
+            macros,
+            variations: Vec::new(),
+            active_variation: None,
+        }
+    }
+
+    pub fn macro_count(&self) -> usize {
+        self.macros.len()
+    }
+
+    pub fn set_macro_count(&mut self, count: usize) {
+        let target = count.clamp(1, MAX_RACK_MACROS);
+        if target > self.macros.len() {
+            for i in (self.macros.len() + 1)..=target {
+                self.macros.push(RackMacro::new(format!("Macro {}", i)));
+            }
+        } else if target < self.macros.len() {
+            self.macros.truncate(target);
+        }
+    }
+
+    pub fn get_macro(&self, index: usize) -> Option<&RackMacro> {
+        self.macros.get(index)
+    }
+
+    pub fn get_macro_mut(&mut self, index: usize) -> Option<&mut RackMacro> {
+        self.macros.get_mut(index)
+    }
+
+    pub fn set_macro_value(&mut self, index: usize, value: f32) -> bool {
+        if let Some(m) = self.macros.get_mut(index) {
+            m.value = value.clamp(0.0, 1.0);
+            self.active_variation = None;
+            true
+        } else {
+            false
+        }
+    }
+
+    pub fn capture_variation(&mut self, name: impl Into<String>) -> usize {
+        let values = self.macros.iter().map(|m| m.value).collect();
+        let idx = self.variations.len();
+        self.variations.push(MacroVariation {
+            name: name.into(),
+            values,
+        });
+        self.active_variation = Some(idx);
+        idx
+    }
+
+    pub fn recall_variation(&mut self, index: usize) -> Result<(), &'static str> {
+        if index >= self.variations.len() {
+            return Err("Variation index out of bounds");
+        }
+        let vals = &self.variations[index].values;
+        for (i, &v) in vals.iter().enumerate() {
+            if i < self.macros.len() {
+                self.macros[i].value = v.clamp(0.0, 1.0);
+            }
+        }
+        self.active_variation = Some(index);
+        Ok(())
+    }
+
+    pub fn recall_variation_by_name(&mut self, name: &str) -> Result<(), &'static str> {
+        if let Some(idx) = self.variations.iter().position(|v| v.name == name) {
+            self.recall_variation(idx)
+        } else {
+            Err("Variation name not found")
+        }
+    }
+
+    pub fn delete_variation(&mut self, index: usize) -> bool {
+        if index < self.variations.len() {
+            self.variations.remove(index);
+            if self.active_variation == Some(index) {
+                self.active_variation = None;
+            } else if let Some(ref mut act) = self.active_variation {
+                if *act > index {
+                    *act -= 1;
+                }
+            }
+            true
+        } else {
+            false
+        }
+    }
+
+    pub fn randomize_macros(&mut self, rng_state: &mut u32) {
+        for m in &mut self.macros {
+            if !m.excluded_from_randomization {
+                // Xorshift32 PRNG
+                *rng_state ^= *rng_state << 13;
+                *rng_state ^= *rng_state >> 17;
+                *rng_state ^= *rng_state << 5;
+                let rnd = (*rng_state as f32) / 4294967296.0;
+                m.value = rnd.clamp(0.0, 1.0);
+            }
+        }
+        self.active_variation = None;
+    }
+
+    pub fn variations_count(&self) -> usize {
+        self.variations.len()
+    }
+}
+
+impl Default for RackMacroSystem {
+    fn default() -> Self {
+        Self::new(DEFAULT_RACK_MACROS)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -571,6 +789,68 @@ mod tests {
 
         // Reorder
         assert!(chain.reorder_audio_effects(idx0, idx1));
+    }
+
+    #[test]
+    fn test_rack_macro_system_1_to_16_and_variations() {
+        let mut sys = RackMacroSystem::new(8);
+        assert_eq!(sys.macro_count(), 8);
+
+        // Expand to 16 macros
+        sys.set_macro_count(16);
+        assert_eq!(sys.macro_count(), 16);
+
+        // Set macro values
+        sys.set_macro_value(0, 0.75); // Cutoff
+        sys.set_macro_value(1, 0.30); // Resonance
+        sys.set_macro_value(15, 0.90); // Macro 16
+
+        // Check display value and formatting
+        let m0 = sys.get_macro(0).unwrap().clone().with_range(20.0, 20000.0, "Hz");
+        assert!((m0.display_value() - (20.0 + 0.75 * 19980.0)).abs() < 1e-2);
+
+        // Capture variation 1
+        let v1_idx = sys.capture_variation("Verse Setting");
+        assert_eq!(v1_idx, 0);
+        assert_eq!(sys.variations_count(), 1);
+
+        // Change values and capture variation 2
+        sys.set_macro_value(0, 0.20);
+        sys.set_macro_value(1, 0.85);
+        let v2_idx = sys.capture_variation("Drop Setting");
+        assert_eq!(v2_idx, 1);
+        assert_eq!(sys.variations_count(), 2);
+
+        // Recall variation 1
+        sys.recall_variation(0).unwrap();
+        assert_eq!(sys.get_macro(0).unwrap().value, 0.75);
+        assert_eq!(sys.get_macro(1).unwrap().value, 0.30);
+
+        // Recall variation 2 by name
+        sys.recall_variation_by_name("Drop Setting").unwrap();
+        assert_eq!(sys.get_macro(0).unwrap().value, 0.20);
+        assert_eq!(sys.get_macro(1).unwrap().value, 0.85);
+
+        // Test range mapping (direct & inverted)
+        let normal_map = MacroMappingRange::new(0.0, 100.0);
+        assert_eq!(normal_map.map(0.5), 50.0);
+
+        let inverted_map = MacroMappingRange::new(100.0, 0.0);
+        assert_eq!(inverted_map.map(0.25), 75.0);
+
+        // Test Randomize with exclusions
+        sys.macros[0].excluded_from_randomization = true;
+        let mut seed = 0x12345678;
+        sys.randomize_macros(&mut seed);
+        // Macro 0 was excluded, stays at 0.20
+        assert_eq!(sys.get_macro(0).unwrap().value, 0.20);
+        // Macro 1 was randomized
+        let m1_val = sys.get_macro(1).unwrap().value;
+        assert!((0.0..=1.0).contains(&m1_val));
+
+        // Delete variation
+        assert!(sys.delete_variation(0));
+        assert_eq!(sys.variations_count(), 1);
     }
 }
 
