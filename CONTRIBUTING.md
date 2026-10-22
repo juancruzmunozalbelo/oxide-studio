@@ -49,6 +49,34 @@ When contributing UI code in `crates/ableton-gui`:
   - Compact Laptop ($960 \times 600$)
   - Standard MacBook ($1280 \times 800$)
   - Studio Display ($1920 \times 1080$)
+  - Ultra-Wide / 2K Display ($2560 \times 1440$)
+- Must pass the 576-frame layout matrix audit (`adversarial_acoustic_layout_stress_test.rs`).
+
+### D. 🔒 Mandatory Pre-Closure Verification & Definition of Done (DoD)
+
+To ensure that no code modification regresses real-time audio thread safety, acoustic DSP fidelity, or viewport geometry, **every Pull Request must satisfy the 3-Gate Definition of Done**.
+
+Verification is executed via [`scripts/verify_issue_dod.sh`](scripts/verify_issue_dod.sh):
+
+```bash
+# Run local verification:
+./scripts/verify_issue_dod.sh <issue_number>
+
+# Run verification and post evidence directly to GitHub Issue:
+./scripts/verify_issue_dod.sh <issue_number> --post-comment
+```
+
+#### The 3 Verification Gates
+1. **Gate 1 — Ableton Manual & OKF Documentation Sync**:
+   - Validates that `docs/okf/OXIDE_STUDIO_MANUAL_OKF.md` and `crates/ableton-gui/src/okf_knowledge.rs` contain all 10 operational sections (`OKF-01` through `OKF-10`).
+   - Executes `cargo test -p ableton-gui okf -- --nocapture` to ensure bilingual English & Argentine Spanish query roundtrips.
+2. **Gate 2 — End-to-End Manual & Real-Time DSP Audio Verification**:
+   - Executes `cargo test -p ableton-gui --test e2e_ableton_manual_verification_test -- --nocapture` and `cargo test -p ableton-drums -p ableton-audio -- --nocapture`.
+   - Asserts mathematical $-\infty\text{ dBFS}$ null silence under track fader zero gain or mute, dynamic TR-909 pattern rendering, and distinct spectral centroids for all 16 drum voices.
+3. **Gate 3 — Anti-Breakage Layout Guard (576-Frame Matrix)**:
+   - Executes `cargo test -p ableton-gui --test e2e_live12_layout_audit_test -- --nocapture` and `cargo test -p ableton-gui --test adversarial_acoustic_layout_stress_test -- --nocapture`.
+   - Audits 576 frames across 4 viewport resolutions (`960x600`, `1280x800`, `1920x1080`, `2560x1440`) and 12 vertical splitter heights (`220px` to `540px`).
+   - Asserts **0 viewport overflows, 0 clipped texts, 0 text collisions, and 0 tofu (`□`) Unicode glyph errors**.
 
 ---
 
@@ -64,7 +92,7 @@ cargo build --workspace --release
 ```
 
 ### Running Tests
-All pull requests must pass the complete automated test suite:
+All 674 workspace unit, integration, and adversarial tests must pass:
 ```bash
 cargo test --workspace
 ```

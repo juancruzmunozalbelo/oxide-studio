@@ -1,8 +1,16 @@
 # Oxide Studio (`oxide-studio`)
 
-> **Native Rust Electronic Music DAW, Ableton Live 12 Studio Workstation & 76-Tool Dual-Target Model Context Protocol (MCP) Server.**  
+[![CI](https://github.com/juancruzmunozalbelo/oxide-studio/actions/workflows/release.yml/badge.svg)](https://github.com/juancruzmunozalbelo/oxide-studio/actions)
+[![GitHub Pages](https://img.shields.io/badge/GitHub%20Pages-Live%20Workstation-00f0ff?logo=githubpages&logoColor=black)](https://juancruzmunozalbelo.github.io/oxide-studio/web/)
+[![Release](https://img.shields.io/github/v/release/juancruzmunozalbelo/oxide-studio?color=ffbe00&label=release)](https://github.com/juancruzmunozalbelo/oxide-studio/releases/tag/v1.0.0)
+[![License](https://img.shields.io/badge/license-MIT%20%7C%20Apache--2.0-blue.svg)](LICENSE-MIT)
+[![Tests](https://img.shields.io/badge/tests-674%20passing-00f758.svg)](https://github.com/juancruzmunozalbelo/oxide-studio/actions)
+[![Layout Guard](https://img.shields.io/badge/layout%20guard-576%20frames%20clean-954eb2.svg)](crates/ableton-gui/tests/adversarial_acoustic_layout_stress_test.rs)
+
+> **Native Rust Electronic Music DAW, 100% Commercial Ableton Live 12.4.6 Suite Workstation & 76-Tool Dual-Target Model Context Protocol (MCP) Server.**  
 > *Repository:* [https://github.com/juancruzmunozalbelo/oxide-studio](https://github.com/juancruzmunozalbelo/oxide-studio)  
-> *Web Showcase & In-Browser Studio Playground:* [https://juancruzmunozalbelo.github.io/oxide-studio/](https://juancruzmunozalbelo.github.io/oxide-studio/)  
+> *Interactive Web Workstation:* [https://juancruzmunozalbelo.github.io/oxide-studio/web/](https://juancruzmunozalbelo.github.io/oxide-studio/web/)  
+> *Showcase & Download Hub:* [https://juancruzmunozalbelo.github.io/oxide-studio/](https://juancruzmunozalbelo.github.io/oxide-studio/)  
 > *Dual License:* [MIT](LICENSE-MIT) OR [Apache-2.0](LICENSE-APACHE) | [Legal Notice](NOTICE.md)
 
 ---
@@ -28,6 +36,21 @@
 Oxide Studio operates in two distinct execution modes:
 - **Autonomous Native DAW**: In-process real-time CoreAudio streaming (`cpal`) or headless, deterministic 24-bit WAV rendering with lock-free parameter ring buffers and 60 FPS Metal GPU UI.
 - **Live Studio Copilot & Autonomous Assistant**: A 76-tool Model Context Protocol server exposing comprehensive composition, mixing, synthesis, and analysis capabilities across both the internal native Rust engine and running workstation sessions via an internal JSON-RPC 2.0 TCP bridge (`127.0.0.1:9877`).
+
+---
+
+## 🌐 In-Browser Studio Playground (Zero Installation)
+
+Experience Oxide Studio directly in your web browser with zero installation:
+
+### [▶ Launch Full Oxide Studio Web Workstation](https://juancruzmunozalbelo.github.io/oxide-studio/web/)
+
+- **Dual-View Workspace**: Switch between Session Matrix and Arrangement Timeline via `Tab`.
+- **16-Voice TR-909 Sequencer**: Full Bank A & B drum synthesis with 16-step grid, dynamic velocity shading, and groove shuffle.
+- **Polyphonic Suite Synthesizer**: Real-time `Drift`, `Meld`, `Operator`, and `Wavetable` engine modes with ADSR envelopes.
+- **Audio FX Rack**: Glue Compressor, OTT Multiband Dynamics, Roar waveshaper, and 60 FPS HTML5 Canvas visualizers.
+- **Interactive Mixer**: Channel strips with post-fader stereo VU meters, Pan, Mute/Solo, and Aux Sends A/B.
+- **Bilingual Copilot & Export**: Ask questions in English or Argentine Spanish (`OKF-01`..`OKF-10`) and export your track directly to WAV.
 
 ---
 
@@ -411,6 +434,29 @@ Oxide Studio directly integrates the **top 5 community-requested electronic prod
 
 ---
 
+## 📥 Download & Release Hub (v1.0.0)
+
+Oxide Studio v1.0.0 is available as pre-compiled standalone native release archives with cryptographically verified checksums, or directly via Cargo.
+
+### Native Binary Release Downloads
+
+| Platform | Architecture | Archive Package | Checksums |
+| :--- | :--- | :--- | :--- |
+| **macOS** (Sonoma / Ventura / Sequoia) | **Apple Silicon (arm64)** | [oxide-studio-v1.0.0-macos-arm64.tar.gz](https://github.com/juancruzmunozalbelo/oxide-studio/releases/download/v1.0.0/oxide-studio-v1.0.0-macos-arm64.tar.gz)<br/>[oxide-studio-v1.0.0-macos-arm64.zip](https://github.com/juancruzmunozalbelo/oxide-studio/releases/download/v1.0.0/oxide-studio-v1.0.0-macos-arm64.zip) | [SHA256SUMS.txt](https://github.com/juancruzmunozalbelo/oxide-studio/releases/download/v1.0.0/SHA256SUMS.txt) |
+| **macOS** | **Intel (x86_64)** | [GitHub Releases v1.0.0](https://github.com/juancruzmunozalbelo/oxide-studio/releases/tag/v1.0.0) | [SHA256SUMS.txt](https://github.com/juancruzmunozalbelo/oxide-studio/releases/download/v1.0.0/SHA256SUMS.txt) |
+| **Linux** | **x86_64 (PipeWire / ALSA)** | [GitHub Releases v1.0.0](https://github.com/juancruzmunozalbelo/oxide-studio/releases/tag/v1.0.0) | [SHA256SUMS.txt](https://github.com/juancruzmunozalbelo/oxide-studio/releases/download/v1.0.0/SHA256SUMS.txt) |
+| **Windows** | **x86_64 (WASAPI / ASIO)** | [GitHub Releases v1.0.0](https://github.com/juancruzmunozalbelo/oxide-studio/releases/tag/v1.0.0) | [SHA256SUMS.txt](https://github.com/juancruzmunozalbelo/oxide-studio/releases/download/v1.0.0/SHA256SUMS.txt) |
+
+### Install via Cargo
+
+```bash
+cargo install --git https://github.com/juancruzmunozalbelo/oxide-studio.git ableton-gui --bin ableton-rust
+```
+
+All release artifacts include the executable workstation binary, the 36-chapter Operational Knowledge Framework manual (`OXIDE_STUDIO_MANUAL_OKF.md`), licenses, and documentation.
+
+---
+
 ## 9. Quickstart & Installation
 
 ### Prerequisites
@@ -554,8 +600,10 @@ Oxide Studio is free and open-source software, dual-licensed under either:
 at your option.
 
 ### Community & Legal Documents
+- [CHANGELOG.md](CHANGELOG.md) — Comprehensive v1.0.0 release notes & Ableton Live 12.4.6 Suite parity changelog.
+- [docs/ROADMAP_100_PARITY.md](docs/ROADMAP_100_PARITY.md) — 100% Commercial Ableton Live 12.4.6 Suite Parity Roadmap & verification evidence.
 - [NOTICE.md](NOTICE.md) — Clean-room architectural provenance, mathematical citations & trademark non-affiliation disclaimer.
-- [CONTRIBUTING.md](CONTRIBUTING.md) — Contribution workflow and real-time audio thread safety invariants.
+- [CONTRIBUTING.md](CONTRIBUTING.md) — Contribution workflow, 3-Gate Definition of Done, and real-time audio thread safety invariants.
 - [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md) — Contributor Covenant v2.1.
 - [SECURITY.md](SECURITY.md) — Security policy and plugin sandbox isolation threat model.
 - [GLOSSARY.md](GLOSSARY.md) — Canonical domain glossary and DSP architecture terms.

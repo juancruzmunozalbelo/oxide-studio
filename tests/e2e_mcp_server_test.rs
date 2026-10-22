@@ -47,7 +47,7 @@ fn test_mcp_initialize_and_ping() {
     let result = &resp["result"];
     assert_eq!(result["protocolVersion"], "2024-11-05");
     assert_eq!(result["serverInfo"]["name"], "ableton-rust-mcp");
-    assert_eq!(result["serverInfo"]["version"], "0.1.0");
+    assert_eq!(result["serverInfo"]["version"], "1.0.0");
     assert!(result["capabilities"]["tools"].is_object());
     assert!(result["capabilities"]["resources"].is_object());
 

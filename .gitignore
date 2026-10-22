@@ -14,3 +14,4 @@ __pycache__/
 *credentials*
 .oxide_studio*
 oxide_copilot_key*
+dist/

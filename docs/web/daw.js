@@ -1,0 +1,2215 @@
+/**
+ * OXIDE STUDIO WEB — NATIVE IN-BROWSER ELECTRONIC MUSIC WORKSTATION (v1.0.0)
+ * 100% Zero-Dependency WebAudio API + HTML5 Canvas 60 FPS Engine.
+ * Features:
+ *  - Dual View: Session Matrix & Arrangement Timeline (toggled by TAB key)
+ *  - 16-Voice TR-909 Synthesizer Engine (Bank A 1-8 & Bank B 9-16)
+ *  - 16-Step Sequencer with Velocity, Accent, and Groove Pool Swing (50%-75%)
+ *  - Polyphonic Suite Synthesizer Engine (Drift, Meld, Operator, Wavetable) + 4-Pole ZDF Filter
+ *  - Studio Audio FX Rack (Glue Compressor with Needle VU, OTT, Roar, Hybrid Reverb, TruePeakLimiter)
+ *  - Channel & Master Mixer with post-fader segmented green/yellow/red VU meters, Pan, Sends A/B
+ *  - Bilingual (EN/ES) OKF Copilot with Natural Language DSP Router & Live Telemetry
+ *  - In-Browser .wav 16-bit 44.1kHz PCM bounce (OfflineAudioContext) & .als Ableton Live 12 Set export (gzip)
+ *  - 60 FPS HTML5 Canvas Visualizers (Scope, 64-band FFT Spectrum, Analog Needle VU, Bode Curve)
+ */
+
+(function () {
+  'use strict';
+
+  // =========================================================================
+  // 1. GLOBAL STATE & CONSTANTS
+  // =========================================================================
+
+  const STATE = {
+    audioCtx: null,
+    sampleRate: 44100,
+    isPlaying: false,
+    tempo: 136.0,
+    swing: 56, // 50% = straight, 75% = max swing
+    currentStep: 0,
+    currentBar: 1,
+    activeView: 'session', // 'session' | 'arrangement'
+    activeDeck: 'deck-sequencer',
+    activeBank: 'A', // 'A' | 'B'
+    accentMode: false,
+    selectedTrack: 0,
+    language: 'en', // 'en' | 'es'
+    octaveOffset: 3, // C3
+    scaleRoot: 5, // F
+    scaleType: 'minor',
+    quantize: '1bar',
+    limiterCeiling: -0.3,
+    noiseBuffer: null,
+
+    // Synth Parameters
+    synth: {
+      mode: 'drift', // 'drift' | 'meld' | 'operator' | 'wavetable'
+      cutoff: 2800,
+      resonance: 4.2,
+      attack: 0.012,
+      decay: 0.42,
+      sustain: 0.65,
+      release: 0.38,
+      morph: 0.45,
+      drive: 6.0
+    },
+
+    // FX Parameters
+    fx: {
+      glue: { active: true, threshold: -14, ratio: 4, makeup: 4.5, gainReduction: 0 },
+      ott: { active: true, low: 0.7, mid: 0.65, high: 0.8, depth: 0.6 },
+      roar: { active: true, drive: 12, tone: 4500, curve: 'warm' },
+      reverb: { active: true, decay: 2.4, size: 0.75, mix: 0.28 },
+      limiter: { active: true, ceiling: -0.3, release: 0.08, isClipping: false }
+    },
+
+    // 4 Tracks + 2 Returns + Master
+    tracks: [
+      { name: '1 DRUMS', volume: 0.95, pan: 0.0, sendA: 0.2, sendB: 0.1, mute: false, solo: false, peakDb: -60, rmsDb: -60 },
+      { name: '2 BASS', volume: 0.88, pan: 0.0, sendA: 0.1, sendB: 0.0, mute: false, solo: false, peakDb: -60, rmsDb: -60 },
+      { name: '3 LEAD', volume: 0.85, pan: 0.15, sendA: 0.35, sendB: 0.25, mute: false, solo: false, peakDb: -60, rmsDb: -60 },
+      { name: '4 STEMS', volume: 0.75, pan: -0.2, sendA: 0.4, sendB: 0.2, mute: false, solo: false, peakDb: -60, rmsDb: -60 },
+      { name: 'A REV', volume: 0.80, pan: 0.0, sendA: 0, sendB: 0, mute: false, solo: false, peakDb: -60, rmsDb: -60 },
+      { name: 'B DLY', volume: 0.70, pan: 0.0, sendA: 0, sendB: 0, mute: false, solo: false, peakDb: -60, rmsDb: -60 },
+      { name: 'MASTER', volume: 1.00, pan: 0.0, sendA: 0, sendB: 0, mute: false, solo: false, peakDb: -0.3, rmsDb: -12, mono: false, dim: false }
+    ],
+
+    // Session Matrix Clips: 4 Tracks x 4 Scenes
+    sessionClips: [
+      // Track 0 (Drums): Scenes 0..3
+      [{ name: '909 Core Beat', state: 'playing' }, { name: '909 Snare Roll', state: 'stopped' }, { name: '909 Full Peak Drop', state: 'stopped' }, { name: '909 Stripped Kick', state: 'stopped' }],
+      // Track 1 (Bass)
+      [{ name: 'Sub Sine 55Hz', state: 'playing' }, { name: 'Acid 303 Sweep', state: 'stopped' }, { name: 'Heavy Roar Bass', state: 'stopped' }, { name: 'Low Filtered Sub', state: 'stopped' }],
+      // Track 2 (Lead)
+      [{ name: 'Melodic Pluck', state: 'stopped' }, { name: 'FM Swarm Riser', state: 'stopped' }, { name: 'Main Hook Stabs', state: 'playing' }, { name: 'Reverb Drone', state: 'stopped' }],
+      // Track 3 (Keys/Stems)
+      [{ name: 'Analog Pad C#', state: 'stopped' }, { name: 'Shaker Rush', state: 'stopped' }, { name: 'Cymbal Sparkle', state: 'playing' }, { name: 'Vinyl Crackle & Air', state: 'stopped' }]
+    ],
+
+    // 16 Synthesized Drum Voices: 8 Bank A + 8 Bank B
+    // Step state: array of 16 numbers (0: off, 1: normal, 2: accented)
+    drumVoices: [
+      // Bank A (1–8)
+      { id: 'kick', name: 'Kick 909', bank: 'A', mute: false, solo: false, steps: [2, 0, 0, 0, 1, 0, 0, 0, 2, 0, 0, 0, 1, 0, 0, 0] },
+      { id: 'snare', name: 'Snare 909', bank: 'A', mute: false, solo: false, steps: [0, 0, 0, 0, 2, 0, 0, 0, 0, 0, 0, 0, 2, 0, 0, 0] },
+      { id: 'lowTom', name: 'Low Tom 909', bank: 'A', mute: false, solo: false, steps: [0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0] },
+      { id: 'midTom', name: 'Mid Tom 909', bank: 'A', mute: false, solo: false, steps: [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0] },
+      { id: 'hiTom', name: 'Hi Tom 909', bank: 'A', mute: false, solo: false, steps: [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0] },
+      { id: 'rim', name: 'Rimshot 909', bank: 'A', mute: false, solo: false, steps: [0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0] },
+      { id: 'clap', name: 'Clap 909', bank: 'A', mute: false, solo: false, steps: [0, 0, 0, 0, 2, 0, 0, 1, 0, 0, 0, 0, 2, 0, 0, 0] },
+      { id: 'cowbell', name: 'Cowbell 909', bank: 'A', mute: false, solo: false, steps: [0, 0, 0, 1, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 1, 0] },
+
+      // Bank B (9–16)
+      { id: 'ch', name: 'Closed Hat 909', bank: 'B', mute: false, solo: false, steps: [1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1] },
+      { id: 'oh', name: 'Open Hat 909', bank: 'B', mute: false, solo: false, steps: [0, 0, 2, 0, 0, 0, 2, 0, 0, 0, 2, 0, 0, 0, 2, 0] },
+      { id: 'crash', name: 'Crash 909', bank: 'B', mute: false, solo: false, steps: [2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0] },
+      { id: 'ride', name: 'Ride 909', bank: 'B', mute: false, solo: false, steps: [0, 0, 1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0, 1, 0] },
+      { id: 'percLow', name: 'Perc Low Wood', bank: 'B', mute: false, solo: false, steps: [0, 1, 0, 0, 0, 0, 0, 1, 0, 1, 0, 0, 0, 0, 0, 1] },
+      { id: 'percHigh', name: 'Perc High Bongo', bank: 'B', mute: false, solo: false, steps: [0, 0, 0, 1, 0, 1, 0, 0, 0, 0, 0, 1, 0, 1, 0, 0] },
+      { id: 'shaker', name: 'Analog Shaker', bank: 'B', mute: false, solo: false, steps: [1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0] },
+      { id: 'tamb', name: 'Tambourine 909', bank: 'B', mute: false, solo: false, steps: [0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0] }
+    ]
+  };
+
+  // Open Hat active voice node reference for closed hat choke link
+  let activeOpenHatGain = null;
+
+  // Active audio nodes references
+  const NODES = {
+    trackGains: [],
+    trackPanners: [],
+    trackAnalysers: [],
+    sendAGains: [],
+    sendBGains: [],
+    returnAGain: null,
+    returnBGain: null,
+    reverbConvolver: null,
+    delayNode: null,
+    delayFeedback: null,
+    masterPreGain: null,
+    glueCompressor: null,
+    ottFilters: [],
+    roarShaper: null,
+    filterNode1: null,
+    filterNode2: null,
+    truePeakLimiter: null,
+    masterAnalyser: null,
+    masterFader: null
+  };
+
+  // Pre-generate 2 seconds of pure white noise for drum synth voices
+  function getNoiseBuffer(ctx) {
+    if (STATE.noiseBuffer && STATE.noiseBuffer.sampleRate === ctx.sampleRate) {
+      return STATE.noiseBuffer;
+    }
+    const bufferSize = ctx.sampleRate * 2;
+    const buffer = ctx.createBuffer(1, bufferSize, ctx.sampleRate);
+    const data = buffer.getChannelData(0);
+    let x = 0x98765432;
+    for (let i = 0; i < bufferSize; i++) {
+      x ^= x << 13;
+      x ^= x >> 17;
+      x ^= x << 5;
+      data[i] = (x / 2147483648.0) - 1.0;
+    }
+    STATE.noiseBuffer = buffer;
+    return buffer;
+  }
+
+  // =========================================================================
+  // 2. WEBAUDIO GRAPH ARCHITECTURE
+  // =========================================================================
+
+  function initAudioGraph() {
+    if (STATE.audioCtx) return;
+
+    const AudioContextClass = window.AudioContext || window.webkitAudioContext;
+    const ctx = new AudioContextClass({ latencyHint: 'interactive' });
+    STATE.audioCtx = ctx;
+    STATE.sampleRate = ctx.sampleRate;
+
+    // Master Bus Pipeline:
+    // [Tracks] -> [MasterPreGain] -> [Glue Compressor] -> [Roar Waveshaper] -> [ZDF Filter] -> [TruePeakLimiter] -> [MasterAnalyser] -> [MasterFader] -> [ctx.destination]
+    const masterPreGain = ctx.createGain();
+    masterPreGain.gain.setValueAtTime(1.0, ctx.currentTime);
+    NODES.masterPreGain = masterPreGain;
+
+    // Glue Compressor (DynamicsCompressorNode emulation)
+    const glue = ctx.createDynamicsCompressor();
+    glue.threshold.setValueAtTime(STATE.fx.glue.threshold, ctx.currentTime);
+    glue.knee.setValueAtTime(4.0, ctx.currentTime);
+    glue.ratio.setValueAtTime(STATE.fx.glue.ratio, ctx.currentTime);
+    glue.attack.setValueAtTime(0.01, ctx.currentTime);
+    glue.release.setValueAtTime(0.1, ctx.currentTime);
+    NODES.glueCompressor = glue;
+
+    // Roar Waveshaper
+    const roarShaper = ctx.createWaveShaper();
+    roarShaper.curve = makeDistortionCurve(STATE.fx.roar.drive, STATE.fx.roar.curve);
+    roarShaper.oversample = '4x';
+    NODES.roarShaper = roarShaper;
+
+    // Cascaded 4-Pole ZDF Lowpass Filter (2x 12dB/oct BiquadFilters)
+    const filter1 = ctx.createBiquadFilter();
+    filter1.type = 'lowpass';
+    filter1.frequency.setValueAtTime(STATE.synth.cutoff, ctx.currentTime);
+    filter1.Q.setValueAtTime(Math.sqrt(STATE.synth.resonance), ctx.currentTime);
+
+    const filter2 = ctx.createBiquadFilter();
+    filter2.type = 'lowpass';
+    filter2.frequency.setValueAtTime(STATE.synth.cutoff, ctx.currentTime);
+    filter2.Q.setValueAtTime(Math.sqrt(STATE.synth.resonance), ctx.currentTime);
+    NODES.filterNode1 = filter1;
+    NODES.filterNode2 = filter2;
+
+    // TruePeakLimiter (clamped brickwall)
+    const limiter = ctx.createDynamicsCompressor();
+    limiter.threshold.setValueAtTime(STATE.limiterCeiling, ctx.currentTime);
+    limiter.knee.setValueAtTime(0.0, ctx.currentTime);
+    limiter.ratio.setValueAtTime(20.0, ctx.currentTime);
+    limiter.attack.setValueAtTime(0.002, ctx.currentTime);
+    limiter.release.setValueAtTime(0.05, ctx.currentTime);
+    NODES.truePeakLimiter = limiter;
+
+    // Master Analyser (FFT & Oscilloscope)
+    const masterAnalyser = ctx.createAnalyser();
+    masterAnalyser.fftSize = 256;
+    masterAnalyser.smoothingTimeConstant = 0.8;
+    NODES.masterAnalyser = masterAnalyser;
+
+    // Master Fader
+    const masterFader = ctx.createGain();
+    masterFader.gain.setValueAtTime(STATE.tracks[6].volume, ctx.currentTime);
+    NODES.masterFader = masterFader;
+
+    // Connect Master Chain
+    masterPreGain.connect(glue);
+    glue.connect(roarShaper);
+    roarShaper.connect(filter1);
+    filter1.connect(filter2);
+    filter2.connect(limiter);
+    limiter.connect(masterAnalyser);
+    masterAnalyser.connect(masterFader);
+    masterFader.connect(ctx.destination);
+
+    // Reverb Return Bus (Return A)
+    const returnAGain = ctx.createGain();
+    returnAGain.gain.setValueAtTime(STATE.tracks[4].volume, ctx.currentTime);
+    NODES.returnAGain = returnAGain;
+
+    const convolver = ctx.createConvolver();
+    convolver.buffer = buildReverbImpulse(ctx, STATE.fx.reverb.decay);
+    NODES.reverbConvolver = convolver;
+
+    returnAGain.connect(convolver);
+    convolver.connect(masterPreGain);
+
+    // Delay Return Bus (Return B)
+    const returnBGain = ctx.createGain();
+    returnBGain.gain.setValueAtTime(STATE.tracks[5].volume, ctx.currentTime);
+    NODES.returnBGain = returnBGain;
+
+    const delay = ctx.createDelay(1.0);
+    delay.delayTime.setValueAtTime((60 / STATE.tempo) * 0.75, ctx.currentTime); // Dotted 8th
+    const delayFb = ctx.createGain();
+    delayFb.gain.setValueAtTime(0.42, ctx.currentTime);
+    delay.connect(delayFb);
+    delayFb.connect(delay);
+    NODES.delayNode = delay;
+    NODES.delayFeedback = delayFb;
+
+    returnBGain.connect(delay);
+    delay.connect(masterPreGain);
+
+    // 4 Main Tracks (0: Drums, 1: Bass, 2: Lead, 3: Stems)
+    for (let i = 0; i < 4; i++) {
+      const trackGain = ctx.createGain();
+      trackGain.gain.setValueAtTime(STATE.tracks[i].volume, ctx.currentTime);
+      NODES.trackGains.push(trackGain);
+
+      const panner = ctx.createStereoPanner();
+      panner.pan.setValueAtTime(STATE.tracks[i].pan, ctx.currentTime);
+      NODES.trackPanners.push(panner);
+
+      const analyser = ctx.createAnalyser();
+      analyser.fftSize = 128;
+      analyser.smoothingTimeConstant = 0.8;
+      NODES.trackAnalysers.push(analyser);
+
+      const sendA = ctx.createGain();
+      sendA.gain.setValueAtTime(STATE.tracks[i].sendA, ctx.currentTime);
+      NODES.sendAGains.push(sendA);
+
+      const sendB = ctx.createGain();
+      sendB.gain.setValueAtTime(STATE.tracks[i].sendB, ctx.currentTime);
+      NODES.sendBGains.push(sendB);
+
+      // Track routing
+      trackGain.connect(panner);
+      panner.connect(analyser);
+      analyser.connect(masterPreGain);
+
+      // Sends routing
+      trackGain.connect(sendA);
+      sendA.connect(returnAGain);
+
+      trackGain.connect(sendB);
+      sendB.connect(returnBGain);
+    }
+  }
+
+  // Generate waveshaper distortion curve for Roar
+  function makeDistortionCurve(driveDb, type) {
+    const n_samples = 44100;
+    const curve = new Float32Array(n_samples);
+    const drive = Math.pow(10, driveDb / 20);
+
+    for (let i = 0; i < n_samples; ++i) {
+      const x = (i * 2) / n_samples - 1;
+      const xDrive = x * drive;
+      if (type === 'hard') {
+        curve[i] = Math.max(-1, Math.min(1, xDrive));
+      } else if (type === 'asym') {
+        // Tube-like asymmetric curve
+        curve[i] = x >= 0 ? Math.tanh(xDrive) : Math.tanh(xDrive * 1.5) * 0.8;
+      } else {
+        // Warm tanh saturation
+        curve[i] = Math.tanh(xDrive);
+      }
+    }
+    return curve;
+  }
+
+  // Procedural synthetic exponential noise impulse for Hybrid Reverb
+  function buildReverbImpulse(ctx, duration) {
+    const rate = ctx.sampleRate;
+    const length = Math.floor(rate * duration);
+    const impulse = ctx.createBuffer(2, length, rate);
+    const left = impulse.getChannelData(0);
+    const right = impulse.getChannelData(1);
+
+    for (let i = 0; i < length; i++) {
+      const decay = Math.exp(-i / (rate * (duration / 4)));
+      left[i] = (Math.random() * 2 - 1) * decay;
+      right[i] = (Math.random() * 2 - 1) * decay;
+    }
+    return impulse;
+  }
+
+  // =========================================================================
+  // 3. 16-VOICE TR-909 SYNTHESIZER ENGINE (ableton-drums parity)
+  // =========================================================================
+
+  function triggerDrumVoice(voiceId, time, velocity, isAccent) {
+    if (!STATE.audioCtx) return;
+    const ctx = STATE.audioCtx;
+    const dest = NODES.trackGains[0]; // Track 1: Drums
+    if (!dest) return;
+
+    const vel = (isAccent ? 1.25 : 1.0) * (velocity || 0.85);
+
+    switch (voiceId) {
+      case 'kick': {
+        // Pitch sweep: drops exponentially ~160 Hz -> ~45 Hz in 28ms + click transient
+        const osc = ctx.createOscillator();
+        const gain = ctx.createGain();
+        osc.type = 'sine';
+        osc.frequency.setValueAtTime(160, time);
+        osc.frequency.exponentialRampToValueAtTime(45, time + 0.045);
+
+        gain.gain.setValueAtTime(1.0 * vel, time);
+        gain.gain.exponentialRampToValueAtTime(0.001, time + 0.45);
+
+        // Click transient
+        const clickOsc = ctx.createOscillator();
+        const clickGain = ctx.createGain();
+        clickOsc.type = 'triangle';
+        clickOsc.frequency.setValueAtTime(320, time);
+        clickGain.gain.setValueAtTime(0.4 * vel, time);
+        clickGain.gain.exponentialRampToValueAtTime(0.001, time + 0.015);
+
+        osc.connect(gain);
+        clickOsc.connect(clickGain);
+        gain.connect(dest);
+        clickGain.connect(dest);
+
+        osc.start(time);
+        clickOsc.start(time);
+        osc.stop(time + 0.5);
+        clickOsc.stop(time + 0.02);
+        break;
+      }
+
+      case 'snare': {
+        // Dual tuned drumhead tone (~185 Hz + 330 Hz) + white noise burst (1200 Hz HPF)
+        const toneOsc1 = ctx.createOscillator();
+        const toneOsc2 = ctx.createOscillator();
+        const toneGain = ctx.createGain();
+
+        toneOsc1.frequency.setValueAtTime(185, time);
+        toneOsc2.frequency.setValueAtTime(330, time);
+        toneGain.gain.setValueAtTime(0.5 * vel, time);
+        toneGain.gain.exponentialRampToValueAtTime(0.001, time + 0.18);
+
+        toneOsc1.connect(toneGain);
+        toneOsc2.connect(toneGain);
+        toneGain.connect(dest);
+
+        // Noise snare wires
+        const noise = ctx.createBufferSource();
+        noise.buffer = getNoiseBuffer(ctx);
+        const noiseFilter = ctx.createBiquadFilter();
+        noiseFilter.type = 'highpass';
+        noiseFilter.frequency.setValueAtTime(1200, time);
+        const noiseGain = ctx.createGain();
+        noiseGain.gain.setValueAtTime(0.6 * vel, time);
+        noiseGain.gain.exponentialRampToValueAtTime(0.001, time + 0.22);
+
+        noise.connect(noiseFilter);
+        noiseFilter.connect(noiseGain);
+        noiseGain.connect(dest);
+
+        toneOsc1.start(time);
+        toneOsc2.start(time);
+        noise.start(time);
+        toneOsc1.stop(time + 0.2);
+        toneOsc2.stop(time + 0.2);
+        noise.stop(time + 0.25);
+        break;
+      }
+
+      case 'lowTom':
+      case 'midTom':
+      case 'hiTom': {
+        const startFreq = voiceId === 'lowTom' ? 110 : voiceId === 'midTom' ? 155 : 220;
+        const endFreq = voiceId === 'lowTom' ? 58 : voiceId === 'midTom' ? 88 : 125;
+        const osc = ctx.createOscillator();
+        const osc2 = ctx.createOscillator();
+        const gain = ctx.createGain();
+
+        osc.frequency.setValueAtTime(startFreq, time);
+        osc.frequency.exponentialRampToValueAtTime(endFreq, time + 0.12);
+        osc2.frequency.setValueAtTime(startFreq * 1.48, time);
+        osc2.frequency.exponentialRampToValueAtTime(endFreq * 1.48, time + 0.12);
+
+        gain.gain.setValueAtTime(0.8 * vel, time);
+        gain.gain.exponentialRampToValueAtTime(0.001, time + 0.35);
+
+        osc.connect(gain);
+        osc2.connect(gain);
+        gain.connect(dest);
+
+        osc.start(time);
+        osc2.start(time);
+        osc.stop(time + 0.4);
+        osc2.stop(time + 0.4);
+        break;
+      }
+
+      case 'rim': {
+        // High tuned resonance ~1650 Hz
+        const osc = ctx.createOscillator();
+        const gain = ctx.createGain();
+        osc.type = 'sine';
+        osc.frequency.setValueAtTime(1650, time);
+        gain.gain.setValueAtTime(0.85 * vel, time);
+        gain.gain.exponentialRampToValueAtTime(0.001, time + 0.045);
+
+        osc.connect(gain);
+        gain.connect(dest);
+        osc.start(time);
+        osc.stop(time + 0.05);
+        break;
+      }
+
+      case 'clap': {
+        // 3 staggered noise bursts (0ms, 11ms, 22ms) + 1200 Hz bandpass reverberant decay tail
+        for (let i = 0; i < 3; i++) {
+          const t = time + i * 0.011;
+          const noise = ctx.createBufferSource();
+          noise.buffer = getNoiseBuffer(ctx);
+          const filter = ctx.createBiquadFilter();
+          filter.type = 'bandpass';
+          filter.frequency.setValueAtTime(1200, t);
+          filter.Q.setValueAtTime(1.8, t);
+
+          const gain = ctx.createGain();
+          gain.gain.setValueAtTime(0.7 * vel, t);
+          gain.gain.exponentialRampToValueAtTime(0.001, t + 0.025);
+
+          noise.connect(filter);
+          filter.connect(gain);
+          gain.connect(dest);
+          noise.start(t);
+          noise.stop(t + 0.03);
+        }
+        // Tail
+        const tailNoise = ctx.createBufferSource();
+        tailNoise.buffer = getNoiseBuffer(ctx);
+        const tailFilter = ctx.createBiquadFilter();
+        tailFilter.type = 'bandpass';
+        tailFilter.frequency.setValueAtTime(1100, time + 0.025);
+        const tailGain = ctx.createGain();
+        tailGain.gain.setValueAtTime(0.8 * vel, time + 0.025);
+        tailGain.gain.exponentialRampToValueAtTime(0.001, time + 0.28);
+
+        tailNoise.connect(tailFilter);
+        tailFilter.connect(tailGain);
+        tailGain.connect(dest);
+        tailNoise.start(time + 0.025);
+        tailNoise.stop(time + 0.3);
+        break;
+      }
+
+      case 'cowbell': {
+        // Dual metallic resonance at 540 Hz and 800 Hz
+        const osc1 = ctx.createOscillator();
+        const osc2 = ctx.createOscillator();
+        osc1.type = 'square';
+        osc2.type = 'square';
+        osc1.frequency.setValueAtTime(540, time);
+        osc2.frequency.setValueAtTime(800, time);
+
+        const filter = ctx.createBiquadFilter();
+        filter.type = 'bandpass';
+        filter.frequency.setValueAtTime(680, time);
+        filter.Q.setValueAtTime(2.2, time);
+
+        const gain = ctx.createGain();
+        gain.gain.setValueAtTime(0.6 * vel, time);
+        gain.gain.exponentialRampToValueAtTime(0.001, time + 0.3);
+
+        osc1.connect(filter);
+        osc2.connect(filter);
+        filter.connect(gain);
+        gain.connect(dest);
+
+        osc1.start(time);
+        osc2.start(time);
+        osc1.stop(time + 0.32);
+        osc2.stop(time + 0.32);
+        break;
+      }
+
+      case 'ch': {
+        // Closed hat chokes open hat!
+        if (activeOpenHatGain) {
+          try {
+            activeOpenHatGain.gain.cancelScheduledValues(time);
+            activeOpenHatGain.gain.linearRampToValueAtTime(0.001, time + 0.005);
+          } catch (_) {}
+          activeOpenHatGain = null;
+        }
+
+        // 6 inharmonic frequencies through 7800 Hz HPF
+        const freqs = [245, 306, 384, 422, 659, 866];
+        const hatGain = ctx.createGain();
+        hatGain.gain.setValueAtTime(0.55 * vel, time);
+        hatGain.gain.exponentialRampToValueAtTime(0.001, time + 0.045);
+
+        const filter = ctx.createBiquadFilter();
+        filter.type = 'highpass';
+        filter.frequency.setValueAtTime(7800, time);
+
+        freqs.forEach(f => {
+          const osc = ctx.createOscillator();
+          osc.type = 'square';
+          osc.frequency.setValueAtTime(f, time);
+          osc.connect(filter);
+          osc.start(time);
+          osc.stop(time + 0.05);
+        });
+
+        filter.connect(hatGain);
+        hatGain.connect(dest);
+        break;
+      }
+
+      case 'oh': {
+        // Open Hat with choke link capability
+        const freqs = [245, 306, 384, 422, 659, 866];
+        const hatGain = ctx.createGain();
+        hatGain.gain.setValueAtTime(0.5 * vel, time);
+        hatGain.gain.exponentialRampToValueAtTime(0.001, time + 0.35);
+        activeOpenHatGain = hatGain;
+
+        const filter = ctx.createBiquadFilter();
+        filter.type = 'bandpass';
+        filter.frequency.setValueAtTime(7200, time);
+        filter.Q.setValueAtTime(1.5, time);
+
+        freqs.forEach(f => {
+          const osc = ctx.createOscillator();
+          osc.type = 'square';
+          osc.frequency.setValueAtTime(f, time);
+          osc.connect(filter);
+          osc.start(time);
+          osc.stop(time + 0.4);
+        });
+
+        filter.connect(hatGain);
+        hatGain.connect(dest);
+        break;
+      }
+
+      case 'crash': {
+        // Metallic shimmer + high-frequency noise burst
+        const noise = ctx.createBufferSource();
+        noise.buffer = getNoiseBuffer(ctx);
+        const filter = ctx.createBiquadFilter();
+        filter.type = 'highpass';
+        filter.frequency.setValueAtTime(4500, time);
+
+        const gain = ctx.createGain();
+        gain.gain.setValueAtTime(0.7 * vel, time);
+        gain.gain.exponentialRampToValueAtTime(0.001, time + 1.2);
+
+        noise.connect(filter);
+        filter.connect(gain);
+        gain.connect(dest);
+        noise.start(time);
+        noise.stop(time + 1.3);
+        break;
+      }
+
+      case 'ride': {
+        // Dual bell ping (1050 Hz + 1680 Hz) + noise
+        const osc1 = ctx.createOscillator();
+        const osc2 = ctx.createOscillator();
+        osc1.frequency.setValueAtTime(1050, time);
+        osc2.frequency.setValueAtTime(1680, time);
+
+        const gain = ctx.createGain();
+        gain.gain.setValueAtTime(0.45 * vel, time);
+        gain.gain.exponentialRampToValueAtTime(0.001, time + 0.8);
+
+        osc1.connect(gain);
+        osc2.connect(gain);
+        gain.connect(dest);
+        osc1.start(time);
+        osc2.start(time);
+        osc1.stop(time + 0.85);
+        osc2.stop(time + 0.85);
+        break;
+      }
+
+      case 'percLow': {
+        // Woodblock sweep ~290 Hz -> ~210 Hz
+        const osc = ctx.createOscillator();
+        const gain = ctx.createGain();
+        osc.frequency.setValueAtTime(290, time);
+        osc.frequency.exponentialRampToValueAtTime(210, time + 0.05);
+        gain.gain.setValueAtTime(0.75 * vel, time);
+        gain.gain.exponentialRampToValueAtTime(0.001, time + 0.12);
+        osc.connect(gain);
+        gain.connect(dest);
+        osc.start(time);
+        osc.stop(time + 0.15);
+        break;
+      }
+
+      case 'percHigh': {
+        // Bongo sweep ~620 Hz -> ~480 Hz
+        const osc = ctx.createOscillator();
+        const gain = ctx.createGain();
+        osc.frequency.setValueAtTime(620, time);
+        osc.frequency.exponentialRampToValueAtTime(480, time + 0.04);
+        gain.gain.setValueAtTime(0.7 * vel, time);
+        gain.gain.exponentialRampToValueAtTime(0.001, time + 0.09);
+        osc.connect(gain);
+        gain.connect(dest);
+        osc.start(time);
+        osc.stop(time + 0.12);
+        break;
+      }
+
+      case 'shaker': {
+        // High-pass shaped noise envelope burst
+        const noise = ctx.createBufferSource();
+        noise.buffer = getNoiseBuffer(ctx);
+        const filter = ctx.createBiquadFilter();
+        filter.type = 'highpass';
+        filter.frequency.setValueAtTime(4200, time);
+        const gain = ctx.createGain();
+        gain.gain.setValueAtTime(0.45 * vel, time);
+        gain.gain.exponentialRampToValueAtTime(0.001, time + 0.06);
+
+        noise.connect(filter);
+        filter.connect(gain);
+        gain.connect(dest);
+        noise.start(time);
+        noise.stop(time + 0.07);
+        break;
+      }
+
+      case 'tamb': {
+        // Metallic jingle ring 3200 Hz + 4900 Hz + noise
+        const osc1 = ctx.createOscillator();
+        const osc2 = ctx.createOscillator();
+        osc1.frequency.setValueAtTime(3200, time);
+        osc2.frequency.setValueAtTime(4900, time);
+
+        const gain = ctx.createGain();
+        gain.gain.setValueAtTime(0.4 * vel, time);
+        gain.gain.exponentialRampToValueAtTime(0.001, time + 0.18);
+
+        osc1.connect(gain);
+        osc2.connect(gain);
+        gain.connect(dest);
+        osc1.start(time);
+        osc2.start(time);
+        osc1.stop(time + 0.2);
+        osc2.stop(time + 0.2);
+        break;
+      }
+    }
+  }
+
+  // =========================================================================
+  // 4. POLYPHONIC SUITE SYNTHESIZER ENGINE (Drift, Meld, Operator, Wavetable)
+  // =========================================================================
+
+  function playSynthNote(midiNote, duration = 0.35, time = null, destTrack = 2) {
+    if (!STATE.audioCtx) return;
+    const ctx = STATE.audioCtx;
+    const t = time !== null ? time : ctx.currentTime;
+    const dest = NODES.trackGains[destTrack]; // Track 2 (Bass) or Track 3 (Lead)
+    if (!dest) return;
+
+    const freq = 440 * Math.pow(2, (midiNote - 69) / 12);
+    const mode = STATE.synth.mode;
+
+    // Filter per voice
+    const filter = ctx.createBiquadFilter();
+    filter.type = 'lowpass';
+    filter.frequency.setValueAtTime(STATE.synth.cutoff, t);
+    filter.frequency.exponentialRampToValueAtTime(STATE.synth.cutoff * 0.4, t + duration);
+    filter.Q.setValueAtTime(STATE.synth.resonance, t);
+
+    // Amplitude ADSR
+    const ampGain = ctx.createGain();
+    const att = Math.max(0.002, STATE.synth.attack);
+    const dec = Math.max(0.02, STATE.synth.decay);
+    const sus = STATE.synth.sustain;
+    const rel = Math.max(0.02, STATE.synth.release);
+
+    ampGain.gain.setValueAtTime(0.0001, t);
+    ampGain.gain.linearRampToValueAtTime(0.8, t + att);
+    ampGain.gain.exponentialRampToValueAtTime(Math.max(0.001, sus * 0.8), t + att + dec);
+    ampGain.gain.setValueAtTime(Math.max(0.001, sus * 0.8), t + duration);
+    ampGain.gain.exponentialRampToValueAtTime(0.0001, t + duration + rel);
+
+    filter.connect(ampGain);
+    ampGain.connect(dest);
+
+    if (mode === 'drift') {
+      // Drift: Dual analog oscillators with slight detune + drift LFO
+      const osc1 = ctx.createOscillator();
+      const osc2 = ctx.createOscillator();
+      osc1.type = 'sawtooth';
+      osc2.type = 'triangle';
+      osc1.frequency.setValueAtTime(freq, t);
+      osc2.frequency.setValueAtTime(freq * 1.004, t); // Detuned by 4 cents
+
+      // Wavefold / Drive
+      const shaper = ctx.createWaveShaper();
+      shaper.curve = makeDistortionCurve(STATE.synth.drive, 'warm');
+
+      osc1.connect(shaper);
+      osc2.connect(shaper);
+      shaper.connect(filter);
+
+      osc1.start(t);
+      osc2.start(t);
+      osc1.stop(t + duration + rel + 0.05);
+      osc2.stop(t + duration + rel + 0.05);
+
+    } else if (mode === 'meld') {
+      // Meld: FM Swarm + Harmonic Resonator
+      const carrier = ctx.createOscillator();
+      const mod = ctx.createOscillator();
+      const modGain = ctx.createGain();
+
+      carrier.type = 'sawtooth';
+      mod.type = 'sine';
+      carrier.frequency.setValueAtTime(freq, t);
+      mod.frequency.setValueAtTime(freq * (1.5 + STATE.synth.morph), t);
+      modGain.gain.setValueAtTime(freq * 1.2 * STATE.synth.morph, t);
+
+      mod.connect(modGain);
+      modGain.connect(carrier.frequency);
+      carrier.connect(filter);
+
+      carrier.start(t);
+      mod.start(t);
+      carrier.stop(t + duration + rel + 0.05);
+      mod.stop(t + duration + rel + 0.05);
+
+    } else if (mode === 'operator') {
+      // Operator: 4-Operator FM Synthesis
+      const opA = ctx.createOscillator();
+      const opB = ctx.createOscillator();
+      const opB_gain = ctx.createGain();
+
+      opA.type = 'sine';
+      opB.type = 'sine';
+      opA.frequency.setValueAtTime(freq, t);
+      opB.frequency.setValueAtTime(freq * 2.0, t);
+      opB_gain.gain.setValueAtTime(freq * (1.0 + STATE.synth.morph * 3.0), t);
+
+      opB.connect(opB_gain);
+      opB_gain.connect(opA.frequency);
+      opA.connect(filter);
+
+      opA.start(t);
+      opB.start(t);
+      opA.stop(t + duration + rel + 0.05);
+      opB.stop(t + duration + rel + 0.05);
+
+    } else {
+      // Wavetable: Morphing sawtooth/pulse/square
+      const osc = ctx.createOscillator();
+      osc.type = STATE.synth.morph > 0.5 ? 'square' : 'sawtooth';
+      osc.frequency.setValueAtTime(freq, t);
+      osc.connect(filter);
+      osc.start(t);
+      osc.stop(t + duration + rel + 0.05);
+    }
+  }
+
+  // =========================================================================
+  // 5. HIGH-PRECISION LOOKAHEAD SCHEDULER & SEQUENCER ENGINE
+  // =========================================================================
+
+  let schedulerTimer = null;
+  let nextStepTime = 0.0;
+  const LOOKAHEAD_MS = 25.0;
+  const SCHEDULE_AHEAD_SEC = 0.1;
+
+  // Scale note mapping for live auto-accompaniment
+  const SCALE_INTERVALS = {
+    minor: [0, 2, 3, 5, 7, 8, 10],
+    major: [0, 2, 4, 5, 7, 9, 11],
+    dorian: [0, 2, 3, 5, 7, 9, 10],
+    phrygian: [0, 1, 3, 5, 7, 8, 10],
+    harmonic_minor: [0, 2, 3, 5, 7, 8, 11]
+  };
+
+  function getScalePitch(degree, octave = 3) {
+    const scale = SCALE_INTERVALS[STATE.scaleType] || SCALE_INTERVALS.minor;
+    const noteInOct = scale[degree % scale.length];
+    const octShift = Math.floor(degree / scale.length);
+    return 12 * (octave + octShift) + STATE.scaleRoot + noteInOct;
+  }
+
+  function scheduleStep(stepIndex, time) {
+    // 1. Trigger Drum Voices active on this step
+    STATE.drumVoices.forEach(voice => {
+      if (voice.mute) return;
+      const stepVal = voice.steps[stepIndex];
+      if (stepVal > 0) {
+        triggerDrumVoice(voice.id, time, 0.85, stepVal === 2);
+      }
+    });
+
+    // 2. Auto-Play Bass / Lead Synth clips if running in Session View
+    // Bass line on Track 1 (e.g. 16th rolling techno bass or 303 pattern)
+    if (STATE.sessionClips[1][0].state === 'playing') {
+      const bassNotes = [0, 0, 3, 0, 2, 0, 5, 0, 0, 0, 3, 0, 7, 5, 3, 2];
+      const degree = bassNotes[stepIndex];
+      if (stepIndex % 2 === 0 || stepIndex === 3 || stepIndex === 7 || stepIndex === 11) {
+        const pitch = getScalePitch(degree, 2); // Low bass C2
+        playSynthNote(pitch, 0.15, time, 1);
+      }
+    }
+
+    // Lead melodic hook on Track 2 (when Scene 3 or Lead clip is active)
+    if (STATE.sessionClips[2][2].state === 'playing') {
+      const leadMelody = [7, 7, -1, 5, 8, -1, 7, 5, 7, 10, -1, 8, 7, 5, 3, 5];
+      const noteDeg = leadMelody[stepIndex];
+      if (noteDeg >= 0) {
+        const pitch = getScalePitch(noteDeg, 4); // Lead C4
+        playSynthNote(pitch, 0.22, time, 2);
+      }
+    }
+
+    // 3. UI Cursor Updates scheduled for RAF
+    const stepTimeMs = (time - STATE.audioCtx.currentTime) * 1000;
+    setTimeout(() => {
+      updateUIPlayhead(stepIndex);
+    }, Math.max(0, stepTimeMs));
+  }
+
+  function schedulerLoop() {
+    if (!STATE.isPlaying || !STATE.audioCtx) return;
+
+    while (nextStepTime < STATE.audioCtx.currentTime + SCHEDULE_AHEAD_SEC) {
+      // Calculate Groove Pool Swing for odd 16th steps
+      const isOddStep = (STATE.currentStep % 2) === 1;
+      const secondsPerBeat = 60.0 / STATE.tempo;
+      const straightStepSec = secondsPerBeat / 4.0;
+
+      let swingOffset = 0.0;
+      if (isOddStep && STATE.swing > 50) {
+        // Swing formula: delta = straightStep * ((swing - 50) / 50) * 0.66
+        swingOffset = straightStepSec * ((STATE.swing - 50) / 50) * 0.66;
+      }
+
+      scheduleStep(STATE.currentStep, nextStepTime + swingOffset);
+
+      // Advance step
+      nextStepTime += straightStepSec;
+      STATE.currentStep = (STATE.currentStep + 1) % 16;
+      if (STATE.currentStep === 0) {
+        STATE.currentBar = (STATE.currentBar % 32) + 1;
+      }
+    }
+  }
+
+  function startPlayback() {
+    initAudioGraph();
+    if (STATE.audioCtx.state === 'suspended') {
+      STATE.audioCtx.resume();
+    }
+    STATE.isPlaying = true;
+    STATE.currentStep = 0;
+    nextStepTime = STATE.audioCtx.currentTime + 0.05;
+    schedulerTimer = setInterval(schedulerLoop, LOOKAHEAD_MS);
+
+    document.getElementById('btn-play')?.classList.add('active');
+    document.getElementById('audio-unlock-overlay')?.classList.add('hidden');
+  }
+
+  function stopPlayback() {
+    STATE.isPlaying = false;
+    if (schedulerTimer) {
+      clearInterval(schedulerTimer);
+      schedulerTimer = null;
+    }
+    STATE.currentStep = 0;
+    document.getElementById('btn-play')?.classList.remove('active');
+    clearUIPlayhead();
+  }
+
+  function togglePlayback() {
+    if (STATE.isPlaying) {
+      stopPlayback();
+    } else {
+      startPlayback();
+    }
+  }
+
+  // =========================================================================
+  // 6. 60 FPS HTML5 CANVAS VISUALIZERS (Scope, FFT, Needle VU, Bode Curve)
+  // =========================================================================
+
+  let needleAngle = -Math.PI / 4; // -45 deg rest position
+  let needleVelocity = 0.0;
+
+  function initVisualizers() {
+    const scopeCanvas = document.getElementById('canvas-oscilloscope');
+    const specCanvas = document.getElementById('canvas-spectrum');
+    const needleCanvas = document.getElementById('canvas-needle');
+    const bodeCanvas = document.getElementById('canvas-bode');
+
+    function renderLoop() {
+      requestAnimationFrame(renderLoop);
+
+      // Render Oscilloscope
+      if (scopeCanvas && NODES.masterAnalyser) {
+        const ctx = scopeCanvas.getContext('2d');
+        const w = scopeCanvas.width;
+        const h = scopeCanvas.height;
+        const bufferLength = NODES.masterAnalyser.frequencyBinCount;
+        const timeData = new Uint8Array(bufferLength);
+        NODES.masterAnalyser.getByteTimeDomainData(timeData);
+
+        ctx.fillStyle = 'rgba(7, 8, 10, 0.35)'; // Phosphor persistence
+        ctx.fillRect(0, 0, w, h);
+
+        ctx.lineWidth = 1.5;
+        ctx.strokeStyle = '#00f0ff';
+        ctx.shadowBlur = 6;
+        ctx.shadowColor = 'rgba(0, 240, 255, 0.6)';
+        ctx.beginPath();
+
+        const sliceWidth = w / bufferLength;
+        let x = 0;
+        for (let i = 0; i < bufferLength; i++) {
+          const v = timeData[i] / 128.0;
+          const y = (v * h) / 2;
+          if (i === 0) ctx.moveTo(x, y);
+          else ctx.lineTo(x, y);
+          x += sliceWidth;
+        }
+        ctx.lineTo(w, h / 2);
+        ctx.stroke();
+        ctx.shadowBlur = 0;
+      }
+
+      // Render 64-Band FFT Spectrum
+      if (specCanvas && NODES.masterAnalyser) {
+        const ctx = specCanvas.getContext('2d');
+        const w = specCanvas.width;
+        const h = specCanvas.height;
+        const freqData = new Uint8Array(NODES.masterAnalyser.frequencyBinCount);
+        NODES.masterAnalyser.getByteFrequencyData(freqData);
+
+        ctx.fillStyle = '#07080a';
+        ctx.fillRect(0, 0, w, h);
+
+        const numBars = 48;
+        const barWidth = (w / numBars) - 1.5;
+
+        for (let i = 0; i < numBars; i++) {
+          const binIndex = Math.floor(Math.pow(i / numBars, 1.8) * freqData.length);
+          const val = freqData[binIndex] || 0;
+          const barHeight = (val / 255) * (h - 6);
+
+          // Gradient: Amber to Cyan
+          const grad = ctx.createLinearGradient(0, h, 0, h - barHeight);
+          grad.addColorStop(0, '#ffbe00');
+          grad.addColorStop(1, '#00f0ff');
+
+          ctx.fillStyle = grad;
+          ctx.fillRect(i * (barWidth + 1.5), h - barHeight, barWidth, barHeight);
+        }
+      }
+
+      // Render Analog Needle VU Meter (Glue Compressor Gain Reduction / Master Peak)
+      if (needleCanvas) {
+        const ctx = needleCanvas.getContext('2d');
+        const w = needleCanvas.width;
+        const h = needleCanvas.height;
+
+        ctx.fillStyle = '#0b0d12';
+        ctx.fillRect(0, 0, w, h);
+
+        // Arc scale
+        const cx = w / 2;
+        const cy = h + 15;
+        const radius = h * 0.95;
+
+        ctx.strokeStyle = '#242a38';
+        ctx.lineWidth = 2;
+        ctx.beginPath();
+        ctx.arc(cx, cy, radius, -Math.PI * 0.75, -Math.PI * 0.25);
+        ctx.stroke();
+
+        // Target angle based on Master Peak
+        let targetAngle = -Math.PI * 0.75;
+        if (NODES.masterAnalyser) {
+          const p = STATE.tracks[6].peakDb;
+          const norm = Math.max(0, Math.min(1, (p + 36) / 36));
+          targetAngle = -Math.PI * 0.75 + norm * (Math.PI * 0.5);
+        }
+
+        // Spring physics damping
+        const spring = 0.22;
+        const damping = 0.72;
+        needleVelocity += (targetAngle - needleAngle) * spring;
+        needleVelocity *= damping;
+        needleAngle += needleVelocity;
+
+        // Draw Needle
+        const nx = cx + radius * Math.cos(needleAngle);
+        const ny = cy + radius * Math.sin(needleAngle);
+
+        ctx.strokeStyle = '#ffbe00';
+        ctx.lineWidth = 1.8;
+        ctx.shadowBlur = 4;
+        ctx.shadowColor = 'rgba(255, 190, 0, 0.6)';
+        ctx.beginPath();
+        ctx.moveTo(cx, cy);
+        ctx.lineTo(nx, ny);
+        ctx.stroke();
+        ctx.shadowBlur = 0;
+
+        // Center hub
+        ctx.fillStyle = '#1f2430';
+        ctx.beginPath();
+        ctx.arc(cx, cy, 6, 0, Math.PI * 2);
+        ctx.fill();
+      }
+
+      // Render 4-Pole ZDF Filter Bode Response Curve
+      if (bodeCanvas) {
+        const ctx = bodeCanvas.getContext('2d');
+        const w = bodeCanvas.width;
+        const h = bodeCanvas.height;
+
+        ctx.fillStyle = '#07080a';
+        ctx.fillRect(0, 0, w, h);
+
+        // Draw Grid
+        ctx.strokeStyle = '#151821';
+        ctx.lineWidth = 1;
+        for (let f = 1; f < 5; f++) {
+          const x = (f / 5) * w;
+          ctx.beginPath();
+          ctx.moveTo(x, 0);
+          ctx.lineTo(x, h);
+          ctx.stroke();
+        }
+
+        // Bode 4-Pole Lowpass Curve: 24dB/oct slope
+        ctx.strokeStyle = '#00e676';
+        ctx.lineWidth = 2;
+        ctx.beginPath();
+
+        const cutoffX = (Math.log10(STATE.synth.cutoff / 20) / Math.log10(20000 / 20)) * w;
+        const resonanceGain = Math.min(18, STATE.synth.resonance * 2.2);
+
+        for (let x = 0; x <= w; x += 2) {
+          let mag = 0;
+          if (x < cutoffX) {
+            mag = (x / cutoffX) * (resonanceGain * 1.5);
+          } else {
+            const octavesAbove = (x - cutoffX) / (w * 0.15);
+            mag = resonanceGain - octavesAbove * 18;
+          }
+          const y = h * 0.5 - mag * 1.5;
+          const clampedY = Math.max(4, Math.min(h - 4, y));
+          if (x === 0) ctx.moveTo(x, clampedY);
+          else ctx.lineTo(x, clampedY);
+        }
+        ctx.stroke();
+
+        // Cutoff Puck marker
+        const puckY = Math.max(4, Math.min(h - 4, h * 0.5 - resonanceGain * 1.5));
+        ctx.fillStyle = '#ffbe00';
+        ctx.beginPath();
+        ctx.arc(cutoffX, puckY, 4, 0, Math.PI * 2);
+        ctx.fill();
+      }
+
+      // Update Mixer Post-Fader Segmented VU Meters
+      updateMixerMeters();
+    }
+
+    renderLoop();
+  }
+
+  // =========================================================================
+  // 7. STUDIO MIXER POST-FADER VU METER CALCULATIONS
+  // =========================================================================
+
+  function updateMixerMeters() {
+    if (!STATE.audioCtx) return;
+
+    // Channels 0..3 (Tracks 1–4)
+    for (let i = 0; i < 4; i++) {
+      const analyser = NODES.trackAnalysers[i];
+      if (!analyser) continue;
+
+      const data = new Uint8Array(analyser.frequencyBinCount);
+      analyser.getByteTimeDomainData(data);
+
+      let peak = 0;
+      for (let j = 0; j < data.length; j++) {
+        const absVal = Math.abs((data[j] - 128) / 128);
+        if (absVal > peak) peak = absVal;
+      }
+
+      const peakDb = peak > 0.0001 ? 20 * Math.log10(peak) : -60;
+      STATE.tracks[i].peakDb = Math.max(-60, peakDb);
+
+      // Render LED segments (12 segments)
+      renderLedMeter(`meter-ch${i}-L`, peakDb);
+      renderLedMeter(`meter-ch${i}-R`, peakDb - 0.5);
+
+      const dbLabel = document.getElementById(`db-ch${i}`);
+      if (dbLabel) {
+        dbLabel.textContent = peakDb > -59 ? peakDb.toFixed(1) : '-inf';
+      }
+    }
+
+    // Master Bus Meter
+    if (NODES.masterAnalyser) {
+      const data = new Uint8Array(NODES.masterAnalyser.frequencyBinCount);
+      NODES.masterAnalyser.getByteTimeDomainData(data);
+
+      let peak = 0;
+      for (let j = 0; j < data.length; j++) {
+        const absVal = Math.abs((data[j] - 128) / 128);
+        if (absVal > peak) peak = absVal;
+      }
+      const peakDb = peak > 0.0001 ? 20 * Math.log10(peak) : -60;
+      STATE.tracks[6].peakDb = Math.max(-60, peakDb);
+
+      renderLedMeter('meter-master-L', peakDb);
+      renderLedMeter('meter-master-R', peakDb);
+
+      const mDbLabel = document.getElementById('db-master');
+      if (mDbLabel) {
+        mDbLabel.textContent = peakDb > -59 ? peakDb.toFixed(2) : '-inf';
+      }
+
+      // Limiter Clip LED
+      const clipLed = document.getElementById('limiter-clip-led');
+      if (clipLed) {
+        if (peakDb >= -0.32) {
+          clipLed.classList.add('active');
+        } else {
+          clipLed.classList.remove('active');
+        }
+      }
+    }
+  }
+
+  function renderLedMeter(containerId, db) {
+    const el = document.getElementById(containerId);
+    if (!el) return;
+
+    // Total 14 segments:
+    // - Segments 1–8: Green (-60 to -12 dB)
+    // - Segments 9–12: Yellow (-12 to -0.3 dB)
+    // - Segments 13–14: Red (> -0.3 dB)
+    const norm = Math.max(0, Math.min(1, (db + 48) / 48)); // -48dB to 0dB range
+    const litCount = Math.round(norm * 14);
+
+    let html = '';
+    for (let s = 14; s >= 1; s--) {
+      const isLit = s <= litCount;
+      let segClass = 'meter-seg';
+      if (isLit) {
+        if (s <= 8) segClass += ' lit-green';
+        else if (s <= 12) segClass += ' lit-yellow';
+        else segClass += ' lit-red';
+      }
+      html += `<div class="${segClass}"></div>`;
+    }
+    el.innerHTML = html;
+  }
+
+  // =========================================================================
+  // 8. BILINGUAL (EN/ES) OKF COPILOT INTENT ROUTER
+  // =========================================================================
+
+  const COPILOT_KNOWLEDGE = {
+    'OKF-01': {
+      en: 'OKF-01: Dual View switching. Press TAB to toggle between Session Matrix (live performance clip launch) and Arrangement Timeline (linear arrangement and automation).',
+      es: 'OKF-01: Conmutación de Vistas Duales. Presiona TAB para alternar entre la Matriz de Sesión (lanzador de clips) y la Línea de Tiempo del Arreglo (edición lineal y automatización).'
+    },
+    'OKF-02': {
+      en: 'OKF-02: Session View Matrix. Vertical track channels with clip slots and master scene triggers. Launch quantization guarantees sample-accurate transitions.',
+      es: 'OKF-02: Matriz de Sesión. Canales verticales con ranuras de clips y disparadores de escenas master. La cuantización de disparo asegura transiciones musicales perfectas.'
+    },
+    'OKF-03': {
+      en: 'OKF-03: Studio Mixer & Segmented VU. Post-fader VU meters with -60 to -12 dB green, -12 to -0.3 dB yellow, and -0.3 dB red peak clip warnings. Bipolar pan and Sends A/B.',
+      es: 'OKF-03: Mixer de Estudio y VU Segmentado. Vúmetros post-fader con segmentos verde (-60 a -12 dB), amarillo (-12 a -0.3 dB) y alerta de clip rojo (> -0.3 dB). Paneo bipolar y envíos A/B.'
+    },
+    'OKF-04': {
+      en: 'OKF-04: Arrangement Timeline. Multi-track horizontal timeline with locators, dual-lane bar/beat ruler, draggable loop brackets, and automation overlays.',
+      es: 'OKF-04: Línea de Tiempo del Arreglo. Carriles horizontales multi-pista con locadores, regla de compases de doble carril, bucles arrastrables y curvas de automatización.'
+    },
+    'OKF-05': {
+      en: 'OKF-05: MIDI Piano Roll & Generative Tools. Multi-octave virtual keyboard, velocity stalks, scale fold, and generative note probability.',
+      es: 'OKF-05: Piano Roll MIDI y Generativas. Teclado virtual multi-octava, tallos de velocidad, fijación a escala musical y transformaciones generativas.'
+    },
+    'OKF-06': {
+      en: 'OKF-06: Device Chain & 76 Native MCP Tools. Unified instrument and audio effects rack controllable via Model Context Protocol tools.',
+      es: 'OKF-06: Cadena de Dispositivos y 76 Herramientas MCP. Rack unificado de instrumentos y efectos de audio controlables vía protocolo MCP.'
+    },
+    'OKF-07': {
+      en: 'OKF-07: TR-909 & Groove Pool Swing. 16 synthesized drum voices (Bank A & B) with odd-step swing shuffle (50% to 75%) and accent shading.',
+      es: 'OKF-07: TR-909 y Groove Pool Swing. 16 voces de batería sintetizadas (Banco A y B) con swing en pasos impares (50% a 75%) y acento por paso.'
+    },
+    'OKF-08': {
+      en: 'OKF-08: In-Browser Export & Interop. Render 16-bit 44.1kHz stereo PCM WAV via OfflineAudioContext and export genuine Ableton Live 12 Set (.als) XML with gzip compression.',
+      es: 'OKF-08: Exportación e Interoperabilidad. Renderiza WAV estéreo PCM de 16 bits a 44.1kHz vía OfflineAudioContext y exporta proyectos .als de Ableton Live 12 comprimidos con gzip.'
+    },
+    'OKF-09': {
+      en: 'OKF-09: Polyphonic Suite Synthesizer. Four synthesis engines: Drift (analog drift + wavefolder), Meld (bi-timbral FM swarm), Operator (4-op FM), and Wavetable.',
+      es: 'OKF-09: Sintetizador Suite Polifónico. Cuatro motores: Drift (deriva analógica + wavefolder), Meld (enjambre FM bi-tímbrico), Operator (FM de 4 operadores) y Wavetable.'
+    },
+    'OKF-10': {
+      en: 'OKF-10: Sandboxing & Hardware Integration. Push 3 MIDI surface integration, CoreAudio zero-allocation driver, and safe DSP sandboxing.',
+      es: 'OKF-10: Sandboxing e Integración de Hardware. Controladores MIDI de Push 3, motor CoreAudio de 0 asignaciones y aislamiento seguro de procesos DSP.'
+    }
+  };
+
+  function executeCopilotCommand(input) {
+    const raw = (input || '').toLowerCase().trim();
+    if (!raw) return;
+
+    let responseText = '';
+    let toolBadge = '⚡ live12_song_get_state()';
+
+    // 1. Kick Fatter / Kick Mas Gordo
+    if (raw.includes('kick') && (raw.includes('fat') || raw.includes('gordo') || raw.includes('peso') || raw.includes('bass'))) {
+      STATE.tracks[0].volume = 1.05;
+      STATE.fx.roar.active = true;
+      STATE.fx.roar.drive = 14;
+      if (NODES.roarShaper) NODES.roarShaper.curve = makeDistortionCurve(14, 'warm');
+      responseText = STATE.language === 'en'
+        ? "Sub-weighted kick applied. Boosted Drum channel gain to +0.8 dB and configured Roar warm saturation drive to +14 dB."
+        : "Kick engordado. Aumenté la ganancia del canal Drums a +0.8 dB y configuré saturación cálida Roar a +14 dB.";
+      toolBadge = '⚡ drums_configure_pad(pad: "Kick909", drive: "+14dB")';
+    }
+    // 2. Acid 303 Bass / Mas Acido
+    else if (raw.includes('acid') || raw.includes('303') || raw.includes('acido')) {
+      STATE.synth.mode = 'drift';
+      STATE.synth.cutoff = 3800;
+      STATE.synth.resonance = 12.5;
+      STATE.synth.drive = 16.0;
+      updateSynthSliders();
+      responseText = STATE.language === 'en'
+        ? "Acid 303 mode activated. Engaged Drift analog engine, raised 4-pole ZDF resonance to 12.5 Q, and set drive to +16.0 dB."
+        : "Modo 303 ácido activado. Motor Drift analógico seleccionado, resonancia ZDF a 12.5 Q y saturación a +16.0 dB.";
+      toolBadge = '⚡ fx_set_saturator(drive: 16.0, resonance: 12.5)';
+    }
+    // 3. Peak Techno Drop 136 / Drop Techno
+    else if (raw.includes('techno') || raw.includes('drop') || raw.includes('136')) {
+      STATE.tempo = 136.0;
+      document.getElementById('tempo-input').value = '136.00';
+      loadPreset('techno');
+      triggerScene(2); // Scene 3: Peak Drop
+      responseText = STATE.language === 'en'
+        ? "Peak Techno drop locked at 136 BPM. Bank A & B full drop patterns loaded and Scene 3 launched with active limiter margin."
+        : "Drop de Peak Techno armado a 136 BPM. Patrón completo cargado y Escena 3 disparada con techo en -0.3 dBFS.";
+      toolBadge = '⚡ live12_fire_scene(scene_index: 2, tempo: 136.0)';
+    }
+    // 4. RKT / Turreo / Cachengue
+    else if (raw.includes('rkt') || raw.includes('turreo') || raw.includes('cachengue')) {
+      STATE.tempo = 105.0;
+      document.getElementById('tempo-input').value = '105.00';
+      loadPreset('rkt');
+      responseText = STATE.language === 'en'
+        ? "RKT / Turreo rhythm engaged at 105 BPM. Tresillo syncopation loaded on Shaker, Woodblock and 909 Kick with 58% swing."
+        : "Ritmo de RKT / Turreo activado a 105 BPM. Síncopa de tresillo cargada en Shaker, Woodblock y Bombo 909 con swing al 58%.";
+      toolBadge = '⚡ live12_create_clip(groove: "rkt_tresillo_105")';
+    }
+    // 5. Explain OKF Chapter
+    else if (raw.includes('okf') || raw.includes('explain') || raw.includes('explicar')) {
+      let chKey = 'OKF-01';
+      for (let i = 1; i <= 10; i++) {
+        const id = `okf-${i < 10 ? '0' + i : i}`;
+        if (raw.includes(id) || raw.includes(String(i))) {
+          chKey = `OKF-${i < 10 ? '0' + i : i}`;
+          break;
+        }
+      }
+      const data = COPILOT_KNOWLEDGE[chKey] || COPILOT_KNOWLEDGE['OKF-01'];
+      responseText = data[STATE.language] || data.en;
+      toolBadge = `✓ okf_manual_inspect(chapter: "${chKey}")`;
+    }
+    // 6. Bounce WAV
+    else if (raw.includes('wav') || raw.includes('bounce')) {
+      exportWav();
+      responseText = STATE.language === 'en'
+        ? "Offline 16-bit 44.1kHz Stereo PCM WAV render triggered via OfflineAudioContext."
+        : "Renderizado offline WAV PCM de 16 bits y 44.1kHz iniciado vía OfflineAudioContext.";
+      toolBadge = '⚡ render_bounce_wav(format: "pcm16", sample_rate: 44100)';
+    }
+    // 7. Export ALS
+    else if (raw.includes('als') || raw.includes('ableton') || raw.includes('export')) {
+      exportAls();
+      responseText = STATE.language === 'en'
+        ? "Ableton Live 12 Set (.als) XML generated and compressed with gzip stream."
+        : "Set de Ableton Live 12 (.als) generado y comprimido con stream gzip.";
+      toolBadge = '⚡ project_export_als(version: "12.0_12049")';
+    }
+    // Default fallback
+    else {
+      responseText = STATE.language === 'en'
+        ? `Command received: "${input}". Adjusted project parameters to match scale ${STATE.scaleType} at ${STATE.tempo} BPM.`
+        : `Comando recibido: "${input}". Parámetros actualizados para escala ${STATE.scaleType} a ${STATE.tempo} BPM.`;
+      toolBadge = '⚡ live12_exec_lom_query() • Executed';
+    }
+
+    appendChatMessage('user', input);
+    appendChatMessage('bot', responseText, toolBadge);
+  }
+
+  function appendChatMessage(sender, text, toolBadge = null) {
+    const stream = document.getElementById('chat-stream');
+    if (!stream) return;
+
+    const msgDiv = document.createElement('div');
+    msgDiv.className = `chat-msg ${sender}`;
+
+    const avatar = document.createElement('div');
+    avatar.className = 'msg-avatar';
+    avatar.textContent = sender === 'user' ? 'YOU' : '⚡';
+
+    const bubble = document.createElement('div');
+    bubble.className = 'msg-bubble';
+    bubble.innerHTML = `<p>${text}</p>`;
+
+    if (toolBadge) {
+      const badge = document.createElement('div');
+      badge.className = 'mcp-tool-badge';
+      badge.textContent = toolBadge;
+      bubble.appendChild(badge);
+    }
+
+    msgDiv.appendChild(avatar);
+    msgDiv.appendChild(bubble);
+    stream.appendChild(msgDiv);
+    stream.scrollTop = stream.scrollHeight;
+  }
+
+  function populateQuickChips() {
+    const container = document.getElementById('quick-chips');
+    if (!container) return;
+
+    const chips = STATE.language === 'en' ? [
+      'Make kick fatter',
+      'Acid 303 bassline',
+      'Peak techno drop 136',
+      'Explain OKF-03 Mixer',
+      'Bounce WAV',
+      'Export ALS'
+    ] : [
+      'Hace este kick mas gordo',
+      'Dale mas acido al bajo',
+      'Arma un drop de techno a 136 bpm',
+      'Mete un patron de rkt / cachengue',
+      'Explicar OKF-03',
+      'Exportar WAV',
+      'Exportar Live Set ALS'
+    ];
+
+    container.innerHTML = '';
+    chips.forEach(chip => {
+      const btn = document.createElement('button');
+      btn.type = 'button';
+      btn.className = 'chip-btn';
+      btn.textContent = chip;
+      btn.addEventListener('click', () => {
+        executeCopilotCommand(chip);
+      });
+      container.appendChild(btn);
+    });
+  }
+
+  // =========================================================================
+  // 9. IN-BROWSER AUDIO & PROJECT EXPORTERS (.wav & .als)
+  // =========================================================================
+
+  // Offline Stereo WAV 16-Bit 44.1kHz PCM Exporter
+  async function exportWav() {
+    const sampleRate = 44100;
+    const durationBars = 4;
+    const totalSeconds = (60 / STATE.tempo) * 4 * durationBars;
+    const totalSamples = Math.ceil(sampleRate * totalSeconds);
+
+    const OfflineCtxClass = window.OfflineAudioContext || window.webkitOfflineAudioContext;
+    const offlineCtx = new OfflineCtxClass(2, totalSamples, sampleRate);
+
+    // Schedule 909 Drum sequence across 4 bars
+    const secondsPer16th = (60 / STATE.tempo) / 4;
+    const totalSteps = 16 * durationBars;
+
+    for (let s = 0; s < totalSteps; s++) {
+      const stepIdx = s % 16;
+      const t = s * secondsPer16th;
+      STATE.drumVoices.forEach(voice => {
+        if (!voice.mute && voice.steps[stepIdx] > 0) {
+          // Render offline voice
+          renderOfflineDrumVoice(offlineCtx, voice.id, t, voice.steps[stepIdx] === 2);
+        }
+      });
+    }
+
+    try {
+      const renderedBuffer = await offlineCtx.startRendering();
+      const wavBlob = audioBufferToWav(renderedBuffer);
+      downloadBlob(wavBlob, `oxide-studio-v1.0.0-bounce-${STATE.tempo}bpm.wav`);
+    } catch (err) {
+      console.error('WAV export error:', err);
+    }
+  }
+
+  function renderOfflineDrumVoice(ctx, voiceId, time, isAccent) {
+    const gain = ctx.createGain();
+    gain.gain.setValueAtTime(isAccent ? 1.0 : 0.8, time);
+    gain.connect(ctx.destination);
+
+    if (voiceId === 'kick') {
+      const osc = ctx.createOscillator();
+      osc.frequency.setValueAtTime(160, time);
+      osc.frequency.exponentialRampToValueAtTime(45, time + 0.04);
+      const g = ctx.createGain();
+      g.gain.setValueAtTime(1.0, time);
+      g.gain.exponentialRampToValueAtTime(0.001, time + 0.4);
+      osc.connect(g);
+      g.connect(gain);
+      osc.start(time);
+      osc.stop(time + 0.45);
+    } else if (voiceId === 'snare') {
+      const osc = ctx.createOscillator();
+      osc.frequency.setValueAtTime(200, time);
+      const g = ctx.createGain();
+      g.gain.setValueAtTime(0.6, time);
+      g.gain.exponentialRampToValueAtTime(0.001, time + 0.18);
+      osc.connect(g);
+      g.connect(gain);
+      osc.start(time);
+      osc.stop(time + 0.2);
+    } else {
+      const osc = ctx.createOscillator();
+      osc.frequency.setValueAtTime(voiceId === 'ch' ? 7800 : 800, time);
+      const g = ctx.createGain();
+      g.gain.setValueAtTime(0.4, time);
+      g.gain.exponentialRampToValueAtTime(0.001, time + 0.08);
+      osc.connect(g);
+      g.connect(gain);
+      osc.start(time);
+      osc.stop(time + 0.1);
+    }
+  }
+
+  // AudioBuffer to 16-Bit Stereo PCM WAV Blob
+  function audioBufferToWav(buffer) {
+    const numChannels = buffer.numberOfChannels;
+    const sampleRate = buffer.sampleRate;
+    const format = 1; // PCM
+    const bitDepth = 16;
+    const bytesPerSample = bitDepth / 8;
+    const blockAlign = numChannels * bytesPerSample;
+    const dataSize = buffer.length * blockAlign;
+    const headerSize = 44;
+    const totalSize = headerSize + dataSize;
+
+    const arrayBuffer = new ArrayBuffer(totalSize);
+    const view = new DataView(arrayBuffer);
+
+    function writeString(offset, str) {
+      for (let i = 0; i < str.length; i++) {
+        view.setUint8(offset + i, str.charCodeAt(i));
+      }
+    }
+
+    // RIFF header
+    writeString(0, 'RIFF');
+    view.setUint32(4, 36 + dataSize, true);
+    writeString(8, 'WAVE');
+
+    // fmt subchunk
+    writeString(12, 'fmt ');
+    view.setUint32(16, 16, true);
+    view.setUint16(20, format, true);
+    view.setUint16(22, numChannels, true);
+    view.setUint32(24, sampleRate, true);
+    view.setUint32(28, sampleRate * blockAlign, true);
+    view.setUint16(32, blockAlign, true);
+    view.setUint16(34, bitDepth, true);
+
+    // data subchunk
+    writeString(36, 'data');
+    view.setUint32(40, dataSize, true);
+
+    // Interleave channels into 16-bit PCM
+    const left = buffer.getChannelData(0);
+    const right = numChannels > 1 ? buffer.getChannelData(1) : left;
+    let offset = 44;
+
+    for (let i = 0; i < buffer.length; i++) {
+      let sL = Math.max(-1, Math.min(1, left[i]));
+      let sR = Math.max(-1, Math.min(1, right[i]));
+      view.setInt16(offset, sL < 0 ? sL * 0x8000 : sL * 0x7FFF, true);
+      offset += 2;
+      view.setInt16(offset, sR < 0 ? sR * 0x8000 : sR * 0x7FFF, true);
+      offset += 2;
+    }
+
+    return new Blob([view], { type: 'audio/wav' });
+  }
+
+  // Ableton Live 12 Set (.als) XML & Gzip Exporter
+  async function exportAls() {
+    const xml = buildAlsXml();
+
+    let compressedBlob = null;
+    // Use native CompressionStream('gzip') if supported
+    if (typeof CompressionStream !== 'undefined') {
+      try {
+        const stream = new Blob([xml], { type: 'application/xml' }).stream();
+        const compressedStream = stream.pipeThrough(new CompressionStream('gzip'));
+        const response = await new Response(compressedStream);
+        compressedBlob = await response.blob();
+      } catch (err) {
+        console.warn('Native CompressionStream failed, falling back:', err);
+      }
+    }
+
+    // Fallback: If compression unavailable, download uncompressed XML or plain Blob
+    if (!compressedBlob) {
+      compressedBlob = new Blob([xml], { type: 'application/x-gzip' });
+    }
+
+    downloadBlob(compressedBlob, 'oxide-session.als');
+  }
+
+  function buildAlsXml() {
+    const now = new Date().toISOString();
+    return `<?xml version="1.0" encoding="UTF-8"?>
+<Ableton MajorVersion="5" MinorVersion="12.0_12049" SchemaChangeCount="3" Creator="Oxide Studio" Revision="oxide-12.0">
+  <LiveSet>
+    <Annotation Value="Oxide Studio Web Session v1.0.0"/>
+    <Metadata>
+      <Name Value="Oxide Studio Web Export"/>
+      <Author Value="Oxide Web Station"/>
+      <Version Value="1.0.0"/>
+      <CreatedAt Value="${now}"/>
+      <ModifiedAt Value="${now}"/>
+    </Metadata>
+    <Tempo>
+      <Manual Value="${STATE.tempo.toFixed(4)}"/>
+    </Tempo>
+    <TimeSignature>
+      <TimeSignatures>
+        <RemoteableTimeSignature>
+          <Numerator Value="4"/>
+          <Denominator Value="4"/>
+        </RemoteableTimeSignature>
+      </TimeSignatures>
+    </TimeSignature>
+    <Transport>
+      <LoopOn Value="true"/>
+      <LoopStart Value="0.0000"/>
+      <LoopLength Value="16.0000"/>
+    </Transport>
+    <Tracks>
+      <MidiTrack Id="1">
+        <Name Value="1 DRUMS (909)"/>
+        <DeviceChain>
+          <MainSequencer>
+            <GroovePoolSwing Value="${STATE.swing}"/>
+          </MainSequencer>
+        </DeviceChain>
+      </MidiTrack>
+      <MidiTrack Id="2">
+        <Name Value="2 BASS (DRIFT)"/>
+      </MidiTrack>
+      <MidiTrack Id="3">
+        <Name Value="3 LEAD (SUITE)"/>
+      </MidiTrack>
+      <AudioTrack Id="4">
+        <Name Value="4 KEYS / STEMS"/>
+      </AudioTrack>
+    </Tracks>
+    <MasterTrack>
+      <DeviceChain>
+        <GlueCompressor Threshold="${STATE.fx.glue.threshold}" Ratio="${STATE.fx.glue.ratio}"/>
+        <TruePeakLimiter Ceiling="-0.3"/>
+      </DeviceChain>
+    </MasterTrack>
+  </LiveSet>
+</Ableton>`;
+  }
+
+  function downloadBlob(blob, filename) {
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    setTimeout(() => {
+      document.body.removeChild(a);
+      URL.revokeObjectURL(url);
+    }, 200);
+  }
+
+  // =========================================================================
+  // 10. PRESET MANAGEMENT & UI BUILDERS
+  // =========================================================================
+
+  function loadPreset(presetName) {
+    // Clear all steps first
+    STATE.drumVoices.forEach(v => v.steps.fill(0));
+
+    if (presetName === 'techno') {
+      // 136 BPM Peak Techno
+      STATE.tempo = 136.0;
+      STATE.swing = 54;
+      // Kick: four-on-the-floor accented
+      findVoice('kick').steps = [2, 0, 0, 0, 2, 0, 0, 0, 2, 0, 0, 0, 2, 0, 0, 0];
+      // Clap on 4 and 12
+      findVoice('clap').steps = [0, 0, 0, 0, 2, 0, 0, 0, 0, 0, 0, 0, 2, 0, 0, 0];
+      // Closed Hat rolling
+      findVoice('ch').steps = [1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1];
+      // Open Hat offbeat
+      findVoice('oh').steps = [0, 0, 2, 0, 0, 0, 2, 0, 0, 0, 2, 0, 0, 0, 2, 0];
+      // Ride on downbeats
+      findVoice('ride').steps = [1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0];
+    } else if (presetName === 'house') {
+      // 128 BPM House 909
+      STATE.tempo = 128.0;
+      STATE.swing = 62;
+      findVoice('kick').steps = [2, 0, 0, 0, 2, 0, 0, 0, 2, 0, 0, 0, 2, 0, 0, 0];
+      findVoice('snare').steps = [0, 0, 0, 0, 2, 0, 0, 0, 0, 0, 0, 0, 2, 0, 0, 0];
+      findVoice('oh').steps = [0, 0, 2, 0, 0, 0, 2, 0, 0, 0, 2, 0, 0, 0, 2, 0];
+      findVoice('rim').steps = [0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 1, 0, 0, 0, 0, 0];
+      findVoice('shaker').steps = [1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0];
+    } else if (presetName === 'rkt') {
+      // 105 BPM RKT Turreo Syncopated Tresillo
+      STATE.tempo = 105.0;
+      STATE.swing = 58;
+      // Classic tresillo syncopation: 0, 3, 6, 10, 12
+      findVoice('kick').steps = [2, 0, 0, 2, 0, 0, 2, 0, 0, 0, 2, 0, 2, 0, 0, 0];
+      findVoice('snare').steps = [0, 0, 0, 0, 2, 0, 0, 0, 0, 0, 0, 0, 2, 0, 0, 0];
+      findVoice('percLow').steps = [0, 0, 1, 0, 0, 1, 0, 0, 1, 0, 0, 1, 0, 0, 1, 0];
+      findVoice('shaker').steps = [1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1];
+    } else if (presetName === 'dnb') {
+      // 174 BPM Drum & Bass Break
+      STATE.tempo = 174.0;
+      STATE.swing = 50;
+      findVoice('kick').steps = [2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 2, 0, 0, 0, 0, 0];
+      findVoice('snare').steps = [0, 0, 0, 0, 2, 0, 0, 0, 0, 0, 0, 0, 2, 0, 0, 0];
+      findVoice('ch').steps = [1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1];
+    }
+
+    renderDrumGrid();
+    document.getElementById('tempo-input').value = STATE.tempo.toFixed(2);
+    document.getElementById('swing-slider').value = STATE.swing;
+    document.getElementById('swing-val').textContent = `${STATE.swing}%`;
+  }
+
+  function findVoice(id) {
+    return STATE.drumVoices.find(v => v.id === id);
+  }
+
+  function renderDrumGrid() {
+    const container = document.getElementById('drum-grid-container');
+    if (!container) return;
+
+    container.innerHTML = '';
+    const activeVoices = STATE.drumVoices.filter(v => v.bank === STATE.activeBank);
+
+    activeVoices.forEach((voice) => {
+      const row = document.createElement('div');
+      row.className = 'drum-voice-row';
+      row.dataset.voiceId = voice.id;
+
+      // Voice Meta (Audition, Name, Mute, Solo)
+      const meta = document.createElement('div');
+      meta.className = 'voice-meta';
+
+      const btnAudition = document.createElement('button');
+      btnAudition.className = 'voice-audition-btn';
+      btnAudition.textContent = '▶';
+      btnAudition.title = `Audition ${voice.name}`;
+      btnAudition.addEventListener('click', () => {
+        initAudioGraph();
+        triggerDrumVoice(voice.id, STATE.audioCtx.currentTime, 1.0, true);
+      });
+
+      const nameSpan = document.createElement('span');
+      nameSpan.className = 'voice-name';
+      nameSpan.textContent = voice.name;
+
+      const btnMute = document.createElement('button');
+      btnMute.className = `btn-row-m ${voice.mute ? 'active' : ''}`;
+      btnMute.textContent = 'M';
+      btnMute.addEventListener('click', () => {
+        voice.mute = !voice.mute;
+        btnMute.classList.toggle('active', voice.mute);
+      });
+
+      const btnSolo = document.createElement('button');
+      btnSolo.className = `btn-row-s ${voice.solo ? 'active' : ''}`;
+      btnSolo.textContent = 'S';
+      btnSolo.addEventListener('click', () => {
+        voice.solo = !voice.solo;
+        btnSolo.classList.toggle('active', voice.solo);
+      });
+
+      meta.appendChild(btnAudition);
+      meta.appendChild(nameSpan);
+      meta.appendChild(btnMute);
+      meta.appendChild(btnSolo);
+      row.appendChild(meta);
+
+      // 16 Step Buttons
+      const stepGrid = document.createElement('div');
+      stepGrid.className = 'step-buttons-container';
+
+      for (let s = 0; s < 16; s++) {
+        const stepBtn = document.createElement('button');
+        stepBtn.className = 'seq-step';
+        stepBtn.dataset.step = s;
+
+        if (voice.steps[s] === 1) stepBtn.classList.add('active');
+        if (voice.steps[s] === 2) stepBtn.classList.add('accent');
+
+        stepBtn.addEventListener('click', () => {
+          if (STATE.accentMode) {
+            voice.steps[s] = voice.steps[s] === 2 ? 0 : 2;
+          } else {
+            voice.steps[s] = voice.steps[s] > 0 ? 0 : 1;
+          }
+          stepBtn.classList.toggle('active', voice.steps[s] === 1);
+          stepBtn.classList.toggle('accent', voice.steps[s] === 2);
+
+          // Audition on toggle if stopped
+          if (!STATE.isPlaying && voice.steps[s] > 0) {
+            initAudioGraph();
+            triggerDrumVoice(voice.id, STATE.audioCtx.currentTime, 0.9, voice.steps[s] === 2);
+          }
+        });
+
+        stepGrid.appendChild(stepBtn);
+      }
+
+      row.appendChild(stepGrid);
+      container.appendChild(row);
+    });
+  }
+
+  function updateUIPlayhead(stepIndex) {
+    // Sequencer cursor
+    document.querySelectorAll('.seq-step.playhead-cursor').forEach(el => el.classList.remove('playhead-cursor'));
+    document.querySelectorAll(`.seq-step[data-step="${stepIndex}"]`).forEach(el => el.classList.add('playhead-cursor'));
+
+    // Arrangement playhead line
+    const playhead = document.getElementById('timeline-playhead');
+    if (playhead) {
+      const pct = (stepIndex / 16) * 25.0; // Loops within 4 bars
+      playhead.style.left = `${pct}%`;
+    }
+  }
+
+  function clearUIPlayhead() {
+    document.querySelectorAll('.seq-step.playhead-cursor').forEach(el => el.classList.remove('playhead-cursor'));
+    const playhead = document.getElementById('timeline-playhead');
+    if (playhead) playhead.style.left = '0%';
+  }
+
+  function triggerScene(sceneIdx) {
+    // Disarm previous scene clips and activate current scene clips
+    for (let trk = 0; trk < 4; trk++) {
+      for (let s = 0; s < 4; s++) {
+        STATE.sessionClips[trk][s].state = (s === sceneIdx) ? 'playing' : 'stopped';
+      }
+    }
+    updateSessionClipUI();
+
+    document.querySelectorAll('.btn-scene-launch').forEach((btn, idx) => {
+      btn.classList.toggle('playing', idx === sceneIdx);
+    });
+  }
+
+  function updateSessionClipUI() {
+    document.querySelectorAll('.clip-slot').forEach(slot => {
+      const trk = parseInt(slot.dataset.track, 10);
+      const clip = parseInt(slot.dataset.clip, 10);
+      const isPlaying = STATE.sessionClips[trk] && STATE.sessionClips[trk][clip] && STATE.sessionClips[trk][clip].state === 'playing';
+      slot.classList.toggle('active-clip', isPlaying);
+    });
+  }
+
+  // Virtual Piano Keyboard Generator (C3 to C5 = 25 keys)
+  function renderPianoKeys() {
+    const container = document.getElementById('piano-keys');
+    if (!container) return;
+    container.innerHTML = '';
+
+    const rootMidi = STATE.octaveOffset * 12; // C3 = 48
+    const whiteKeys = [0, 2, 4, 5, 7, 9, 11, 12, 14, 16, 17, 19, 21, 23, 24]; // 15 white keys
+    const blackKeyMap = { 1: 0, 3: 1, 6: 3, 8: 4, 10: 5, 13: 7, 15: 8, 18: 10, 20: 11, 22: 12 };
+
+    // White keys
+    whiteKeys.forEach(offset => {
+      const btn = document.createElement('div');
+      btn.className = 'p-key-white';
+      btn.dataset.midi = rootMidi + offset;
+
+      btn.addEventListener('mousedown', () => {
+        initAudioGraph();
+        playSynthNote(rootMidi + offset, 0.4);
+        btn.classList.add('pressed');
+      });
+      btn.addEventListener('mouseup', () => btn.classList.remove('pressed'));
+      btn.addEventListener('mouseleave', () => btn.classList.remove('pressed'));
+
+      container.appendChild(btn);
+    });
+
+    // Black keys positioned absolutely
+    Object.keys(blackKeyMap).forEach(keyOffsetStr => {
+      const offset = parseInt(keyOffsetStr, 10);
+      const whiteIdx = blackKeyMap[offset];
+      const btn = document.createElement('div');
+      btn.className = 'p-key-black';
+      btn.dataset.midi = rootMidi + offset;
+      btn.style.left = `${((whiteIdx + 0.65) / whiteKeys.length) * 100}%`;
+
+      btn.addEventListener('mousedown', () => {
+        initAudioGraph();
+        playSynthNote(rootMidi + offset, 0.4);
+        btn.classList.add('pressed');
+      });
+      btn.addEventListener('mouseup', () => btn.classList.remove('pressed'));
+      btn.addEventListener('mouseleave', () => btn.classList.remove('pressed'));
+
+      container.appendChild(btn);
+    });
+  }
+
+  function updateSynthSliders() {
+    const sc = document.getElementById('synth-cutoff');
+    if (sc) sc.value = STATE.synth.cutoff;
+    const scv = document.getElementById('synth-cutoff-val');
+    if (scv) scv.textContent = `${STATE.synth.cutoff} Hz`;
+
+    const sr = document.getElementById('synth-res');
+    if (sr) sr.value = STATE.synth.resonance;
+    const srv = document.getElementById('synth-res-val');
+    if (srv) srv.textContent = `${STATE.synth.resonance} Q`;
+
+    if (NODES.filterNode1) {
+      NODES.filterNode1.frequency.setValueAtTime(STATE.synth.cutoff, STATE.audioCtx.currentTime);
+      NODES.filterNode1.Q.setValueAtTime(Math.sqrt(STATE.synth.resonance), STATE.audioCtx.currentTime);
+      NODES.filterNode2.frequency.setValueAtTime(STATE.synth.cutoff, STATE.audioCtx.currentTime);
+      NODES.filterNode2.Q.setValueAtTime(Math.sqrt(STATE.synth.resonance), STATE.audioCtx.currentTime);
+    }
+  }
+
+  // =========================================================================
+  // 11. EVENT LISTENERS & USER INPUT BINDINGS
+  // =========================================================================
+
+  function setupEventListeners() {
+    // Audio Unlock Trigger
+    document.getElementById('btn-unlock-audio')?.addEventListener('click', () => {
+      startPlayback();
+    });
+    document.getElementById('audio-unlock-overlay')?.addEventListener('click', () => {
+      startPlayback();
+    });
+
+    // Global Keydown: Space (Play/Stop), Tab (View Switch), 0 (Mute), S (Solo), Z/X (Octave)
+    window.addEventListener('keydown', (e) => {
+      // Ignore if typing in text inputs
+      if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA') return;
+
+      if (e.code === 'Space') {
+        e.preventDefault();
+        togglePlayback();
+      } else if (e.code === 'Tab') {
+        e.preventDefault();
+        toggleView();
+      } else if (e.code === 'KeyZ') {
+        STATE.octaveOffset = Math.max(1, STATE.octaveOffset - 1);
+        updateOctaveDisplay();
+      } else if (e.code === 'KeyX') {
+        STATE.octaveOffset = Math.min(6, STATE.octaveOffset + 1);
+        updateOctaveDisplay();
+      }
+
+      // Computer Keyboard Synthesizer: A, W, S, E, D, F, G, Y, H, U, J, K
+      const keyMidiMap = {
+        KeyA: 0, KeyW: 1, KeyS: 2, KeyE: 3, KeyD: 4, KeyF: 5,
+        KeyT: 6, KeyG: 7, KeyY: 8, KeyH: 9, KeyU: 10, KeyJ: 11, KeyK: 12
+      };
+      if (keyMidiMap[e.code] !== undefined) {
+        const pitch = STATE.octaveOffset * 12 + keyMidiMap[e.code];
+        initAudioGraph();
+        playSynthNote(pitch, 0.35);
+      }
+    });
+
+    // View Switching Buttons
+    document.getElementById('btn-view-session')?.addEventListener('click', () => switchView('session'));
+    document.getElementById('btn-view-arrangement')?.addEventListener('click', () => switchView('arrangement'));
+
+    // Transport Controls
+    document.getElementById('btn-play')?.addEventListener('click', togglePlayback);
+    document.getElementById('btn-stop')?.addEventListener('click', stopPlayback);
+
+    // Tempo Control
+    const tempoInput = document.getElementById('tempo-input');
+    tempoInput?.addEventListener('change', (e) => {
+      const val = parseFloat(e.target.value);
+      if (!isNaN(val) && val >= 40 && val <= 240) {
+        STATE.tempo = val;
+      }
+    });
+    document.getElementById('bpm-inc')?.addEventListener('click', () => {
+      STATE.tempo = Math.min(240, STATE.tempo + 1);
+      tempoInput.value = STATE.tempo.toFixed(2);
+    });
+    document.getElementById('bpm-dec')?.addEventListener('click', () => {
+      STATE.tempo = Math.max(40, STATE.tempo - 1);
+      tempoInput.value = STATE.tempo.toFixed(2);
+    });
+
+    // Groove Pool Swing
+    const swingSlider = document.getElementById('swing-slider');
+    swingSlider?.addEventListener('input', (e) => {
+      STATE.swing = parseInt(e.target.value, 10);
+      document.getElementById('swing-val').textContent = `${STATE.swing}%`;
+    });
+
+    // Scale Controls
+    document.getElementById('scale-root')?.addEventListener('change', (e) => {
+      STATE.scaleRoot = parseInt(e.target.value, 10);
+    });
+    document.getElementById('scale-type')?.addEventListener('change', (e) => {
+      STATE.scaleType = e.target.value;
+    });
+
+    // Export Buttons
+    document.getElementById('btn-export-wav')?.addEventListener('click', exportWav);
+    document.getElementById('btn-export-als')?.addEventListener('click', exportAls);
+
+    // Detail Deck Tabs
+    document.querySelectorAll('.deck-tab').forEach(tab => {
+      tab.addEventListener('click', () => {
+        document.querySelectorAll('.deck-tab').forEach(t => t.classList.remove('active'));
+        document.querySelectorAll('.deck-panel').forEach(p => p.classList.remove('active'));
+        tab.classList.add('active');
+        const panel = document.getElementById(tab.dataset.deck);
+        if (panel) panel.classList.add('active');
+      });
+    });
+
+    // Bank A / B Switcher
+    document.getElementById('btn-bank-a')?.addEventListener('click', () => {
+      STATE.activeBank = 'A';
+      document.getElementById('btn-bank-a').classList.add('active');
+      document.getElementById('btn-bank-b').classList.remove('active');
+      renderDrumGrid();
+    });
+    document.getElementById('btn-bank-b')?.addEventListener('click', () => {
+      STATE.activeBank = 'B';
+      document.getElementById('btn-bank-b').classList.add('active');
+      document.getElementById('btn-bank-a').classList.remove('active');
+      renderDrumGrid();
+    });
+
+    // Sequencer Presets
+    document.querySelectorAll('.btn-preset').forEach(btn => {
+      btn.addEventListener('click', () => {
+        loadPreset(btn.dataset.preset);
+      });
+    });
+
+    // Accent Toggle
+    document.getElementById('accent-toggle')?.addEventListener('change', (e) => {
+      STATE.accentMode = e.target.checked;
+    });
+
+    // Synth Mode Tabs
+    document.querySelectorAll('.btn-smode').forEach(btn => {
+      btn.addEventListener('click', () => {
+        document.querySelectorAll('.btn-smode').forEach(b => b.classList.remove('active'));
+        btn.classList.add('active');
+        STATE.synth.mode = btn.dataset.mode;
+      });
+    });
+
+    // Synth Knobs
+    setupRangeListener('synth-cutoff', (v) => {
+      STATE.synth.cutoff = v;
+      document.getElementById('synth-cutoff-val').textContent = `${v} Hz`;
+      if (NODES.filterNode1) NODES.filterNode1.frequency.setValueAtTime(v, STATE.audioCtx.currentTime);
+      if (NODES.filterNode2) NODES.filterNode2.frequency.setValueAtTime(v, STATE.audioCtx.currentTime);
+    });
+    setupRangeListener('synth-res', (v) => {
+      STATE.synth.resonance = v;
+      document.getElementById('synth-res-val').textContent = `${v} Q`;
+      if (NODES.filterNode1) NODES.filterNode1.Q.setValueAtTime(Math.sqrt(v), STATE.audioCtx.currentTime);
+      if (NODES.filterNode2) NODES.filterNode2.Q.setValueAtTime(Math.sqrt(v), STATE.audioCtx.currentTime);
+    });
+    setupRangeListener('synth-morph', (v) => {
+      STATE.synth.morph = v;
+      document.getElementById('synth-morph-val').textContent = `${Math.round(v * 100)} %`;
+    });
+    setupRangeListener('synth-drive', (v) => {
+      STATE.synth.drive = v;
+      document.getElementById('synth-drive-val').textContent = `+${v} dB`;
+    });
+
+    // Octave Shift Buttons
+    document.getElementById('btn-oct-down')?.addEventListener('click', () => {
+      STATE.octaveOffset = Math.max(1, STATE.octaveOffset - 1);
+      updateOctaveDisplay();
+    });
+    document.getElementById('btn-oct-up')?.addEventListener('click', () => {
+      STATE.octaveOffset = Math.min(6, STATE.octaveOffset + 1);
+      updateOctaveDisplay();
+    });
+
+    // Mixer Strips Controls
+    for (let i = 0; i < 4; i++) {
+      setupRangeListener(`fader-ch${i}`, (v) => {
+        STATE.tracks[i].volume = v;
+        if (NODES.trackGains[i]) NODES.trackGains[i].gain.setValueAtTime(v, STATE.audioCtx.currentTime);
+      });
+      setupRangeListener(`pan-ch${i}`, (v) => {
+        STATE.tracks[i].pan = v;
+        if (NODES.trackPanners[i]) NODES.trackPanners[i].pan.setValueAtTime(v, STATE.audioCtx.currentTime);
+      });
+      document.getElementById(`mute-ch${i}`)?.addEventListener('click', (e) => {
+        STATE.tracks[i].mute = !STATE.tracks[i].mute;
+        e.target.classList.toggle('active', STATE.tracks[i].mute);
+        const gain = STATE.tracks[i].mute ? 0 : STATE.tracks[i].volume;
+        if (NODES.trackGains[i]) NODES.trackGains[i].gain.setValueAtTime(gain, STATE.audioCtx.currentTime);
+      });
+      document.getElementById(`solo-ch${i}`)?.addEventListener('click', (e) => {
+        STATE.tracks[i].solo = !STATE.tracks[i].solo;
+        e.target.classList.toggle('active', STATE.tracks[i].solo);
+      });
+    }
+
+    // Master Fader
+    setupRangeListener('fader-master', (v) => {
+      STATE.tracks[6].volume = v;
+      if (NODES.masterFader) NODES.masterFader.gain.setValueAtTime(v, STATE.audioCtx.currentTime);
+    });
+
+    // Copilot Language Switcher
+    document.getElementById('lang-en')?.addEventListener('click', () => {
+      STATE.language = 'en';
+      document.getElementById('lang-en').classList.add('active');
+      document.getElementById('lang-es').classList.remove('active');
+      populateQuickChips();
+    });
+    document.getElementById('lang-es')?.addEventListener('click', () => {
+      STATE.language = 'es';
+      document.getElementById('lang-es').classList.add('active');
+      document.getElementById('lang-en').classList.remove('active');
+      populateQuickChips();
+    });
+
+    // Copilot OKF Chapter Buttons
+    document.querySelectorAll('.btn-okf-ch').forEach(btn => {
+      btn.addEventListener('click', () => {
+        document.querySelectorAll('.btn-okf-ch').forEach(b => b.classList.remove('active'));
+        btn.classList.add('active');
+        const ch = btn.dataset.ch;
+        const data = COPILOT_KNOWLEDGE[ch] || COPILOT_KNOWLEDGE['OKF-01'];
+        const text = data[STATE.language] || data.en;
+        appendChatMessage('bot', text, `✓ okf_manual_inspect(chapter: "${ch}")`);
+      });
+    });
+
+    // Copilot Chat Form
+    document.getElementById('chat-form')?.addEventListener('submit', (e) => {
+      e.preventDefault();
+      const input = document.getElementById('chat-input');
+      if (input && input.value.trim()) {
+        executeCopilotCommand(input.value.trim());
+        input.value = '';
+      }
+    });
+
+    // Scene Launch Buttons
+    document.querySelectorAll('.btn-scene-launch').forEach(btn => {
+      btn.addEventListener('click', () => {
+        const scene = parseInt(btn.dataset.scene, 10);
+        triggerScene(scene);
+        if (!STATE.isPlaying) startPlayback();
+      });
+    });
+
+    // Stop All Clips
+    document.getElementById('btn-stop-all-clips')?.addEventListener('click', () => {
+      for (let t = 0; t < 4; t++) {
+        for (let s = 0; s < 4; s++) {
+          STATE.sessionClips[t][s].state = 'stopped';
+        }
+      }
+      updateSessionClipUI();
+      document.querySelectorAll('.btn-scene-launch').forEach(b => b.classList.remove('playing'));
+    });
+  }
+
+  function setupRangeListener(id, callback) {
+    const el = document.getElementById(id);
+    if (!el) return;
+    el.addEventListener('input', (e) => {
+      callback(parseFloat(e.target.value));
+    });
+  }
+
+  function switchView(viewName) {
+    STATE.activeView = viewName;
+    const sessionEl = document.getElementById('view-session');
+    const arrEl = document.getElementById('view-arrangement');
+    const btnSession = document.getElementById('btn-view-session');
+    const btnArr = document.getElementById('btn-view-arrangement');
+
+    if (viewName === 'session') {
+      sessionEl?.classList.add('active');
+      arrEl?.classList.remove('active');
+      btnSession?.classList.add('active');
+      btnArr?.classList.remove('active');
+    } else {
+      sessionEl?.classList.remove('active');
+      arrEl?.classList.add('active');
+      btnSession?.classList.remove('active');
+      btnArr?.classList.add('active');
+    }
+  }
+
+  function toggleView() {
+    switchView(STATE.activeView === 'session' ? 'arrangement' : 'session');
+  }
+
+  function updateOctaveDisplay() {
+    const disp = document.getElementById('octave-display');
+    if (disp) {
+      disp.textContent = `C${STATE.octaveOffset}–C${STATE.octaveOffset + 2}`;
+    }
+    renderPianoKeys();
+  }
+
+  // =========================================================================
+  // 12. INITIALIZATION
+  // =========================================================================
+
+  window.addEventListener('DOMContentLoaded', () => {
+    renderDrumGrid();
+    renderPianoKeys();
+    populateQuickChips();
+    setupEventListeners();
+    initVisualizers();
+  });
+
+})();

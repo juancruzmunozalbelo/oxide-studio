@@ -23,6 +23,8 @@
 
       <nav>
         <ul class="nav-links">
+          <li><a href="web/index.html" class="nav-link" style="color: var(--signal-amber); font-weight: 700;">▶ Web DAW</a></li>
+          <li><a href="#download" class="nav-link">Download</a></li>
           <li><a href="#playground" class="nav-link">Playground</a></li>
           <li><a href="#subsystems" class="nav-link">Subsystems</a></li>
           <li><a href="#mcp-tools" class="nav-link">76 MCP Tools</a></li>
@@ -36,7 +38,7 @@
       <div class="nav-actions">
         <a href="https://github.com/juancruzmunozalbelo/oxide-studio" target="_blank" rel="noopener noreferrer" class="btn btn-tactile btn-sm">
           <span>GitHub</span>
-          <span class="tabular">v0.1.0</span>
+          <span class="tabular">v1.0.0</span>
         </a>
       </div>
     </div>
@@ -79,7 +81,9 @@
             </div>
 
             <div style="display: flex; gap: 12px; flex-wrap: wrap;">
-              <a href="#playground" class="btn btn-primary">▶ Launch Web Audio Playground</a>
+              <a href="web/index.html" class="btn btn-primary" style="font-weight: 700;">▶ Launch Full Web DAW in Browser</a>
+              <a href="#download" class="btn btn-tactile">⬇ Download v1.0.0 Binaries</a>
+              <a href="#playground" class="btn btn-tactile">Web Audio Playground</a>
               <a href="https://github.com/juancruzmunozalbelo/oxide-studio" target="_blank" rel="noopener noreferrer" class="btn btn-cyan">View on GitHub</a>
             </div>
           </div>
@@ -230,6 +234,99 @@
                   </div>
                 </div>
               </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- =========================================================================
+         Download & Release Hub (v1.0.0 Official Release)
+         ========================================================================= -->
+    <section class="section" id="download" style="border-top: 1px solid var(--surface-border); background: var(--surface-base);">
+      <div class="container">
+        <div class="section-header">
+          <div class="section-eyebrow"><span>💾</span> Official v1.0.0 Release &amp; Download Hub</div>
+          <h2 class="section-title">Download Native Oxide Studio v1.0.0 or Launch in Browser.</h2>
+          <p class="section-desc">
+            Production-ready native binaries for macOS, Linux, and Windows, 1-command Cargo install, 
+            and zero-install in-browser workstation edition running 100% on GitHub Pages.
+          </p>
+        </div>
+
+        <div class="bento-grid">
+          <!-- Card 1: macOS Apple Silicon (Primary Hero Download) -->
+          <div class="bento-card col-6" style="border-color: var(--signal-amber);">
+            <span class="bento-tag">OFFICIAL RELEASE</span>
+            <h3 class="bento-title">macOS Apple Silicon (ARM64)</h3>
+            <p class="bento-desc">
+              Native compiled binary for Apple Silicon M1/M2/M3/M4 Macs. Zero-allocation CoreAudio engine, 
+              Metal GPU acceleration, 76 MCP tools, and 36-chapter OKF manual.
+            </p>
+            <div style="display: flex; gap: 10px; margin: 16px 0; flex-wrap: wrap;">
+              <a href="https://github.com/juancruzmunozalbelo/oxide-studio/releases/download/v1.0.0/oxide-studio-v1.0.0-macos-arm64.tar.gz" class="btn btn-primary btn-sm">
+                ⬇ Download .tar.gz (ARM64)
+              </a>
+              <a href="https://github.com/juancruzmunozalbelo/oxide-studio/releases/download/v1.0.0/oxide-studio-v1.0.0-macos-arm64.zip" class="btn btn-tactile btn-sm">
+                ⬇ Download .zip (ARM64)
+              </a>
+            </div>
+            <div style="font-family: var(--font-mono); font-size: 11px; color: var(--text-muted);">
+              <div>SHA256: <a href="https://github.com/juancruzmunozalbelo/oxide-studio/releases/download/v1.0.0/SHA256SUMS.txt" target="_blank" rel="noopener noreferrer" style="color: var(--laser-cyan);">SHA256SUMS.txt</a></div>
+              <div style="margin-top: 4px; color: var(--meter-green);">✓ Verified clean-room binary • MIT OR Apache-2.0</div>
+            </div>
+          </div>
+
+          <!-- Card 2: In-Browser Web Workstation CTA -->
+          <div class="bento-card col-6" style="border-color: var(--laser-cyan); background: linear-gradient(135deg, var(--surface-card) 0%, rgba(0, 240, 255, 0.05) 100%);">
+            <span class="bento-tag cyan">ZERO INSTALL</span>
+            <h3 class="bento-title">Oxide Studio Web Edition</h3>
+            <p class="bento-desc">
+              Launch the full single-window electronic music workstation directly in your browser. 
+              Includes Session/Arrangement toggle, 16-voice TR-909 drum synth, Suite synthesizer engines, 
+              5-device FX rack, studio mixer with VU meters, bilingual OKF Copilot, and .wav / .als export.
+            </p>
+            <div style="margin: 16px 0;">
+              <a href="web/index.html" class="btn btn-cyan btn-sm" style="font-weight: 700;">
+                ▶ Launch Full Web DAW in Browser
+              </a>
+            </div>
+            <div style="font-family: var(--font-mono); font-size: 11px; color: var(--laser-cyan);">
+              ⚡ 100% In-Browser WebAudio • 0 KB install • Runs offline
+            </div>
+          </div>
+
+          <!-- Card 3: Linux & Windows Releases -->
+          <div class="bento-card col-6">
+            <span class="bento-tag">MULTI-PLATFORM</span>
+            <h3 class="bento-title">Linux &amp; Windows Binaries</h3>
+            <p class="bento-desc">
+              Automated multi-platform builds produced by GitHub Actions CI/CD with ALSA/JACK and WASAPI backends.
+            </p>
+            <div style="display: flex; gap: 10px; margin: 12px 0; flex-wrap: wrap;">
+              <a href="https://github.com/juancruzmunozalbelo/oxide-studio/releases/tag/v1.0.0" target="_blank" rel="noopener noreferrer" class="btn btn-tactile btn-sm">
+                🐧 Linux x86_64 Release
+              </a>
+              <a href="https://github.com/juancruzmunozalbelo/oxide-studio/releases/tag/v1.0.0" target="_blank" rel="noopener noreferrer" class="btn btn-tactile btn-sm">
+                🪟 Windows x86_64 Release
+              </a>
+            </div>
+            <div style="font-family: var(--font-mono); font-size: 11px; color: var(--text-muted); margin-top: 8px;">
+              Cross-platform release archives signed with SHA256.
+            </div>
+          </div>
+
+          <!-- Card 4: Cargo One-Liner Install -->
+          <div class="bento-card col-6">
+            <span class="bento-tag green">DEVELOPER / RUSTACEAN</span>
+            <h3 class="bento-title">Install via Cargo</h3>
+            <p class="bento-desc">
+              Compile and install directly from crates or source repository using the official Rust toolchain:
+            </p>
+            <div style="background: var(--surface-sunken); border: 1px solid var(--surface-border-subtle); padding: 12px; border-radius: var(--radius-sm); font-family: var(--font-mono); font-size: 11px; color: var(--text-muted); margin-top: 8px;">
+              <div><span style="color: var(--laser-cyan);">$</span> cargo install --git https://github.com/juancruzmunozalbelo/oxide-studio --tag v1.0.0 ableton-rust</div>
+              <div style="margin-top: 4px;"><span style="color: var(--laser-cyan);">$</span> oxide-studio --mcp</div>
+              <div style="color: var(--meter-green); margin-top: 6px;">✓ 674 workspace tests passing • 576 layout guard frames</div>
             </div>
           </div>
         </div>
@@ -715,7 +812,7 @@
         <div style="display: flex; align-items: center; gap: 8px; margin-bottom: 8px;">
           <span class="brand-badge" style="width: 20px; height: 20px; font-size: 11px;">O</span>
           <span style="font-weight: 700; color: #fff;">OXIDE STUDIO</span>
-          <span class="mono" style="font-size: 10px; color: var(--signal-amber);">v0.1.0</span>
+          <span class="mono" style="font-size: 10px; color: var(--signal-amber);">v1.0.0</span>
         </div>
         <p class="footer-disclaimer">
           Independent, clean-room native electronic music digital audio workstation in Rust. 

@@ -5,7 +5,7 @@ use serde_json::Value;
 
 pub const MCP_PROTOCOL_VERSION: &str = "2024-11-05";
 pub const SERVER_NAME: &str = "ableton-rust-mcp";
-pub const SERVER_VERSION: &str = "0.1.0";
+pub const SERVER_VERSION: &str = "1.0.0";
 
 // JSON-RPC 2.0 standard error codes
 pub const PARSE_ERROR: i64 = -32700;

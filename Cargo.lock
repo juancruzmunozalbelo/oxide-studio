@@ -20,7 +20,7 @@ checksum = "366ffbaa4442f4684d91e2cd7c5ea7c4ed8add41959a31447066e279e432b618"
 
 [[package]]
 name = "ableton-audio"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "ableton-core",
  "ableton-drums",
@@ -35,7 +35,7 @@ dependencies = [
 
 [[package]]
 name = "ableton-bounce"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "ableton-audio",
  "ableton-core",
@@ -50,14 +50,14 @@ dependencies = [
 
 [[package]]
 name = "ableton-core"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "serde",
 ]
 
 [[package]]
 name = "ableton-drums"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "ableton-core",
  "ableton-dsp",
@@ -66,7 +66,7 @@ dependencies = [
 
 [[package]]
 name = "ableton-dsp"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "ableton-core",
  "serde",
@@ -75,7 +75,7 @@ dependencies = [
 
 [[package]]
 name = "ableton-fx"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "ableton-core",
  "ableton-drums",
@@ -85,7 +85,7 @@ dependencies = [
 
 [[package]]
 name = "ableton-gui"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "ableton-audio",
  "ableton-bounce",
@@ -103,7 +103,7 @@ dependencies = [
 
 [[package]]
 name = "ableton-mcp"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "ableton-audio",
  "ableton-bounce",
@@ -120,7 +120,7 @@ dependencies = [
 
 [[package]]
 name = "ableton-plugin-scanner"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "ableton-core",
  "serde",
@@ -129,7 +129,7 @@ dependencies = [
 
 [[package]]
 name = "ableton-project"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "ableton-core",
  "ableton-dsp",
@@ -142,7 +142,7 @@ dependencies = [
 
 [[package]]
 name = "ableton-timeline"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "ableton-core",
  "serde",

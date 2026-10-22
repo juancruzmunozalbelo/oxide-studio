@@ -1,0 +1,1076 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+  <title>Oxide Studio Web — Native Electronic Music Workstation (v1.0.0)</title>
+  <meta name="description" content="Oxide Studio Web Edition: Full single-window in-browser electronic music DAW. 16-voice TR-909 synthesizer, polyphonic Suite synth, 5 audio FX, studio mixer with VU meters, 60 FPS visualizers, bilingual OKF copilot, and .wav / .als export.">
+  <link rel="stylesheet" href="daw.css">
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><rect width='100' height='100' rx='8' fill='%23ffbe00'/><text x='50' y='68' font-family='monospace' font-weight='900' font-size='60' text-anchor='middle' fill='%2307080a'>O</text></svg>">
+</head>
+<body class="daw-body">
+
+  <!-- Audio Unlock Overlay -->
+  <div id="audio-unlock-overlay" class="audio-unlock-overlay">
+    <div class="unlock-card">
+      <div class="unlock-icon">⚡</div>
+      <h2 class="unlock-title">OXIDE STUDIO WEB v1.0.0</h2>
+      <p class="unlock-desc">Click anywhere or press <strong>Space</strong> to initialize the real-time WebAudio DSP engine (44.1 kHz, 16 TR-909 voices, Suite synthesizer &amp; FX rack).</p>
+      <button id="btn-unlock-audio" class="btn btn-amber">INITIALIZE STUDIO ENGINE</button>
+    </div>
+  </div>
+
+  <!-- Main DAW Shell -->
+  <div class="daw-shell">
+
+    <!-- Top Global Transport & Header Bar -->
+    <header class="daw-header">
+      <div class="header-left">
+        <a href="../index.html" class="header-brand" title="Back to Landing Page & Download Hub">
+          <span class="brand-badge">O</span>
+          <span class="brand-name">OXIDE STUDIO</span>
+          <span class="version-tag">v1.0.0 WEB</span>
+        </a>
+        <a href="../index.html" class="header-back-link">← Hub</a>
+
+        <!-- View Switcher -->
+        <div class="view-switch-group">
+          <button id="btn-view-session" class="btn-view active" title="Toggle Session Matrix (Tab)">
+            <span class="icon">|||</span> Session
+          </button>
+          <button id="btn-view-arrangement" class="btn-view" title="Toggle Arrangement Timeline (Tab)">
+            <span class="icon">≡</span> Arrangement
+          </button>
+          <span class="key-hint">TAB</span>
+        </div>
+      </div>
+
+      <!-- Center Transport Controls -->
+      <div class="header-transport">
+        <div class="transport-buttons">
+          <button id="btn-play" class="btn-transport btn-play" title="Play / Pause (Space)">
+            <span class="transport-icon">▶</span>
+          </button>
+          <button id="btn-stop" class="btn-transport btn-stop" title="Stop &amp; Return to Zero (Space)">
+            <span class="transport-icon">■</span>
+          </button>
+          <button id="btn-rec" class="btn-transport btn-rec" title="Arm Arrangement Recording">
+            <span class="transport-icon">●</span>
+          </button>
+          <button id="btn-loop" class="btn-transport btn-loop active" title="Toggle Loop Mode">
+            <span class="transport-icon">↺</span>
+          </button>
+        </div>
+
+        <!-- Tempo / BPM -->
+        <div class="tempo-control-box">
+          <span class="ctrl-label">BPM</span>
+          <button id="bpm-dec" class="step-btn">-</button>
+          <input type="number" id="tempo-input" class="tempo-input tabular" value="136.00" min="40" max="240" step="0.5">
+          <button id="bpm-inc" class="step-btn">+</button>
+        </div>
+
+        <div class="sig-box">
+          <span class="ctrl-label">SIG</span>
+          <span class="sig-val tabular">4/4</span>
+        </div>
+
+        <!-- Metronome -->
+        <button id="btn-metro" class="btn-metro" title="Metronome Click">
+          <span class="metro-icon">⩕</span> Metro
+        </button>
+
+        <!-- Groove Pool Swing -->
+        <div class="swing-box" title="Groove Pool Swing (50% = Straight, 75% = Hard Shuffle)">
+          <span class="ctrl-label">SWING</span>
+          <input type="range" id="swing-slider" class="range-slider" min="50" max="75" value="56">
+          <span id="swing-val" class="tabular">56%</span>
+        </div>
+
+        <!-- Musical Scale Awareness -->
+        <div class="scale-box" title="Live Scale Engine">
+          <span class="ctrl-label">SCALE</span>
+          <select id="scale-root" class="ctrl-select">
+            <option value="0">C</option>
+            <option value="1">C#</option>
+            <option value="2">D</option>
+            <option value="3">D#</option>
+            <option value="4">E</option>
+            <option value="5" selected>F</option>
+            <option value="6">F#</option>
+            <option value="7">G</option>
+            <option value="8">G#</option>
+            <option value="9">A</option>
+            <option value="10">A#</option>
+            <option value="11">B</option>
+          </select>
+          <select id="scale-type" class="ctrl-select">
+            <option value="minor" selected>Minor</option>
+            <option value="major">Major</option>
+            <option value="dorian">Dorian</option>
+            <option value="phrygian">Phrygian</option>
+            <option value="harmonic_minor">Harm. Minor</option>
+          </select>
+        </div>
+      </div>
+
+      <!-- Right Export & Telemetry Actions -->
+      <div class="header-right">
+        <div class="dsp-telemetry">
+          <span class="telemetry-dot live"></span>
+          <span class="telemetry-label">44.1 kHz</span>
+          <span id="dsp-load" class="telemetry-val tabular">1.8% DSP</span>
+        </div>
+
+        <div class="export-actions">
+          <button id="btn-export-wav" class="btn btn-export" title="Render 16-bit 44.1kHz Stereo PCM WAV via OfflineAudioContext">
+            <span>⬇ .WAV</span>
+          </button>
+          <button id="btn-export-als" class="btn btn-export btn-amber-glow" title="Generate gzipped Ableton Live 12 Set XML (.als)">
+            <span>⬇ .ALS</span>
+          </button>
+        </div>
+      </div>
+    </header>
+
+    <!-- Upper Main Workspace (Dual View Toggle) -->
+    <main class="daw-workspace">
+
+      <!-- ===================================================================
+           VIEW 1: Session View Matrix (#view-session)
+           =================================================================== -->
+      <section id="view-session" class="session-view-container active">
+        <div class="session-header-row">
+          <div class="session-col-head head-trk1">
+            <span class="trk-num">1</span>
+            <span class="trk-title">DRUMS (909)</span>
+          </div>
+          <div class="session-col-head head-trk2">
+            <span class="trk-num">2</span>
+            <span class="trk-title">BASS (DRIFT)</span>
+          </div>
+          <div class="session-col-head head-trk3">
+            <span class="trk-num">3</span>
+            <span class="trk-title">LEAD (SUITE)</span>
+          </div>
+          <div class="session-col-head head-trk4">
+            <span class="trk-num">4</span>
+            <span class="trk-title">KEYS / STEMS</span>
+          </div>
+          <div class="session-col-head head-rtnA">
+            <span class="trk-num">A</span>
+            <span class="trk-title">REV RETURN</span>
+          </div>
+          <div class="session-col-head head-rtnB">
+            <span class="trk-num">B</span>
+            <span class="trk-title">DLY RETURN</span>
+          </div>
+          <div class="session-col-head head-master">
+            <span class="trk-num">M</span>
+            <span class="trk-title">MASTER / SCENES</span>
+          </div>
+        </div>
+
+        <!-- Session Matrix Clip Grid -->
+        <div class="session-matrix-body" id="session-grid">
+          <!-- Row 1: Intro -->
+          <div class="matrix-row" data-scene="0">
+            <div class="clip-slot active-clip" data-track="0" data-clip="0">
+              <span class="clip-state-icon">▶</span>
+              <span class="clip-name">909 Core Beat</span>
+              <span class="clip-len">2 Bars</span>
+            </div>
+            <div class="clip-slot" data-track="1" data-clip="0">
+              <span class="clip-state-icon">▶</span>
+              <span class="clip-name">Sub Sine 55Hz</span>
+              <span class="clip-len">2 Bars</span>
+            </div>
+            <div class="clip-slot" data-track="2" data-clip="0">
+              <span class="clip-state-icon">▶</span>
+              <span class="clip-name">Melodic Pluck</span>
+              <span class="clip-len">4 Bars</span>
+            </div>
+            <div class="clip-slot" data-track="3" data-clip="0">
+              <span class="clip-state-icon">▶</span>
+              <span class="clip-name">Analog Pad C#</span>
+              <span class="clip-len">4 Bars</span>
+            </div>
+            <div class="return-slot">—</div>
+            <div class="return-slot">—</div>
+            <div class="scene-trigger-slot">
+              <button class="btn-scene-launch" data-scene="0">
+                <span class="scene-play-icon">▶</span> 1 Intro
+              </button>
+            </div>
+          </div>
+
+          <!-- Row 2: Build -->
+          <div class="matrix-row" data-scene="1">
+            <div class="clip-slot" data-track="0" data-clip="1">
+              <span class="clip-state-icon">▶</span>
+              <span class="clip-name">909 Snare Roll</span>
+              <span class="clip-len">2 Bars</span>
+            </div>
+            <div class="clip-slot" data-track="1" data-clip="1">
+              <span class="clip-state-icon">▶</span>
+              <span class="clip-name">Acid 303 Sweep</span>
+              <span class="clip-len">2 Bars</span>
+            </div>
+            <div class="clip-slot" data-track="2" data-clip="1">
+              <span class="clip-state-icon">▶</span>
+              <span class="clip-name">FM Swarm Riser</span>
+              <span class="clip-len">2 Bars</span>
+            </div>
+            <div class="clip-slot" data-track="3" data-clip="1">
+              <span class="clip-state-icon">▶</span>
+              <span class="clip-name">Shaker Rush</span>
+              <span class="clip-len">2 Bars</span>
+            </div>
+            <div class="return-slot">—</div>
+            <div class="return-slot">—</div>
+            <div class="scene-trigger-slot">
+              <button class="btn-scene-launch" data-scene="1">
+                <span class="scene-play-icon">▶</span> 2 Build
+              </button>
+            </div>
+          </div>
+
+          <!-- Row 3: Peak Drop -->
+          <div class="matrix-row" data-scene="2">
+            <div class="clip-slot" data-track="0" data-clip="2">
+              <span class="clip-state-icon">▶</span>
+              <span class="clip-name">909 Full Peak Drop</span>
+              <span class="clip-len">4 Bars</span>
+            </div>
+            <div class="clip-slot" data-track="1" data-clip="2">
+              <span class="clip-state-icon">▶</span>
+              <span class="clip-name">Heavy Roar Bass</span>
+              <span class="clip-len">4 Bars</span>
+            </div>
+            <div class="clip-slot" data-track="2" data-clip="2">
+              <span class="clip-state-icon">▶</span>
+              <span class="clip-name">Main Hook Stabs</span>
+              <span class="clip-len">4 Bars</span>
+            </div>
+            <div class="clip-slot" data-track="3" data-clip="2">
+              <span class="clip-state-icon">▶</span>
+              <span class="clip-name">Cymbal Sparkle</span>
+              <span class="clip-len">4 Bars</span>
+            </div>
+            <div class="return-slot">—</div>
+            <div class="return-slot">—</div>
+            <div class="scene-trigger-slot">
+              <button class="btn-scene-launch" data-scene="2">
+                <span class="scene-play-icon">▶</span> 3 Peak Drop
+              </button>
+            </div>
+          </div>
+
+          <!-- Row 4: Outro -->
+          <div class="matrix-row" data-scene="3">
+            <div class="clip-slot" data-track="0" data-clip="3">
+              <span class="clip-state-icon">▶</span>
+              <span class="clip-name">909 Stripped Kick</span>
+              <span class="clip-len">2 Bars</span>
+            </div>
+            <div class="clip-slot" data-track="1" data-clip="3">
+              <span class="clip-state-icon">▶</span>
+              <span class="clip-name">Low Filtered Sub</span>
+              <span class="clip-len">2 Bars</span>
+            </div>
+            <div class="clip-slot" data-track="2" data-clip="3">
+              <span class="clip-state-icon">▶</span>
+              <span class="clip-name">Reverb Drone</span>
+              <span class="clip-len">4 Bars</span>
+            </div>
+            <div class="clip-slot" data-track="3" data-clip="3">
+              <span class="clip-state-icon">▶</span>
+              <span class="clip-name">Vinyl Crackle &amp; Air</span>
+              <span class="clip-len">4 Bars</span>
+            </div>
+            <div class="return-slot">—</div>
+            <div class="return-slot">—</div>
+            <div class="scene-trigger-slot">
+              <button class="btn-scene-launch" data-scene="3">
+                <span class="scene-play-icon">▶</span> 4 Outro
+              </button>
+            </div>
+          </div>
+
+          <!-- Dedicated Stop Row -->
+          <div class="matrix-row matrix-stop-row">
+            <div class="stop-clip-slot" data-track="0"><button class="btn-stop-clip" data-track="0">■</button></div>
+            <div class="stop-clip-slot" data-track="1"><button class="btn-stop-clip" data-track="1">■</button></div>
+            <div class="stop-clip-slot" data-track="2"><button class="btn-stop-clip" data-track="2">■</button></div>
+            <div class="stop-clip-slot" data-track="3"><button class="btn-stop-clip" data-track="3">■</button></div>
+            <div class="return-slot">—</div>
+            <div class="return-slot">—</div>
+            <div class="scene-trigger-slot">
+              <button id="btn-stop-all-clips" class="btn-stop-all" title="Stop All Clips (Shift+Space)">■ Stop All</button>
+            </div>
+          </div>
+        </div>
+
+        <!-- Session Bottom Bar -->
+        <div class="session-footer-bar">
+          <span class="footer-hint">Quantization:</span>
+          <select id="launch-quant" class="ctrl-select">
+            <option value="1bar" selected>1 Bar</option>
+            <option value="1/2">1/2 Note</option>
+            <option value="1/4">1/4 Note</option>
+            <option value="1/8">1/8 Note</option>
+            <option value="none">None</option>
+          </select>
+          <span class="footer-status-pill">4 Tracks Active • 16-Voice Synthesizer Bus Connected</span>
+        </div>
+      </section>
+
+      <!-- ===================================================================
+           VIEW 2: Arrangement Timeline View (#view-arrangement)
+           =================================================================== -->
+      <section id="view-arrangement" class="arrangement-view-container">
+        <!-- Dual Lane Ruler -->
+        <div class="timeline-ruler">
+          <div class="ruler-sidebar">
+            <button id="btn-back-to-arr" class="btn-back-arr" title="Back to Arrangement (F10)">
+              <span class="icon">◀</span> Back to Arr
+            </button>
+          </div>
+          <div class="ruler-lane" id="ruler-lane">
+            <!-- Measures 1 to 33 -->
+            <div class="ruler-bar-num" style="left: 0%;">1.1</div>
+            <div class="ruler-locator" style="left: 0%;">[Intro]</div>
+            <div class="ruler-bar-num" style="left: 12.5%;">5.1</div>
+            <div class="ruler-bar-num" style="left: 25.0%;">9.1</div>
+            <div class="ruler-locator" style="left: 25.0%;">[Build]</div>
+            <div class="ruler-bar-num" style="left: 37.5%;">13.1</div>
+            <div class="ruler-bar-num" style="left: 50.0%;">17.1</div>
+            <div class="ruler-locator" style="left: 50.0%;">[Peak Drop]</div>
+            <div class="ruler-bar-num" style="left: 62.5%;">21.1</div>
+            <div class="ruler-bar-num" style="left: 75.0%;">25.1</div>
+            <div class="ruler-locator" style="left: 75.0%;">[Outro]</div>
+            <div class="ruler-bar-num" style="left: 87.5%;">29.1</div>
+            <div class="ruler-bar-num" style="left: 100%;">33.1</div>
+
+            <!-- Loop Brackets -->
+            <div class="loop-brace" style="left: 0%; width: 50%;">
+              <span class="loop-handle left"></span>
+              <span class="loop-title">Loop: Bars 1–17</span>
+              <span class="loop-handle right"></span>
+            </div>
+
+            <!-- Interactive Playhead Line -->
+            <div id="timeline-playhead" class="timeline-playhead" style="left: 0%;"></div>
+          </div>
+        </div>
+
+        <!-- Arrangement Tracks -->
+        <div class="arrangement-tracks-container">
+          <!-- Track 1 Lane -->
+          <div class="arr-track-lane">
+            <div class="arr-track-header trk-amber">
+              <span class="trk-id">1</span>
+              <span class="trk-name">DRUMS 909</span>
+              <div class="track-mini-meters">
+                <span class="mini-meter-bar"></span>
+              </div>
+            </div>
+            <div class="arr-track-body">
+              <div class="arr-clip-block block-amber" style="left: 0%; width: 25%;">
+                <span class="block-title">909 Core (Intro)</span>
+                <div class="clip-waveform-sim"></div>
+              </div>
+              <div class="arr-clip-block block-amber" style="left: 25%; width: 25%;">
+                <span class="block-title">909 Build &amp; Roll</span>
+                <div class="clip-waveform-sim"></div>
+              </div>
+              <div class="arr-clip-block block-amber active-block" style="left: 50%; width: 35%;">
+                <span class="block-title">909 Drop Groove</span>
+                <div class="clip-waveform-sim"></div>
+              </div>
+              <div class="arr-clip-block block-amber" style="left: 85%; width: 15%;">
+                <span class="block-title">909 Outro</span>
+                <div class="clip-waveform-sim"></div>
+              </div>
+            </div>
+          </div>
+
+          <!-- Track 2 Lane -->
+          <div class="arr-track-lane">
+            <div class="arr-track-header trk-green">
+              <span class="trk-id">2</span>
+              <span class="trk-name">BASS DRIFT</span>
+              <div class="track-mini-meters">
+                <span class="mini-meter-bar"></span>
+              </div>
+            </div>
+            <div class="arr-track-body">
+              <div class="arr-clip-block block-green" style="left: 0%; width: 25%;">
+                <span class="block-title">Sub Fundamental</span>
+              </div>
+              <div class="arr-clip-block block-green" style="left: 25%; width: 25%;">
+                <span class="block-title">303 Filter Accent</span>
+              </div>
+              <div class="arr-clip-block block-green active-block" style="left: 50%; width: 35%;">
+                <span class="block-title">Roar Drive Bass</span>
+              </div>
+              <div class="arr-clip-block block-green" style="left: 85%; width: 15%;">
+                <span class="block-title">Sub Tail</span>
+              </div>
+              <!-- Automation Line Overlay -->
+              <svg class="automation-curve" viewBox="0 0 1000 60" preserveAspectRatio="none">
+                <path d="M 0,50 L 250,50 L 500,10 L 850,20 L 1000,55" fill="none" stroke="rgba(0, 230, 118, 0.5)" stroke-width="2" />
+              </svg>
+            </div>
+          </div>
+
+          <!-- Track 3 Lane -->
+          <div class="arr-track-lane">
+            <div class="arr-track-header trk-cyan">
+              <span class="trk-id">3</span>
+              <span class="trk-name">LEAD SUITE</span>
+              <div class="track-mini-meters">
+                <span class="mini-meter-bar"></span>
+              </div>
+            </div>
+            <div class="arr-track-body">
+              <div class="arr-clip-block block-cyan" style="left: 12.5%; width: 12.5%;">
+                <span class="block-title">Intro Plucks</span>
+              </div>
+              <div class="arr-clip-block block-cyan" style="left: 25%; width: 25%;">
+                <span class="block-title">FM Swarm Rise</span>
+              </div>
+              <div class="arr-clip-block block-cyan active-block" style="left: 50%; width: 35%;">
+                <span class="block-title">Suite Lead Anthem</span>
+              </div>
+            </div>
+          </div>
+
+          <!-- Track 4 Lane -->
+          <div class="arr-track-lane">
+            <div class="arr-track-header trk-purple">
+              <span class="trk-id">4</span>
+              <span class="trk-name">KEYS / STEMS</span>
+              <div class="track-mini-meters">
+                <span class="mini-meter-bar"></span>
+              </div>
+            </div>
+            <div class="arr-track-body">
+              <div class="arr-clip-block block-purple" style="left: 0%; width: 50%;">
+                <span class="block-title">Analog Atmosphere</span>
+              </div>
+              <div class="arr-clip-block block-purple active-block" style="left: 50%; width: 50%;">
+                <span class="block-title">Air &amp; High Shimmer</span>
+              </div>
+            </div>
+          </div>
+        </div>
+      </section>
+
+    </main>
+
+    <!-- Center Resizable Splitter -->
+    <div class="daw-splitter" id="daw-splitter"></div>
+
+    <!-- Persistent Lower Detail Deck -->
+    <section class="daw-detail-deck">
+      <!-- Deck Navigation Tabs -->
+      <nav class="detail-tabs">
+        <button class="deck-tab active" data-deck="deck-sequencer">
+          <span class="tab-icon">🥁</span> TR-909 SEQUENCER
+        </button>
+        <button class="deck-tab" data-deck="deck-synth-fx">
+          <span class="tab-icon">🎹</span> SUITE SYNTH &amp; 5 FX
+        </button>
+        <button class="deck-tab" data-deck="deck-mixer">
+          <span class="tab-icon">🎛️</span> STUDIO MIXER &amp; VU
+        </button>
+        <button class="deck-tab" data-deck="deck-copilot">
+          <span class="tab-icon">🤖</span> OKF COPILOT (EN/ES)
+        </button>
+      </nav>
+
+      <!-- Deck Content Containers -->
+      <div class="deck-content-viewport">
+
+        <!-- ===================================================================
+             PANEL 1: 16-Voice TR-909 Sequencer (#deck-sequencer)
+             =================================================================== -->
+        <div id="deck-sequencer" class="deck-panel active">
+          <div class="sequencer-ctrl-strip">
+            <div class="bank-toggle-group">
+              <button id="btn-bank-a" class="btn-bank active" data-bank="A">
+                BANK A (1–8 Core 909)
+              </button>
+              <button id="btn-bank-b" class="btn-bank" data-bank="B">
+                BANK B (9–16 Perc &amp; Metals)
+              </button>
+            </div>
+
+            <div class="preset-group">
+              <span class="ctrl-label">PRESETS:</span>
+              <button class="btn-preset" data-preset="techno">Peak Techno (136)</button>
+              <button class="btn-preset" data-preset="house">House 909 (128)</button>
+              <button class="btn-preset" data-preset="rkt">RKT Turreo (105)</button>
+              <button class="btn-preset" data-preset="dnb">DnB Break (174)</button>
+              <button class="btn-preset btn-clear" data-preset="clear">Clear</button>
+            </div>
+
+            <div class="sequencer-mode-group">
+              <label class="toggle-label">
+                <input type="checkbox" id="accent-toggle">
+                <span>Accent Edit</span>
+              </label>
+            </div>
+          </div>
+
+          <!-- 16-Step Drum Grid (8 Active Rows) -->
+          <div class="drum-grid" id="drum-grid-container">
+            <!-- Dynamically generated in daw.js with Bank A / B voice rows -->
+          </div>
+        </div>
+
+        <!-- ===================================================================
+             PANEL 2: Polyphonic Suite Synthesizer & 5 FX Rack (#deck-synth-fx)
+             =================================================================== -->
+        <div id="deck-synth-fx" class="deck-panel">
+          <div class="synth-fx-layout">
+
+            <!-- Left: Polyphonic Suite Synth Engine -->
+            <div class="synth-section">
+              <div class="section-title-bar">
+                <span class="sec-badge">INSTRUMENT</span>
+                <h3>Polyphonic Suite Synthesizer</h3>
+                <div class="synth-mode-switch">
+                  <button class="btn-smode active" data-mode="drift">Drift</button>
+                  <button class="btn-smode" data-mode="meld">Meld</button>
+                  <button class="btn-smode" data-mode="operator">Operator</button>
+                  <button class="btn-smode" data-mode="wavetable">Wavetable</button>
+                </div>
+              </div>
+
+              <!-- Parameter Knobs & Sliders -->
+              <div class="synth-params-grid">
+                <div class="param-knob-box">
+                  <label>Cutoff (ZDF)</label>
+                  <input type="range" id="synth-cutoff" min="40" max="18000" value="2800" class="range-slider">
+                  <span id="synth-cutoff-val" class="param-val tabular">2800 Hz</span>
+                </div>
+                <div class="param-knob-box">
+                  <label>Resonance (Q)</label>
+                  <input type="range" id="synth-res" min="0.5" max="18" step="0.1" value="4.2" class="range-slider">
+                  <span id="synth-res-val" class="param-val tabular">4.2 Q</span>
+                </div>
+                <div class="param-knob-box">
+                  <label>Attack</label>
+                  <input type="range" id="synth-att" min="2" max="1200" value="12" class="range-slider">
+                  <span id="synth-att-val" class="param-val tabular">12 ms</span>
+                </div>
+                <div class="param-knob-box">
+                  <label>Decay</label>
+                  <input type="range" id="synth-dec" min="20" max="2500" value="420" class="range-slider">
+                  <span id="synth-dec-val" class="param-val tabular">420 ms</span>
+                </div>
+                <div class="param-knob-box">
+                  <label>Sustain</label>
+                  <input type="range" id="synth-sus" min="0" max="1" step="0.01" value="0.65" class="range-slider">
+                  <span id="synth-sus-val" class="param-val tabular">65 %</span>
+                </div>
+                <div class="param-knob-box">
+                  <label>Release</label>
+                  <input type="range" id="synth-rel" min="20" max="3000" value="380" class="range-slider">
+                  <span id="synth-rel-val" class="param-val tabular">380 ms</span>
+                </div>
+                <div class="param-knob-box">
+                  <label>Wave Morph / FM</label>
+                  <input type="range" id="synth-morph" min="0" max="1" step="0.01" value="0.45" class="range-slider">
+                  <span id="synth-morph-val" class="param-val tabular">45 %</span>
+                </div>
+                <div class="param-knob-box">
+                  <label>Drive / Fold</label>
+                  <input type="range" id="synth-drive" min="0" max="24" step="0.5" value="6.0" class="range-slider">
+                  <span id="synth-drive-val" class="param-val tabular">+6.0 dB</span>
+                </div>
+              </div>
+
+              <!-- Playable Piano Keyboard -->
+              <div class="piano-keyboard-wrapper">
+                <div class="keyboard-top-info">
+                  <span>Virtual 25-Key Controller (Octave: <strong id="octave-display">C3–C5</strong>)</span>
+                  <div class="octave-controls">
+                    <button id="btn-oct-down" class="btn-mini">Oct - [Z]</button>
+                    <button id="btn-oct-up" class="btn-mini">Oct + [X]</button>
+                  </div>
+                </div>
+                <div class="piano-keys" id="piano-keys">
+                  <!-- Keys C3 to C5 generated in daw.js -->
+                </div>
+              </div>
+            </div>
+
+            <!-- Right: Studio Audio FX Rack (5 Devices) -->
+            <div class="fx-rack-section">
+              <div class="section-title-bar">
+                <span class="sec-badge cyan">STUDIO FX</span>
+                <h3>Master &amp; Insert Effects Chain</h3>
+              </div>
+
+              <div class="fx-devices-scroll">
+                <!-- Device 1: Glue Compressor -->
+                <div class="fx-device-card" id="dev-glue">
+                  <div class="dev-header">
+                    <span class="dev-tag">GLUE COMPRESSOR</span>
+                    <label class="dev-enable"><input type="checkbox" checked id="glue-active"> On</label>
+                  </div>
+                  <div class="dev-controls">
+                    <div class="fx-knob">
+                      <label>Threshold</label>
+                      <input type="range" id="glue-thresh" min="-40" max="0" value="-14" class="range-slider">
+                      <span id="glue-thresh-val" class="tabular">-14 dB</span>
+                    </div>
+                    <div class="fx-knob">
+                      <label>Ratio</label>
+                      <select id="glue-ratio" class="ctrl-select">
+                        <option value="2">2:1</option>
+                        <option value="4" selected>4:1</option>
+                        <option value="10">10:1</option>
+                      </select>
+                    </div>
+                    <div class="fx-knob">
+                      <label>Makeup</label>
+                      <input type="range" id="glue-makeup" min="0" max="20" value="4.5" class="range-slider">
+                      <span id="glue-makeup-val" class="tabular">+4.5 dB</span>
+                    </div>
+                  </div>
+                </div>
+
+                <!-- Device 2: OTT Multiband Dynamics -->
+                <div class="fx-device-card" id="dev-ott">
+                  <div class="dev-header">
+                    <span class="dev-tag">OTT MULTIBAND DYNAMICS</span>
+                    <label class="dev-enable"><input type="checkbox" checked id="ott-active"> On</label>
+                  </div>
+                  <div class="dev-controls">
+                    <div class="fx-knob">
+                      <label>Low Band</label>
+                      <input type="range" id="ott-low" min="0" max="100" value="70" class="range-slider">
+                      <span class="tabular">70%</span>
+                    </div>
+                    <div class="fx-knob">
+                      <label>Mid Band</label>
+                      <input type="range" id="ott-mid" min="0" max="100" value="65" class="range-slider">
+                      <span class="tabular">65%</span>
+                    </div>
+                    <div class="fx-knob">
+                      <label>High Band</label>
+                      <input type="range" id="ott-high" min="0" max="100" value="80" class="range-slider">
+                      <span class="tabular">80%</span>
+                    </div>
+                    <div class="fx-knob">
+                      <label>Depth / Mix</label>
+                      <input type="range" id="ott-depth" min="0" max="100" value="60" class="range-slider">
+                      <span class="tabular">60%</span>
+                    </div>
+                  </div>
+                </div>
+
+                <!-- Device 3: Roar Waveshaper -->
+                <div class="fx-device-card" id="dev-roar">
+                  <div class="dev-header">
+                    <span class="dev-tag">ROAR 3-STAGE SATURATION</span>
+                    <label class="dev-enable"><input type="checkbox" checked id="roar-active"> On</label>
+                  </div>
+                  <div class="dev-controls">
+                    <div class="fx-knob">
+                      <label>Drive</label>
+                      <input type="range" id="roar-drive" min="0" max="36" value="12" class="range-slider">
+                      <span id="roar-drive-val" class="tabular">+12 dB</span>
+                    </div>
+                    <div class="fx-knob">
+                      <label>Tone</label>
+                      <input type="range" id="roar-tone" min="200" max="12000" value="4500" class="range-slider">
+                      <span id="roar-tone-val" class="tabular">4.5 kHz</span>
+                    </div>
+                    <div class="fx-knob">
+                      <label>Curve</label>
+                      <select id="roar-curve" class="ctrl-select">
+                        <option value="warm" selected>Warm Tanh</option>
+                        <option value="hard">Hard Clip</option>
+                        <option value="asym">Asymmetric Tube</option>
+                      </select>
+                    </div>
+                  </div>
+                </div>
+
+                <!-- Device 4: Hybrid Reverb -->
+                <div class="fx-device-card" id="dev-reverb">
+                  <div class="dev-header">
+                    <span class="dev-tag">HYBRID REVERB</span>
+                    <label class="dev-enable"><input type="checkbox" checked id="rev-active"> On</label>
+                  </div>
+                  <div class="dev-controls">
+                    <div class="fx-knob">
+                      <label>Decay Time</label>
+                      <input type="range" id="rev-decay" min="0.2" max="8.0" step="0.1" value="2.4" class="range-slider">
+                      <span id="rev-decay-val" class="tabular">2.4 s</span>
+                    </div>
+                    <div class="fx-knob">
+                      <label>Room Size</label>
+                      <input type="range" id="rev-size" min="10" max="100" value="75" class="range-slider">
+                      <span class="tabular">75%</span>
+                    </div>
+                    <div class="fx-knob">
+                      <label>Dry / Wet</label>
+                      <input type="range" id="rev-mix" min="0" max="100" value="28" class="range-slider">
+                      <span id="rev-mix-val" class="tabular">28%</span>
+                    </div>
+                  </div>
+                </div>
+
+                <!-- Device 5: TruePeakLimiter -->
+                <div class="fx-device-card" id="dev-limiter">
+                  <div class="dev-header">
+                    <span class="dev-tag red">TRUE PEAK LIMITER</span>
+                    <span class="ceiling-pill">-0.3 dBFS</span>
+                  </div>
+                  <div class="dev-controls">
+                    <div class="fx-knob">
+                      <label>Ceiling</label>
+                      <span class="tabular val-static">-0.30 dBFS</span>
+                    </div>
+                    <div class="fx-knob">
+                      <label>Lookahead</label>
+                      <span class="tabular val-static">5.0 ms</span>
+                    </div>
+                    <div class="fx-knob">
+                      <label>Release</label>
+                      <input type="range" id="limiter-release" min="10" max="500" value="80" class="range-slider">
+                      <span class="tabular">80 ms</span>
+                    </div>
+                    <div class="fx-knob">
+                      <label>Clip LED</label>
+                      <span id="limiter-clip-led" class="clip-led"></span>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </div>
+
+          </div>
+        </div>
+
+        <!-- ===================================================================
+             PANEL 3: Studio Mixer & Segmented VU Meters (#deck-mixer)
+             =================================================================== -->
+        <div id="deck-mixer" class="deck-panel">
+          <div class="mixer-strips-container">
+
+            <!-- Channel 1: Drums 909 -->
+            <div class="mixer-channel-strip" data-channel="0">
+              <div class="strip-header trk-amber">1 DRUMS</div>
+              <div class="strip-meters-box">
+                <div class="vu-meter-column" id="meter-ch0-L"></div>
+                <div class="vu-meter-column" id="meter-ch0-R"></div>
+                <span class="meter-db-readout" id="db-ch0">-12.4</span>
+              </div>
+              <div class="strip-controls">
+                <div class="pan-control">
+                  <label>PAN</label>
+                  <input type="range" class="pan-slider" id="pan-ch0" min="-1" max="1" step="0.05" value="0">
+                  <span class="pan-val tabular">C</span>
+                </div>
+                <div class="sends-control">
+                  <div class="send-dial"><label>Snd A</label><input type="range" id="sndA-ch0" min="0" max="1" step="0.02" value="0.2"></div>
+                  <div class="send-dial"><label>Snd B</label><input type="range" id="sndB-ch0" min="0" max="1" step="0.02" value="0.1"></div>
+                </div>
+                <div class="mute-solo-btns">
+                  <button class="btn-mute" id="mute-ch0" title="Mute Track (0)">0</button>
+                  <button class="btn-solo" id="solo-ch0" title="Solo Track (S)">S</button>
+                </div>
+                <div class="fader-box">
+                  <input type="range" class="vertical-fader" id="fader-ch0" min="0" max="1.41" step="0.01" value="0.95">
+                  <span class="fader-unity">0dB</span>
+                </div>
+              </div>
+            </div>
+
+            <!-- Channel 2: Bass Drift -->
+            <div class="mixer-channel-strip" data-channel="1">
+              <div class="strip-header trk-green">2 BASS</div>
+              <div class="strip-meters-box">
+                <div class="vu-meter-column" id="meter-ch1-L"></div>
+                <div class="vu-meter-column" id="meter-ch1-R"></div>
+                <span class="meter-db-readout" id="db-ch1">-14.2</span>
+              </div>
+              <div class="strip-controls">
+                <div class="pan-control">
+                  <label>PAN</label>
+                  <input type="range" class="pan-slider" id="pan-ch1" min="-1" max="1" step="0.05" value="0">
+                  <span class="pan-val tabular">C</span>
+                </div>
+                <div class="sends-control">
+                  <div class="send-dial"><label>Snd A</label><input type="range" id="sndA-ch1" min="0" max="1" step="0.02" value="0.1"></div>
+                  <div class="send-dial"><label>Snd B</label><input type="range" id="sndB-ch1" min="0" max="1" step="0.02" value="0.0"></div>
+                </div>
+                <div class="mute-solo-btns">
+                  <button class="btn-mute" id="mute-ch1" title="Mute Track (0)">0</button>
+                  <button class="btn-solo" id="solo-ch1" title="Solo Track (S)">S</button>
+                </div>
+                <div class="fader-box">
+                  <input type="range" class="vertical-fader" id="fader-ch1" min="0" max="1.41" step="0.01" value="0.88">
+                  <span class="fader-unity">0dB</span>
+                </div>
+              </div>
+            </div>
+
+            <!-- Channel 3: Lead Suite -->
+            <div class="mixer-channel-strip" data-channel="2">
+              <div class="strip-header trk-cyan">3 LEAD</div>
+              <div class="strip-meters-box">
+                <div class="vu-meter-column" id="meter-ch2-L"></div>
+                <div class="vu-meter-column" id="meter-ch2-R"></div>
+                <span class="meter-db-readout" id="db-ch2">-16.0</span>
+              </div>
+              <div class="strip-controls">
+                <div class="pan-control">
+                  <label>PAN</label>
+                  <input type="range" class="pan-slider" id="pan-ch2" min="-1" max="1" step="0.05" value="0.15">
+                  <span class="pan-val tabular">R15</span>
+                </div>
+                <div class="sends-control">
+                  <div class="send-dial"><label>Snd A</label><input type="range" id="sndA-ch2" min="0" max="1" step="0.02" value="0.35"></div>
+                  <div class="send-dial"><label>Snd B</label><input type="range" id="sndB-ch2" min="0" max="1" step="0.02" value="0.25"></div>
+                </div>
+                <div class="mute-solo-btns">
+                  <button class="btn-mute" id="mute-ch2" title="Mute Track (0)">0</button>
+                  <button class="btn-solo" id="solo-ch2" title="Solo Track (S)">S</button>
+                </div>
+                <div class="fader-box">
+                  <input type="range" class="vertical-fader" id="fader-ch2" min="0" max="1.41" step="0.01" value="0.85">
+                  <span class="fader-unity">0dB</span>
+                </div>
+              </div>
+            </div>
+
+            <!-- Channel 4: Keys / Stems -->
+            <div class="mixer-channel-strip" data-channel="3">
+              <div class="strip-header trk-purple">4 STEMS</div>
+              <div class="strip-meters-box">
+                <div class="vu-meter-column" id="meter-ch3-L"></div>
+                <div class="vu-meter-column" id="meter-ch3-R"></div>
+                <span class="meter-db-readout" id="db-ch3">-18.1</span>
+              </div>
+              <div class="strip-controls">
+                <div class="pan-control">
+                  <label>PAN</label>
+                  <input type="range" class="pan-slider" id="pan-ch3" min="-1" max="1" step="0.05" value="-0.2">
+                  <span class="pan-val tabular">L20</span>
+                </div>
+                <div class="sends-control">
+                  <div class="send-dial"><label>Snd A</label><input type="range" id="sndA-ch3" min="0" max="1" step="0.02" value="0.4"></div>
+                  <div class="send-dial"><label>Snd B</label><input type="range" id="sndB-ch3" min="0" max="1" step="0.02" value="0.2"></div>
+                </div>
+                <div class="mute-solo-btns">
+                  <button class="btn-mute" id="mute-ch3" title="Mute Track (0)">0</button>
+                  <button class="btn-solo" id="solo-ch3" title="Solo Track (S)">S</button>
+                </div>
+                <div class="fader-box">
+                  <input type="range" class="vertical-fader" id="fader-ch3" min="0" max="1.41" step="0.01" value="0.75">
+                  <span class="fader-unity">0dB</span>
+                </div>
+              </div>
+            </div>
+
+            <!-- Return A: Reverb -->
+            <div class="mixer-channel-strip strip-return">
+              <div class="strip-header trk-return">A REV</div>
+              <div class="strip-meters-box">
+                <div class="vu-meter-column" id="meter-rtnA-L"></div>
+                <div class="vu-meter-column" id="meter-rtnA-R"></div>
+                <span class="meter-db-readout" id="db-rtnA">-22.5</span>
+              </div>
+              <div class="strip-controls">
+                <div class="pan-control">
+                  <label>PAN</label>
+                  <input type="range" class="pan-slider" id="pan-rtnA" min="-1" max="1" step="0.05" value="0">
+                  <span class="pan-val tabular">C</span>
+                </div>
+                <div class="mute-solo-btns">
+                  <button class="btn-mute" id="mute-rtnA">0</button>
+                  <button class="btn-solo" id="solo-rtnA">S</button>
+                </div>
+                <div class="fader-box">
+                  <input type="range" class="vertical-fader" id="fader-rtnA" min="0" max="1.41" step="0.01" value="0.8">
+                  <span class="fader-unity">0dB</span>
+                </div>
+              </div>
+            </div>
+
+            <!-- Return B: Delay -->
+            <div class="mixer-channel-strip strip-return">
+              <div class="strip-header trk-return">B DLY</div>
+              <div class="strip-meters-box">
+                <div class="vu-meter-column" id="meter-rtnB-L"></div>
+                <div class="vu-meter-column" id="meter-rtnB-R"></div>
+                <span class="meter-db-readout" id="db-rtnB">-26.0</span>
+              </div>
+              <div class="strip-controls">
+                <div class="pan-control">
+                  <label>PAN</label>
+                  <input type="range" class="pan-slider" id="pan-rtnB" min="-1" max="1" step="0.05" value="0">
+                  <span class="pan-val tabular">C</span>
+                </div>
+                <div class="mute-solo-btns">
+                  <button class="btn-mute" id="mute-rtnB">0</button>
+                  <button class="btn-solo" id="solo-rtnB">S</button>
+                </div>
+                <div class="fader-box">
+                  <input type="range" class="vertical-fader" id="fader-rtnB" min="0" max="1.41" step="0.01" value="0.7">
+                  <span class="fader-unity">0dB</span>
+                </div>
+              </div>
+            </div>
+
+            <!-- Master Bus Strip -->
+            <div class="mixer-channel-strip strip-master">
+              <div class="strip-header trk-gold">MASTER</div>
+              <div class="strip-meters-box">
+                <div class="vu-meter-column master-meter" id="meter-master-L"></div>
+                <div class="vu-meter-column master-meter" id="meter-master-R"></div>
+                <span class="meter-db-readout master-db" id="db-master">-0.30</span>
+              </div>
+              <div class="strip-controls">
+                <div class="master-modes">
+                  <button id="btn-master-mono" class="btn-mini-toggle">Mono</button>
+                  <button id="btn-master-dim" class="btn-mini-toggle">Dim -20</button>
+                </div>
+                <div class="fader-box master-fader-box">
+                  <input type="range" class="vertical-fader fader-master" id="fader-master" min="0" max="1.41" step="0.01" value="1.0">
+                  <span class="fader-unity">0dB</span>
+                </div>
+              </div>
+            </div>
+
+          </div>
+        </div>
+
+        <!-- ===================================================================
+             PANEL 4: Bilingual OKF Copilot (#deck-copilot)
+             =================================================================== -->
+        <div id="deck-copilot" class="deck-panel">
+          <div class="copilot-container">
+
+            <!-- Sidebar / Chapter Selector -->
+            <div class="copilot-sidebar">
+              <div class="lang-switch-group">
+                <button id="lang-en" class="btn-lang active" data-lang="en">EN English</button>
+                <button id="lang-es" class="btn-lang" data-lang="es">ES Español</button>
+              </div>
+
+              <div class="okf-chapter-list">
+                <span class="okf-list-title">OPERATIONAL MANUAL (OKF)</span>
+                <button class="btn-okf-ch active" data-ch="OKF-01">OKF-01: Dual Views &amp; Layout</button>
+                <button class="btn-okf-ch" data-ch="OKF-02">OKF-02: Session Matrix</button>
+                <button class="btn-okf-ch" data-ch="OKF-03">OKF-03: Studio Mixer &amp; VU</button>
+                <button class="btn-okf-ch" data-ch="OKF-04">OKF-04: Timeline &amp; Comping</button>
+                <button class="btn-okf-ch" data-ch="OKF-05">OKF-05: Piano Roll &amp; Generative</button>
+                <button class="btn-okf-ch" data-ch="OKF-06">OKF-06: Device Chain &amp; MCP</button>
+                <button class="btn-okf-ch" data-ch="OKF-07">OKF-07: TR-909 &amp; Groove Pool</button>
+                <button class="btn-okf-ch" data-ch="OKF-08">OKF-08: Tuning, WAV &amp; ALS</button>
+                <button class="btn-okf-ch" data-ch="OKF-09">OKF-09: Suite Synthesizer</button>
+                <button class="btn-okf-ch" data-ch="OKF-10">OKF-10: Sandboxing &amp; Push 3</button>
+              </div>
+
+              <!-- Live Studio Telemetry Card -->
+              <div class="studio-telemetry-card">
+                <span class="card-eyebrow">LIVE DSP TELEMETRY</span>
+                <div class="telemetry-item"><span>Selected:</span> <strong id="telem-selected">Track 1 (Drums)</strong></div>
+                <div class="telemetry-item"><span>Tempo / Swing:</span> <strong id="telem-tempo" class="tabular">136.0 BPM / 56%</strong></div>
+                <div class="telemetry-item"><span>Limiter Ceiling:</span> <strong class="tabular">-0.30 dBFS</strong></div>
+                <div class="telemetry-item"><span>Sub Balance:</span> <strong id="telem-sub" class="tabular">+1.2 dB @ 55Hz</strong></div>
+              </div>
+            </div>
+
+            <!-- Main Chat Console -->
+            <div class="copilot-chat-console">
+              <div class="chat-header">
+                <span class="copilot-status-dot"></span>
+                <span class="copilot-title">Oxide Studio OKF Copilot — Natural Language DSP Router</span>
+                <span class="copilot-badge">76 MCP TOOLS MOUNTED</span>
+              </div>
+
+              <!-- Chat Message Stream -->
+              <div class="chat-stream" id="chat-stream">
+                <div class="chat-msg bot">
+                  <div class="msg-avatar">⚡</div>
+                  <div class="msg-bubble">
+                    <p><strong>Welcome to Oxide Studio Web Edition (v1.0.0).</strong> I am your bilingual Operational Knowledge Copilot.</p>
+                    <p>I can adjust parameters, rewrite drum sequences, sculpt 303 acid lines, load peak techno patterns, explain Ableton Live 12 parity chapters (OKF-01..10), or export your session to WAV and Ableton Set (.als).</p>
+                    <div class="mcp-tool-badge">✓ live12_song_get_state() • Ready</div>
+                  </div>
+                </div>
+              </div>
+
+              <!-- Quick Prompt Suggestion Chips -->
+              <div class="quick-chips" id="quick-chips">
+                <!-- Dynamically populated based on active language (EN/ES) -->
+              </div>
+
+              <!-- Chat Input Bar -->
+              <form class="chat-input-bar" id="chat-form">
+                <input type="text" id="chat-input" placeholder="Type a studio command (e.g. 'make kick fatter', 'acid 303 bass', 'techno drop 136')..." autocomplete="off">
+                <button type="submit" class="btn btn-amber">EXECUTE</button>
+              </form>
+            </div>
+
+          </div>
+        </div>
+
+      </div>
+    </section>
+
+    <!-- Persistent 60 FPS Visualizer Dock (Bottom) -->
+    <footer class="daw-visualizer-dock">
+      <!-- Vis 1: Phosphor Oscilloscope -->
+      <div class="vis-module">
+        <div class="vis-header">
+          <span class="vis-title">DUAL PHOSPHOR OSCILLOSCOPE</span>
+          <span class="vis-mode">TIME DOMAIN</span>
+        </div>
+        <canvas id="canvas-oscilloscope" class="vis-canvas" width="280" height="74"></canvas>
+      </div>
+
+      <!-- Vis 2: 64-Band FFT Spectrum -->
+      <div class="vis-module">
+        <div class="vis-header">
+          <span class="vis-title">64-BAND FFT SPECTRUM</span>
+          <span class="vis-mode">20 Hz – 20 kHz</span>
+        </div>
+        <canvas id="canvas-spectrum" class="vis-canvas" width="280" height="74"></canvas>
+      </div>
+
+      <!-- Vis 3: Analog SSL Needle VU Meter -->
+      <div class="vis-module">
+        <div class="vis-header">
+          <span class="vis-title">GLUE COMP NEEDLE VU</span>
+          <span class="vis-mode">GAIN REDUCTION dB</span>
+        </div>
+        <canvas id="canvas-needle" class="vis-canvas" width="280" height="74"></canvas>
+      </div>
+
+      <!-- Vis 4: ZDF Filter Bode Response Curve -->
+      <div class="vis-module">
+        <div class="vis-header">
+          <span class="vis-title">4-POLE ZDF BODE CURVE</span>
+          <span class="vis-mode">INTERACTIVE CUTOFF / Q</span>
+        </div>
+        <canvas id="canvas-bode" class="vis-canvas" width="280" height="74"></canvas>
+      </div>
+    </footer>
+
+  </div>
+
+  <!-- Audio Engine & DAW Application Script -->
+  <script src="daw.js"></script>
+</body>
+</html>
