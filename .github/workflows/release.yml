@@ -20,19 +20,19 @@ jobs:
           - os: macos-latest
             target: aarch64-apple-darwin
             archive_name: oxide-studio-v1.0.0-macos-arm64
-            binary_name: ableton-rust
+            binary_name: oxide-studio
           - os: macos-13
             target: x86_64-apple-darwin
             archive_name: oxide-studio-v1.0.0-macos-x86_64
-            binary_name: ableton-rust
+            binary_name: oxide-studio
           - os: ubuntu-latest
             target: x86_64-unknown-linux-gnu
             archive_name: oxide-studio-v1.0.0-linux-x86_64
-            binary_name: ableton-rust
+            binary_name: oxide-studio
           - os: windows-latest
             target: x86_64-pc-windows-msvc
             archive_name: oxide-studio-v1.0.0-windows-x86_64
-            binary_name: ableton-rust.exe
+            binary_name: oxide-studio.exe
 
     steps:
       - name: Checkout repository

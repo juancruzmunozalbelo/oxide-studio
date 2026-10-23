@@ -23,11 +23,11 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use serde_json::{json, Value};
-use ableton_mcp::bridge::TcpLomClient;
-use ableton_mcp::protocol::*;
-use ableton_mcp::state::DawState;
-use ableton_mcp::tools::{call_tool, get_tool_definitions};
-use ableton_mcp::McpServer;
+use oxide_mcp::bridge::TcpLomClient;
+use oxide_mcp::protocol::*;
+use oxide_mcp::state::DawState;
+use oxide_mcp::tools::{call_tool, get_tool_definitions};
+use oxide_mcp::McpServer;
 
 // ============================================================================
 // 1. TOOL DISPATCH STRESS: EMPTY PARAMETERS ACROSS ALL 76 TOOLS

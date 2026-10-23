@@ -57,13 +57,13 @@ TMP_DIR=$(mktemp -d)
 trap 'rm -rf "$TMP_DIR"' EXIT
 
 # ------------------------------------------------------------------------------
-# Gate 1 — Ableton Manual & OKF Documentation Sync
+# Gate 1 — Workstation Specification & OKF Documentation Sync
 # ------------------------------------------------------------------------------
 echo ""
-echo "▶ Running Gate 1: Ableton Manual & OKF Documentation Sync..."
+echo "▶ Running Gate 1: Workstation Specification & OKF Documentation Sync..."
 
 OKF_DOC="$REPO_ROOT/docs/okf/OXIDE_STUDIO_MANUAL_OKF.md"
-OKF_RUST="$REPO_ROOT/crates/ableton-gui/src/okf_knowledge.rs"
+OKF_RUST="$REPO_ROOT/crates/oxide-gui/src/okf_knowledge.rs"
 
 if [[ ! -f "$OKF_DOC" ]]; then
     echo "❌ Gate 1 Fail: Missing $OKF_DOC"
@@ -87,9 +87,9 @@ for section in OKF-01 OKF-02 OKF-03 OKF-04 OKF-05 OKF-06 OKF-07 OKF-08 OKF-09 OK
 done
 
 GATE1_LOG="$TMP_DIR/gate1.log"
-cargo test -p ableton-gui okf -- --nocapture > "$GATE1_LOG" 2>&1 || {
+cargo test -p oxide-gui okf -- --nocapture > "$GATE1_LOG" 2>&1 || {
     cat "$GATE1_LOG"
-    echo "❌ Gate 1 Fail: cargo test -p ableton-gui okf failed."
+    echo "❌ Gate 1 Fail: cargo test -p oxide-gui okf failed."
     exit 1
 }
 
@@ -98,22 +98,22 @@ GATE1_STATUS="PASS"
 echo "✓ Gate 1 Passed ($GATE1_TESTS OKF doc/copilot tests passed)"
 
 # ------------------------------------------------------------------------------
-# Gate 2 — End-to-End Manual & DSP Audio Verification
+# Gate 2 — End-to-End Workstation & DSP Audio Verification
 # ------------------------------------------------------------------------------
 echo ""
-echo "▶ Running Gate 2: End-to-End Manual & Real-Time DSP Audio Verification..."
+echo "▶ Running Gate 2: End-to-End Workstation & Real-Time DSP Audio Verification..."
 
 GATE2_LOG="$TMP_DIR/gate2.log"
-cargo test -p ableton-gui --test e2e_ableton_manual_verification_test -- --nocapture > "$GATE2_LOG" 2>&1 || {
+cargo test -p oxide-gui --test e2e_workstation_verification_test -- --nocapture > "$GATE2_LOG" 2>&1 || {
     cat "$GATE2_LOG"
-    echo "❌ Gate 2 Fail: e2e_ableton_manual_verification_test failed."
+    echo "❌ Gate 2 Fail: e2e_workstation_verification_test failed."
     exit 1
 }
 
 GATE2_LOG2="$TMP_DIR/gate2_drums_audio.log"
-cargo test -p ableton-drums -p ableton-audio -- --nocapture > "$GATE2_LOG2" 2>&1 || {
+cargo test -p oxide-drums -p oxide-audio -- --nocapture > "$GATE2_LOG2" 2>&1 || {
     cat "$GATE2_LOG2"
-    echo "❌ Gate 2 Fail: ableton-drums or ableton-audio tests failed."
+    echo "❌ Gate 2 Fail: oxide-drums or oxide-audio tests failed."
     exit 1
 }
 
@@ -121,7 +121,7 @@ G2_COUNT1=$(grep -E 'test result: ok\. [0-9]+ passed' "$GATE2_LOG" | awk '{sum +
 G2_COUNT2=$(grep -E 'test result: ok\. [0-9]+ passed' "$GATE2_LOG2" | awk '{sum += $4} END {print sum}')
 GATE2_TESTS=$(( ${G2_COUNT1:-0} + ${G2_COUNT2:-0} ))
 GATE2_STATUS="PASS"
-echo "✓ Gate 2 Passed ($GATE2_TESTS E2E manual & acoustic DSP tests passed)"
+echo "✓ Gate 2 Passed ($GATE2_TESTS E2E workstation & acoustic DSP tests passed)"
 
 # ------------------------------------------------------------------------------
 # Gate 3 — Anti-Breakage Layout Guard (576-Frame Matrix)
@@ -130,14 +130,14 @@ echo ""
 echo "▶ Running Gate 3: Anti-Breakage Layout Guard (576-Frame Matrix)..."
 
 GATE3_LOG="$TMP_DIR/gate3_audit.log"
-cargo test -p ableton-gui --test e2e_live12_layout_audit_test -- --nocapture > "$GATE3_LOG" 2>&1 || {
+cargo test -p oxide-gui --test e2e_workstation_layout_audit_test -- --nocapture > "$GATE3_LOG" 2>&1 || {
     cat "$GATE3_LOG"
-    echo "❌ Gate 3 Fail: e2e_live12_layout_audit_test failed."
+    echo "❌ Gate 3 Fail: e2e_workstation_layout_audit_test failed."
     exit 1
 }
 
 GATE3_LOG2="$TMP_DIR/gate3_stress.log"
-cargo test -p ableton-gui --test adversarial_acoustic_layout_stress_test -- --nocapture > "$GATE3_LOG2" 2>&1 || {
+cargo test -p oxide-gui --test adversarial_acoustic_layout_stress_test -- --nocapture > "$GATE3_LOG2" 2>&1 || {
     cat "$GATE3_LOG2"
     echo "❌ Gate 3 Fail: adversarial_acoustic_layout_stress_test failed."
     exit 1
@@ -172,14 +172,14 @@ cat <<EOF > "$EVIDENCE_FILE"
 
 | Gate | Verification Domain | Test Target | Status | Passing Tests |
 | :--- | :--- | :--- | :---: | :---: |
-| **Gate 1** | **Ableton Manual & OKF Doc Sync** | \`docs/okf/OXIDE_STUDIO_MANUAL_OKF.md\` & \`okf_knowledge.rs\` (\`OKF-01..10\`) | **${GATE1_STATUS}** | ${GATE1_TESTS} tests |
-| **Gate 2** | **End-to-End Manual & Real-Time DSP Audio** | \`e2e_ableton_manual_verification_test\` & \`ableton-drums\` / \`ableton-audio\` | **${GATE2_STATUS}** | ${GATE2_TESTS} tests |
-| **Gate 3** | **Anti-Breakage Layout Guard (576-Frame Matrix)** | \`e2e_live12_layout_audit_test\` & \`adversarial_acoustic_layout_stress_test\` | **${GATE3_STATUS}** | ${GATE3_TESTS} tests |
+| **Gate 1** | **Workstation Specification & OKF Doc Sync** | \`docs/okf/OXIDE_STUDIO_MANUAL_OKF.md\` & \`okf_knowledge.rs\` (\`OKF-01..10\`) | **${GATE1_STATUS}** | ${GATE1_TESTS} tests |
+| **Gate 2** | **End-to-End Workstation & Real-Time DSP Audio** | \`e2e_workstation_verification_test\` & \`oxide-drums\` / \`oxide-audio\` | **${GATE2_STATUS}** | ${GATE2_TESTS} tests |
+| **Gate 3** | **Anti-Breakage Layout Guard (576-Frame Matrix)** | \`e2e_workstation_layout_audit_test\` & \`adversarial_acoustic_layout_stress_test\` | **${GATE3_STATUS}** | ${GATE3_TESTS} tests |
 | **Total** | **Comprehensive Full Suite DoD Gate** | **All 3 Verification Gates Combined** | **PASS** | **${TOTAL_PASSED} tests** |
 
 ---
 
-## 2. Gate 1 Evidence: Ableton Manual & OKF Copilot Sync
+## 2. Gate 1 Evidence: Workstation Specification & OKF Copilot Sync
 
 - **Census Verification:** All 10 OKF Knowledge Sections (\`OKF-01\` through \`OKF-10\`) verified present in both documentation markdown and native Rust copilot registry.
 - **Bilingual Intent Querying:** Tested and verified bilingual query roundtrip across English and Argentine Spanish producer terminology.

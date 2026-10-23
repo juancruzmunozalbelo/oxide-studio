@@ -65,15 +65,15 @@
       "body_file": "posts/04_r_localllama.md"
     },
     {
-      "id": "w2-d8-ableton",
+      "id": "w2-d8-edmproduction",
       "week": 2,
       "day": 8,
-      "channel": "r/ableton & r/edmproduction",
+      "channel": "r/edmproduction",
       "best_time_art": "Martes 12:00 PM ART",
       "status": "ready",
       "title": "I built a free, open-source (MIT) lightweight DAW in Rust that natively imports and exports Ableton Live 12 (.als) projects",
       "url": "https://github.com/juancruzmunozalbelo/oxide-studio",
-      "body_file": "posts/03_r_ableton.md"
+      "body_file": "posts/03_r_edmproduction.md"
     },
     {
       "id": "w2-d10-techno",

@@ -1,0 +1,21 @@
+[package]
+name = "oxide-plugin-scanner"
+version = "1.0.0"
+edition = "2021"
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
+
+[dependencies]
+oxide-core = { path = "../oxide-core" }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+
+[[bin]]
+name = "oxide-plugin-scanner"
+path = "src/bin/main.rs"
+
+[lib]
+name = "oxide_plugin_scanner"
+path = "src/lib.rs"

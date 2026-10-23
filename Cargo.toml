@@ -1,17 +1,17 @@
 [workspace]
 resolver = "2"
 members = [
-    "crates/ableton-core",
-    "crates/ableton-dsp",
-    "crates/ableton-drums",
-    "crates/ableton-fx",
-    "crates/ableton-audio",
-    "crates/ableton-bounce",
-    "crates/ableton-timeline",
-    "crates/ableton-project",
-    "crates/ableton-plugin-scanner",
-    "crates/ableton-gui",
-    "crates/ableton-mcp",
+    "crates/oxide-core",
+    "crates/oxide-dsp",
+    "crates/oxide-drums",
+    "crates/oxide-fx",
+    "crates/oxide-audio",
+    "crates/oxide-bounce",
+    "crates/oxide-timeline",
+    "crates/oxide-project",
+    "crates/oxide-plugin-scanner",
+    "crates/oxide-gui",
+    "crates/oxide-mcp",
 ]
 
 [workspace.package]

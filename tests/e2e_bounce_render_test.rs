@@ -8,7 +8,7 @@ use std::fs::{self, File};
 use std::io::Read;
 use std::path::Path;
 
-use ableton_bounce::{DemoArrangementRenderer, WavWriter};
+use oxide_bounce::{DemoArrangementRenderer, WavWriter};
 
 #[test]
 fn test_multitrack_offline_bounce_wav_export() {
@@ -28,7 +28,7 @@ fn test_multitrack_offline_bounce_wav_export() {
     );
 
     // Export to WAV
-    let output_path = Path::new("/tmp/ableton_rust_test_export.wav");
+    let output_path = Path::new("/tmp/oxide_studio_test_export.wav");
     WavWriter::write_wav_16bit(output_path, sample_rate as u32, 2, &interleaved)
         .expect("Failed to export WAV");
 
@@ -47,7 +47,7 @@ fn test_wav_riff_header_and_chunk_integrity() {
     let renderer = DemoArrangementRenderer::new(sample_rate, bpm);
     let interleaved = renderer.render_demo_seconds(4.2);
 
-    let wav_path = Path::new("/tmp/ableton_rust_test_header.wav");
+    let wav_path = Path::new("/tmp/oxide_studio_test_header.wav");
     WavWriter::write_wav_16bit(wav_path, sample_rate as u32, 2, &interleaved)
         .expect("Failed to write header test WAV");
 
@@ -100,7 +100,7 @@ fn test_bounce_audio_duration_and_rms_energy() {
     let duration_target = 4.5; // > 4.0 seconds
     let interleaved = renderer.render_demo_seconds(duration_target);
 
-    let wav_path = Path::new("/tmp/ableton_rust_test_rms.wav");
+    let wav_path = Path::new("/tmp/oxide_studio_test_rms.wav");
     WavWriter::write_wav_16bit(wav_path, sample_rate as u32, 2, &interleaved)
         .expect("Failed to write test RMS WAV");
 

@@ -1,8 +1,8 @@
 # 🔒 Pre-Closure DoD Verification & Evidence Report: Issue #17
 
 - **Issue Reference:** [Issue #17](https://github.com/juancruzmunozalbelo/oxide-studio/issues/17)
-- **Timestamp (UTC):** `2026-10-22T03:53:22Z`
-- **Git Commit SHA:** `a1f3a18f3e9842beb9261f5eb1182b34716754da`
+- **Timestamp (UTC):** `2026-10-23T02:32:10Z`
+- **Git Commit SHA:** `4da4fcad66cd955f702e788ee0f9358a5f9d37f2`
 - **Compiler:** `rustc 1.99.1 (58cf8f9c3 2026-10-13)`
 - **Final Verdict:** **APPROVED FOR CLOSURE** (All 3 Gates Passed)
 
@@ -12,34 +12,35 @@
 
 | Gate | Verification Domain | Test Target | Status | Passing Tests |
 | :--- | :--- | :--- | :---: | :---: |
-| **Gate 1** | **Ableton Manual & OKF Doc Sync** | `docs/okf/OXIDE_STUDIO_MANUAL_OKF.md` & `okf_knowledge.rs` (`OKF-01..08`) | **PASS** | 14 tests |
-| **Gate 2** | **End-to-End Manual & Real-Time DSP Audio** | `e2e_ableton_manual_verification_test` & `ableton-drums` / `ableton-audio` | **PASS** | 35 tests |
-| **Gate 3** | **Anti-Breakage Layout Guard (576-Frame Matrix)** | `e2e_live12_layout_audit_test` & `adversarial_acoustic_layout_stress_test` | **PASS** | 10 tests |
-| **Total** | **Comprehensive Full Suite DoD Gate** | **All 3 Verification Gates Combined** | **PASS** | **59 tests** |
+| **Gate 1** | **Workstation Specification & OKF Doc Sync** | `docs/okf/OXIDE_STUDIO_MANUAL_OKF.md` & `okf_knowledge.rs` (`OKF-01..10`) | **PASS** | 23 tests |
+| **Gate 2** | **End-to-End Workstation & Real-Time DSP Audio** | `e2e_workstation_verification_test` & `oxide-drums` / `oxide-audio` | **PASS** | 88 tests |
+| **Gate 3** | **Anti-Breakage Layout Guard (576-Frame Matrix)** | `e2e_workstation_layout_audit_test` & `adversarial_acoustic_layout_stress_test` | **PASS** | 10 tests |
+| **Total** | **Comprehensive Full Suite DoD Gate** | **All 3 Verification Gates Combined** | **PASS** | **121 tests** |
 
 ---
 
-## 2. Gate 1 Evidence: Ableton Manual & OKF Copilot Sync
+## 2. Gate 1 Evidence: Workstation Specification & OKF Copilot Sync
 
-- **Census Verification:** All 8 OKF Knowledge Sections (`OKF-01` through `OKF-08`) verified present in both documentation markdown and native Rust copilot registry.
+- **Census Verification:** All 10 OKF Knowledge Sections (`OKF-01` through `OKF-10`) verified present in both documentation markdown and native Rust copilot registry.
 - **Bilingual Intent Querying:** Tested and verified bilingual query roundtrip across English and Argentine Spanish producer terminology.
 - **Test Output Summary:**
 ```text
-test okf_knowledge::tests::test_okf_manual_sections_census ... ok
-test okf_knowledge::tests::test_query_okf_manual_shortcuts ... ok
-test okf_knowledge::tests::test_query_okf_manual_general_help ... ok
-test okf_knowledge::tests::test_query_okf_manual_tr909_sequencer ... ok
-test okf_knowledge::tests::test_query_okf_manual_mixer_and_crossfader ... ok
-test okf_knowledge::tests::test_query_okf_manual_audio_warping ... ok
-test okf_knowledge::tests::test_query_okf_manual_export_stems_als ... ok
-test okf_knowledge::tests::test_query_okf_manual_devices_and_glue_compressor ... ok
 test okf_knowledge::tests::test_build_copilot_okf_system_prompt ... ok
+test okf_knowledge::tests::test_okf_manual_sections_census ... ok
+test okf_knowledge::tests::test_query_okf_manual_mixer_and_crossfader ... ok
+test okf_knowledge::tests::test_query_okf_manual_export_stems_als ... ok
+test okf_knowledge::tests::test_query_okf_manual_audio_warping ... ok
+test okf_knowledge::tests::test_query_okf_manual_shortcuts ... ok
+test okf_knowledge::tests::test_query_okf_manual_suite_and_clap_formats ... ok
+test okf_knowledge::tests::test_golden_telemetry_verifier_catches_nan_and_clipping ... ok
+test okf_knowledge::tests::test_golden_telemetry_verifier_catches_invalid_shader_uniforms ... ok
+test okf_knowledge::tests::test_query_okf_manual_general_help ... ok
+test okf_knowledge::tests::test_golden_telemetry_verifier_valid_audio_and_shader_bounds ... ok
+test okf_knowledge::tests::test_query_okf_manual_devices_and_glue_compressor ... ok
+test okf_knowledge::tests::test_query_okf_manual_tr909_sequencer ... ok
 test panels::ai_chat::tests::test_copilot_system_prompt_bilingual_okf ... ok
-test panels::ai_chat::tests::test_execute_studio_intent_english_okf_queries ... ok
 test panels::ai_chat::tests::test_execute_studio_intent_spanish_okf_queries ... ok
-test panels::ai_chat::tests::test_app_handle_ai_prompt_okf_bilingual_roundtrip ... ok
-test test_e2e_okf_copilot_bilingual_manual_queries_and_system_prompt ... ok
-test result: ok. 14 passed; 0 failed
+test result: ok. 23 passed; 0 failed
 ```
 
 ---
@@ -50,21 +51,26 @@ test result: ok. 14 passed; 0 failed
 - **TR-909 Step Sequencer:** Verified dynamic sample rendering, swing grooves, and distinct frequency centroids across all 16 drum pads.
 - **Test Output Summary:**
 ```text
-test test_e2e_tr909_sequencer_step_playback_and_grooves ... ok
-test test_e2e_okf_copilot_bilingual_manual_queries_and_system_prompt ... ok
 test test_e2e_acoustic_verification_channel_and_master_fader_mute_silence_and_vu_meters ... ok
 test test_e2e_acoustic_verification_all_16_drum_pads_distinct_spectral_profiles ... ok
-test test_e2e_sequencer_row_16_tambourine_horizontal_x_alignment ... ok
-test test_e2e_headless_multi_resolution_layout_and_popups_clean_audit ... ok
-test mixer::tests::test_modular_mixer_sends_and_returns ... ok
-test mixer::tests::test_track_delay_ring_buffer ... ok
-test processor::tests::test_master_silence_when_zero_vol ... ok
-test processor::tests::test_mixer_parameters_command_routing ... ok
-test mixer::tests::test_crossfader_equal_power_law ... ok
-test processor::tests::test_track_silence_when_muted_or_zero_vol ... ok
-test drum_rack::tests::test_drum_rack_multi_bank_all_128_pads ... ok
-test drum_rack::tests::test_drum_rack_return_chains_send_a_and_b ... ok
-test drum_rack::tests::test_all_16_drum_pads_distinct_synthesis ... ok
+test test_e2e_chapter29_automation_and_takeover_modes ... ok
+test test_e2e_chapter15_tuning_systems_and_scale_lock ... ok
+test test_e2e_chapter24_instrument_drum_and_effect_racks ... ok
+test test_e2e_epic18_sandboxed_plugin_hosting_and_crash_safe_dry_bypass ... ok
+test test_e2e_chapter22_working_with_instruments_and_effects_okf06 ... ok
+test test_e2e_chapter31_midi_and_key_remote_control_okf10 ... ok
+test test_e2e_epic20_modular_patch_graph_audio_processing_and_lom_mapper ... ok
+test test_e2e_epic22_epic23_suite_audio_fx_and_midi_effect_devices ... ok
+test test_e2e_epic17_hardware_io_matrix_and_driver_latency_compensation ... ok
+test test_e2e_chapter30_clip_envelopes_and_modulation ... ok
+test test_e2e_epic24_push3_matrix_sync_midi_learn_and_takeover_curves ... ok
+test test_e2e_epic19_all_six_warp_modes_and_streaming_disk_cache ... ok
+test test_e2e_epic27_alp_pack_bundler_dawproject_xml_and_lossless_codec ... ok
+test test_e2e_chapter10_midi_note_editor_and_piano_roll ... ok
+test test_e2e_epic28_okf_copilot_bilingual_full_ten_chapters_queries ... ok
+test test_e2e_epic25_track_groups_freeze_flatten_follow_actions_linked_tracks ... ok
+test test_e2e_tr909_sequencer_step_playback_and_grooves ... ok
+test test_e2e_chapter36_audio_fact_sheet_neutral_operations_and_mathematical_null_test ... ok
 ```
 
 ---
@@ -84,8 +90,8 @@ test test_f23_component_catalog_cardinality_and_visualizer_resilience ... ok
 test test_f21_full_workspace_unicode_glyph_census_and_tofu_detection ... ok
 test test_f24_full_studio_app_headless_integration_and_telemetry ... ok
 test test_f25_anti_breakage_layout_guard_across_splitter_extremes ... ok
-test test_adv_acoustic_output_2048_samples_all_16_pads_distinct ... ok
 test test_adv_fader_and_mute_silence_bit_exact_zeros ... ok
+test test_adv_acoustic_output_2048_samples_all_16_pads_distinct ... ok
 test test_adv_layout_stress_splitter_heights_and_multi_resolution ... ok
 ```
 

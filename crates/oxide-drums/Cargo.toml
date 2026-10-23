@@ -1,0 +1,17 @@
+[package]
+name = "oxide-drums"
+version = "1.0.0"
+edition = "2021"
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
+
+[dependencies]
+oxide-core = { path = "../oxide-core" }
+oxide-dsp = { path = "../oxide-dsp" }
+serde = { version = "1.0", features = ["derive"], optional = true }
+
+[features]
+default = []
+serde = ["dep:serde"]

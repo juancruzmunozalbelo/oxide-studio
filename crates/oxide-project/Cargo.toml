@@ -1,0 +1,17 @@
+[package]
+name = "oxide-project"
+version = "1.0.0"
+edition = "2021"
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
+
+[dependencies]
+oxide-core = { path = "../oxide-core" }
+oxide-dsp = { path = "../oxide-dsp" }
+oxide-timeline = { path = "../oxide-timeline" }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+flate2 = "1.0"
+quick-xml = { version = "0.37", features = ["serialize"] }

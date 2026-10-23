@@ -1032,7 +1032,7 @@
     {
       keywords: ['als', 'ableton', 'importar', 'exportar', 'live set'],
       spanish: true,
-      text: "Sincronizando con Ableton Live 12: parseando XML comprimido en gzip (.als) con mapeo 1:1 de pistas, tempo, clips MIDI y cadenas de dispositivos.",
+      text: "Sincronizando con formato .als: parseando XML comprimido en gzip (.als) con mapeo 1:1 de pistas, tempo, clips MIDI y cadenas de dispositivos.",
       tools: ['project_import_als', 'project_export_als'],
       action: () => {}
     }
@@ -1045,7 +1045,7 @@
     if (!matched) {
       matched = {
         text: `Comando interpretado: "${query}". Ejecutando mutaciones de audio y actualizando telemetría del motor Oxide Studio en tiempo real.`,
-        tools: ['live12_exec_lom_query', 'transport_get_telemetry'],
+        tools: ['transport_get_telemetry'],
         action: () => {}
       };
     }
@@ -1111,8 +1111,8 @@
     { name: 'project_new', cat: 'project', desc: 'Create a new DAW project with default lead synth and 909 drum rack tracks.', schema: '{"name":"string"}' },
     { name: 'project_load', cat: 'project', desc: 'Load complete DAW project from a JSON project file on disk.', schema: '{"path":"string"}' },
     { name: 'project_save', cat: 'project', desc: 'Persist current DAW state to an atomic JSON project file on disk.', schema: '{"path":"string"}' },
-    { name: 'project_import_als', cat: 'project', desc: 'Import native Ableton Live 12 XML Gzip project (.als) into Oxide Studio.', schema: '{"path":"project.als"}' },
-    { name: 'project_export_als', cat: 'project', desc: 'Export Oxide Studio session to native Ableton Live 12 XML Gzip project (.als).', schema: '{"path":"exported.als"}' },
+    { name: 'project_import_als', cat: 'project', desc: 'Import open Ableton Live Set XML Gzip project (.als) into Oxide Studio.', schema: '{"path":"project.als"}' },
+    { name: 'project_export_als', cat: 'project', desc: 'Export Oxide Studio session to open Ableton Live Set XML Gzip project (.als).', schema: '{"path":"exported.als"}' },
     { name: 'transport_play', cat: 'project', desc: 'Start real-time audio playback in the audio engine.', schema: '{}' },
     { name: 'transport_stop', cat: 'project', desc: 'Stop audio playback and reset playhead position.', schema: '{}' },
     { name: 'transport_set_bpm', cat: 'project', desc: 'Set global DAW tempo in BPM (20.0 to 999.0).', schema: '{"bpm": 136.0}' },
@@ -1148,8 +1148,8 @@
     { name: 'generate_euclidean_drum_clip', cat: 'generative', desc: 'Generate Euclidean rhythm pattern (Bjorklund algorithm).', schema: '{"hits": 5, "steps": 16}' },
     { name: 'generate_drum_groove_clip', cat: 'generative', desc: 'Generate genre-authentic drum patterns (Techno, House, RKT).', schema: '{"genre": "PeakTechno"}' },
     { name: 'build_song_arrangement', cat: 'generative', desc: 'Autonomously compose complete multi-track song arrangement.', schema: '{"bpm": 136, "bars": 64}' },
-    { name: 'midi_transform_clip', cat: 'generative', desc: 'Apply Live 12 MIDI transform (connect, recombine, span, strum).', schema: '{"transform": "strum"}' },
-    { name: 'midi_generate_clip', cat: 'generative', desc: 'Generate notes using Live 12 algorithms (seed, shape, stacks).', schema: '{"generator": "seed"}' },
+    { name: 'midi_transform_clip', cat: 'generative', desc: 'Apply algorithmic MIDI transform (connect, recombine, span, strum).', schema: '{"transform": "strum"}' },
+    { name: 'midi_generate_clip', cat: 'generative', desc: 'Generate notes using generative algorithms (seed, shape, stacks).', schema: '{"generator": "seed"}' },
 
     // 5. FX, Mixer & Mastering
     { name: 'mixer_set_channel', cat: 'fx', desc: 'Set track volume dB, pan, mute, solo, and crossfader.', schema: '{"track_id": 0, "volume_db": -3.0, "pan": 0.0}' },
@@ -1162,13 +1162,13 @@
     { name: 'scale_set_global', cat: 'fx', desc: 'Set global song scale and root note (e.g. F Dorian).', schema: '{"root_note": "F", "scale_name": "Dorian"}' },
 
     // 6. Devices & Plugins
-    { name: 'device_add_to_track', cat: 'devices', desc: 'Insert any Live 12 instrument or effect into track device chain.', schema: '{"track_id": 0, "device": "Roar"}' },
+    { name: 'device_add_to_track', cat: 'devices', desc: 'Insert any instrument or effect into track device chain.', schema: '{"track_id": 0, "device": "Roar"}' },
     { name: 'device_remove_from_track', cat: 'devices', desc: 'Delete device from track chain by index.', schema: '{"track_id": 0, "device_index": 1}' },
     { name: 'device_set_param', cat: 'devices', desc: 'Set parameter on any device in chain.', schema: '{"track_id": 0, "device_index": 0, "param": "Cutoff", "value": 1200}' },
     { name: 'device_get_chain', cat: 'devices', desc: 'Dump all devices and parameters in track chain.', schema: '{"track_id": 0}' },
     { name: 'plugin_scan', cat: 'devices', desc: 'Out-of-process crash-isolated AUv2 / VST3 / CLAP plugin scan.', schema: '{}' },
     { name: 'browser_search', cat: 'devices', desc: 'Search library browser items by query and tags.', schema: '{"query": "909 Kick"}' },
-    { name: 'browser_find_similar_sounds', cat: 'devices', desc: 'Cosine similarity neural sound search (libmusicai reconstruction).', schema: '{"target_sample": "kick.wav"}' },
+    { name: 'browser_find_similar_sounds', cat: 'devices', desc: 'Cosine similarity neural sound search.', schema: '{"target_sample": "kick.wav"}' },
 
     // 7. Warping, Comping & Stems
     { name: 'audio_clip_create_warped', cat: 'warping', desc: 'Create audio clip with 6-mode warping enabled.', schema: '{"sample_path": "loop.wav", "warp_mode": "complex_pro"}' },

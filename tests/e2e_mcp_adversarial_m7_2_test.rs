@@ -8,14 +8,14 @@ use std::io::Write;
 use std::panic::{self, AssertUnwindSafe};
 use serde_json::json;
 
-use ableton_mcp::analysis::AudioAnalysisMetrics;
-use ableton_mcp::lilypond::{parse_lilypond, sequence_to_clip_pattern, ParsedItem};
-use ableton_mcp::music_theory::{
+use oxide_mcp::analysis::AudioAnalysisMetrics;
+use oxide_mcp::lilypond::{parse_lilypond, sequence_to_clip_pattern, ParsedItem};
+use oxide_mcp::music_theory::{
     bjorklund, build_chord_notes, generate_drum_groove, get_scale_intervals,
     parse_pitch_class, parse_roman_degree,
 };
-use ableton_mcp::tools::call_tool;
-use ableton_mcp::state::DawState;
+use oxide_mcp::tools::call_tool;
+use oxide_mcp::state::DawState;
 
 // ============================================================================
 // 1. MUSIC THEORY ADVERSARIAL STRESS TESTS
@@ -334,7 +334,7 @@ fn test_stress_lilypond_degenerate_strings() {
     assert_eq!(empty_seq.voices.len(), 0);
     let clip_empty = sequence_to_clip_pattern(&empty_seq);
     match clip_empty {
-        ableton_timeline::ClipPattern::Midi(m) => {
+        oxide_timeline::ClipPattern::Midi(m) => {
             assert!(m.length_beats >= 4.0);
             assert!(m.notes.is_empty());
         }
@@ -375,10 +375,10 @@ fn test_stress_lilypond_degenerate_strings() {
     // Invalid tokens should parse as Rest, bd/sn/hh as Drum triggers
     let clip_pat = sequence_to_clip_pattern(&seq_unknown);
     match clip_pat {
-        ableton_timeline::ClipPattern::Drum(d) => {
+        oxide_timeline::ClipPattern::Drum(d) => {
             assert_eq!(d.step_count, 16);
         }
-        ableton_timeline::ClipPattern::Midi(_) => {}
+        oxide_timeline::ClipPattern::Midi(_) => {}
         _ => {}
     }
 

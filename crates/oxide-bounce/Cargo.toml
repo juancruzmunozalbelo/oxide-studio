@@ -1,0 +1,73 @@
+[package]
+name = "oxide-bounce"
+version = "1.0.0"
+edition = "2021"
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
+
+[dependencies]
+oxide-core = { path = "../oxide-core" }
+oxide-dsp = { path = "../oxide-dsp" }
+oxide-drums = { path = "../oxide-drums" }
+oxide-fx = { path = "../oxide-fx" }
+oxide-project = { path = "../oxide-project" }
+oxide-timeline = { path = "../oxide-timeline" }
+serde = { version = "1.0", features = ["derive"], optional = true }
+
+[features]
+default = []
+serde = ["dep:serde"]
+
+[[test]]
+name = "e2e_dsp_filter_test"
+path = "../../tests/e2e_dsp_filter_test.rs"
+
+[[test]]
+name = "e2e_monophonic_presets_test"
+path = "../../tests/e2e_monophonic_presets_test.rs"
+
+[[test]]
+name = "e2e_drum_rack_test"
+path = "../../tests/e2e_drum_rack_test.rs"
+
+[[test]]
+name = "e2e_bounce_render_test"
+path = "../../tests/e2e_bounce_render_test.rs"
+
+[[test]]
+name = "e2e_m8_instruments_test"
+path = "../../tests/e2e_m8_instruments_test.rs"
+
+[[test]]
+name = "adversarial_m8_stress_test"
+path = "../../tests/adversarial_m8_stress_test.rs"
+
+[[test]]
+name = "e2e_m8_adversarial_filters_synths_test"
+path = "../../tests/e2e_m8_adversarial_filters_synths_test.rs"
+
+[dev-dependencies]
+oxide-timeline = { path = "../oxide-timeline" }
+oxide-plugin-scanner = { path = "../oxide-plugin-scanner" }
+oxide-audio = { path = "../oxide-audio" }
+
+[[test]]
+name = "e2e_m9_chains_fx_test"
+path = "../../tests/e2e_m9_chains_fx_test.rs"
+
+[[test]]
+name = "adversarial_m9_stress_test"
+path = "../../tests/adversarial_m9_stress_test.rs"
+
+[[test]]
+name = "e2e_m10_warping_mixer_test"
+path = "../../tests/e2e_m10_warping_mixer_test.rs"
+
+[[test]]
+name = "e2e_stems_test"
+path = "tests/e2e_stems_test.rs"
+
+
+

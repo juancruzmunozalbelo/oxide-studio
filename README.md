@@ -5,9 +5,9 @@
 [![Release](https://img.shields.io/github/v/release/juancruzmunozalbelo/oxide-studio?color=ffbe00&label=release)](https://github.com/juancruzmunozalbelo/oxide-studio/releases/tag/v1.0.0)
 [![License](https://img.shields.io/badge/license-MIT%20%7C%20Apache--2.0-blue.svg)](LICENSE-MIT)
 [![Tests](https://img.shields.io/badge/tests-674%20passing-00f758.svg)](https://github.com/juancruzmunozalbelo/oxide-studio/actions)
-[![Layout Guard](https://img.shields.io/badge/layout%20guard-576%20frames%20clean-954eb2.svg)](crates/ableton-gui/tests/adversarial_acoustic_layout_stress_test.rs)
+[![Layout Guard](https://img.shields.io/badge/layout%20guard-576%20frames%20clean-954eb2.svg)](crates/oxide-gui/tests/adversarial_acoustic_layout_stress_test.rs)
 
-> **Native Rust Electronic Music DAW, 100% Commercial Ableton Live 12.4.6 Suite Workstation & 76-Tool Dual-Target Model Context Protocol (MCP) Server.**  
+> **Native Rust Electronic Music DAW, Oxide Studio Workstation Architecture & DSP Specification with Open .als Interop & 76-Tool Dual-Target Model Context Protocol (MCP) Server.**  
 > *Repository:* [https://github.com/juancruzmunozalbelo/oxide-studio](https://github.com/juancruzmunozalbelo/oxide-studio)  
 > *Interactive Web Workstation:* [https://juancruzmunozalbelo.github.io/oxide-studio/web/](https://juancruzmunozalbelo.github.io/oxide-studio/web/)  
 > *Showcase & Download Hub:* [https://juancruzmunozalbelo.github.io/oxide-studio/](https://juancruzmunozalbelo.github.io/oxide-studio/)  
@@ -26,9 +26,9 @@
 
 ---
 
-## 1. Vision & Reverse-Engineering Provenance
+## 1. Vision & Workstation Architecture
 
-**Oxide Studio** is a production-grade, real-time digital audio workstation (DAW) written in modern, memory-safe Rust. It is architected from a clean-room **Reverse-Engineer-Anything (REA)** structural and algorithmic audit of two foundational audio systems:
+**Oxide Studio** is a production-grade, real-time digital audio workstation (DAW) written in modern, memory-safe Rust. It is architected from a clean-room **Clean-Room Engineering** structural and algorithmic audit of two foundational audio systems:
 
 1. **Ableton Learning Synths Playground** (`rnbomatic.wasm`, Cycling '74 Max RNBO `0.14.0` runtime, WebAssembly `code[817]`, Loop #84): Complete extraction and mathematical reconstruction of the 8-voice polyphonic synthesizer engine, 23 normalized RNBO parameter curves, 38 factory sound presets, 17 XY macro breakpoint modulations, and Mystran's 2x-oversampled zero-delay feedback (ZDF) 4-pole transistor ladder filter featuring a rational $[4/4]$ Padé approximation for $\tanh(x)/x$.
 2. **Ableton Live 12.4.6 Suite** (`OEngine`, `ableton::dsp`, `ableton::devices`, and the Live Object Model): Systematic reconstruction of Live 12's single-window modular workstation UX, dynamic per-track device chains, 10 flagship instruments, 6-mode audio warping engine (`OWarper`), global groove pool with `.agr` timing extraction, multi-lane comping with automatic micro-crossfades, generative and transformative MIDI algorithms, microtonal tuning systems, and a bidirectional dual-target Model Context Protocol (MCP) server.
@@ -66,25 +66,25 @@ flowchart TD
     end
 
     subgraph MCP["MCP Control Layer"]
-        StdioMCP["crates/ableton-mcp<br/>(76 Tools, JSON-RPC 2.0 stdio)"]
+        StdioMCP["crates/oxide-mcp<br/>(76 Tools, JSON-RPC 2.0 stdio)"]
     end
 
     subgraph NativeEngine["Native Rust DAW Engine"]
-        Core["crates/ableton-core<br/>(Buffers, SPSC Command Ring, Telemetry, Scales, Tunings)"]
-        DSP["crates/ableton-dsp<br/>(Playground, Wavetable, Operator, Drift, Meld, Physical Suite)"]
-        Drums["crates/ableton-drums<br/>(Simpler Sampler, DrumRack128, 808/909 Physical Synth)"]
-        FX["crates/ableton-fx<br/>(DeviceChain, EQ Eight, Roar ADAA, Glue, Auto Filter ZDF, OTT)"]
-        Timeline["crates/ableton-timeline<br/>(Session Matrix, Timeline, 6-Mode OWarper, Comping, Grooves)"]
-        Audio["crates/ableton-audio<br/>(Real-Time cpal CoreAudio Engine, Zero-Alloc Callbacks)"]
-        Bounce["crates/ableton-bounce<br/>(Offline 24-bit WAV Bounce, FFT Spectral Analyzer, Remix Stems)"]
-        Scanner["crates/ableton-plugin-scanner<br/>(Out-of-Process macOS AUv2 / VST3 / CLAP Supervisor)"]
-        Project["crates/ableton-project<br/>(.oxide.json / .als Ableton Live Set I/O)"]
-        GUI["crates/ableton-gui<br/>(5-Zone 60 FPS eframe/egui Studio UI on Metal & AI Copilot)"]
+        Core["crates/oxide-core<br/>(Buffers, SPSC Command Ring, Telemetry, Scales, Tunings)"]
+        DSP["crates/oxide-dsp<br/>(Playground, Wavetable, Operator, Drift, Meld, Physical Suite)"]
+        Drums["crates/oxide-drums<br/>(Simpler Sampler, DrumRack128, 808/909 Physical Synth)"]
+        FX["crates/oxide-fx<br/>(DeviceChain, EQ Eight, Roar ADAA, Glue, Auto Filter ZDF, OTT)"]
+        Timeline["crates/oxide-timeline<br/>(Session Matrix, Timeline, 6-Mode OWarper, Comping, Grooves)"]
+        Audio["crates/oxide-audio<br/>(Real-Time cpal CoreAudio Engine, Zero-Alloc Callbacks)"]
+        Bounce["crates/oxide-bounce<br/>(Offline 24-bit WAV Bounce, FFT Spectral Analyzer, Remix Stems)"]
+        Scanner["crates/oxide-plugin-scanner<br/>(Out-of-Process macOS AUv2 / VST3 / CLAP Supervisor)"]
+        Project["crates/oxide-project<br/>(.oxide.json / .als Ableton Live Set I/O)"]
+        GUI["crates/oxide-gui<br/>(5-Zone 60 FPS eframe/egui Studio UI on Metal & AI Copilot)"]
     end
 
     subgraph LiveRpcBridge["Native Live GUI RPC Bridge"]
         LOMSocket["TCP JSON-RPC 2.0 Server<br/>127.0.0.1:9877"]
-        LiveGui["crates/ableton-gui/src/live_rpc.rs<br/>(Native Live GUI RPC Server)"]
+        LiveGui["crates/oxide-gui/src/live_rpc.rs<br/>(Native Live GUI RPC Server)"]
     end
 
     Agent <-->|stdio JSON-RPC| StdioMCP
@@ -111,21 +111,21 @@ flowchart TD
 
 ### Workspace Crates Summary
 
-- `crates/ableton-core`: Lock-free single-producer single-consumer (SPSC) command rings, real-time `AudioTelemetry` snapshots (RMS, peak dBFS, 64-bin FFT, 256-sample oscilloscope), `AudioBuffer` fixed-size stereo audio structures, 14 `ScaleMode` definitions, and 4 microtonal `TuningSystem` models.
-- `crates/ableton-dsp`: Polyphonic synthesis engines (Learning Synths Playground, Wavetable, Operator FM, Drift, Meld bi-timbral, Analog, Collision, Tension, Electric), Mystran 2x-oversampled ZDF ladder filter with Padé saturator, and Cytomic state-variable filters.
-- `crates/ableton-drums`: Physical modeling percussion (808 kick/snare, 909 open/closed hi-hats, FM cowbell/rimshot, Karplus-Strong claps), 3-mode `SimplerSampler`, and 128-pad `DrumRack128` with choke groups and return sends.
-- `crates/ableton-fx`: Dynamic serial/parallel `DeviceChain` pipeline, `EQ Eight` with real-time Bode response, `Roar` multi-stage saturator with 1st-order ADAA antialiasing, `Glue Compressor`, Cytomic `Auto Filter` with 5 circuit drive models, `OTT` multiband dynamics, `Hybrid Reverb`, `Spectral Resonator`, and standard Live 12 MIDI effects.
-- `crates/ableton-timeline`: Dual-paradigm Session Matrix and Arrangement Timeline, 6-mode `OWarper` audio warping engine, multi-lane comping with equal-power micro-crossfades, `.agr` Groove Pool, and Live 12 algorithmic MIDI Generators and Transformers.
-- `crates/ableton-audio`: Zero-allocation CoreAudio integration via `cpal`, running bounded real-time audio threads with priority scheduling and sub-millisecond telemetry feedback.
-- `crates/ableton-bounce`: Deterministic headless offline 24-bit WAV bounce renderer and 8D spectral audio analysis engine.
-- `crates/ableton-plugin-scanner`: Out-of-process isolation worker and supervisor scanning AUv2, VST3, and CLAP plugins without crashing the workstation host.
-- `crates/ableton-project`: JSON `.oxide.json` and Ableton Live Gzip XML `.als` project parser, stem exporter, and cosine similarity browser index.
-- `crates/ableton-gui`: Single-window 60 FPS workstation interface rendered natively on macOS Metal using `egui` and `eframe`, themed in Live 12 Dark Carbon (`#07080a` / `#111318` / `#ffbe00` / `#00d2ff`).
-- `crates/ableton-mcp`: Dual-target Model Context Protocol server exposing 76 JSON-RPC 2.0 tools over `stdio`.
+- `crates/oxide-core`: Lock-free single-producer single-consumer (SPSC) command rings, real-time `AudioTelemetry` snapshots (RMS, peak dBFS, 64-bin FFT, 256-sample oscilloscope), `AudioBuffer` fixed-size stereo audio structures, 14 `ScaleMode` definitions, and 4 microtonal `TuningSystem` models.
+- `crates/oxide-dsp`: Polyphonic synthesis engines (Learning Synths Playground, Wavetable, Operator FM, Drift, Meld bi-timbral, Analog, Collision, Tension, Electric), Mystran 2x-oversampled ZDF ladder filter with Padé saturator, and Cytomic state-variable filters.
+- `crates/oxide-drums`: Physical modeling percussion (808 kick/snare, 909 open/closed hi-hats, FM cowbell/rimshot, Karplus-Strong claps), 3-mode `SimplerSampler`, and 128-pad `DrumRack128` with choke groups and return sends.
+- `crates/oxide-fx`: Dynamic serial/parallel `DeviceChain` pipeline, `EQ Eight` with real-time Bode response, `Roar` multi-stage saturator with 1st-order ADAA antialiasing, `Glue Compressor`, Cytomic `Auto Filter` with 5 circuit drive models, `OTT` multiband dynamics, `Hybrid Reverb`, `Spectral Resonator`, and standard Live 12 MIDI effects.
+- `crates/oxide-timeline`: Dual-paradigm Session Matrix and Arrangement Timeline, 6-mode `OWarper` audio warping engine, multi-lane comping with equal-power micro-crossfades, `.agr` Groove Pool, and Live 12 algorithmic MIDI Generators and Transformers.
+- `crates/oxide-audio`: Zero-allocation CoreAudio integration via `cpal`, running bounded real-time audio threads with priority scheduling and sub-millisecond telemetry feedback.
+- `crates/oxide-bounce`: Deterministic headless offline 24-bit WAV bounce renderer and 8D spectral audio analysis engine.
+- `crates/oxide-plugin-scanner`: Out-of-process isolation worker and supervisor scanning AUv2, VST3, and CLAP plugins without crashing the workstation host.
+- `crates/oxide-project`: JSON `.oxide.json` and Ableton Live Gzip XML `.als` project parser, stem exporter, and cosine similarity browser index.
+- `crates/oxide-gui`: Single-window 60 FPS workstation interface rendered natively on macOS Metal using `egui` and `eframe`, themed in Live 12 Dark Carbon (`#07080a` / `#111318` / `#ffbe00` / `#00d2ff`).
+- `crates/oxide-mcp`: Dual-target Model Context Protocol server exposing 76 JSON-RPC 2.0 tools over `stdio`.
 
 ---
 
-## 3. Flagship Instruments (`ableton-dsp` & `ableton-drums`)
+## 3. Flagship Instruments (`oxide-dsp` & `oxide-drums`)
 
 Oxide Studio implements 10 full-featured instrument devices directly inside the native Rust DSP layer:
 
@@ -184,7 +184,7 @@ $$\omega = \frac{\pi \cdot f_c}{2 \cdot f_s}, \quad f(\omega) = \frac{\omega \cd
 
 ---
 
-## 4. Device Chain & Audio/MIDI FX (`ableton-fx`)
+## 4. Device Chain & Audio/MIDI FX (`oxide-fx`)
 
 Every track in Oxide Studio utilizes a dynamic, arbitrary-length `DeviceChain` processing signals in strict logical order:
 
@@ -211,11 +211,11 @@ $$y(n) \approx \frac{F_1(x(n)) - F_1(x(n-1))}{x(n) - x(n-1)}, \quad \text{where 
 - `Note Length`: Fixed and tempo-synced gate duration enforcement.
 
 ### Plugin Hosting (`HostedPluginDevice`)
-- Out-of-process isolation architecture hosting macOS `AUv2`, `VST3`, and `CLAP` instruments and audio effects via `ableton-plugin-scanner`. Plugin crashes never compromise the main DAW process.
+- Out-of-process isolation architecture hosting macOS `AUv2`, `VST3`, and `CLAP` instruments and audio effects via `oxide-plugin-scanner`. Plugin crashes never compromise the main DAW process.
 
 ---
 
-## 5. Timeline, Warping, Comping & Generative MIDI (`ableton-timeline`)
+## 5. Timeline, Warping, Comping & Generative MIDI (`oxide-timeline`)
 
 ### 6-Mode Audio Warping Engine (`OWarper`)
 Oxide Studio implements all 6 Ableton Live warping algorithms:
@@ -256,7 +256,7 @@ $$\text{Gain}_{\text{in}}(n) = \sin\left(\frac{\pi n}{2L}\right), \quad \text{Ga
 
 ---
 
-## 6. Unified 5-Zone 60 FPS Workstation GUI (`ableton-gui`)
+## 6. Unified 5-Zone 60 FPS Workstation GUI (`oxide-gui`)
 
 Oxide Studio provides a native single-window workstation interface rendered directly on macOS Metal at 60 FPS without layout jitter:
 
@@ -289,7 +289,7 @@ Oxide Studio provides a native single-window workstation interface rendered dire
 
 ---
 
-## 7. 76-Tool Dual-Target MCP Server (`ableton-mcp`)
+## 7. 76-Tool Dual-Target MCP Server (`oxide-mcp`)
 
 The Model Context Protocol (MCP) server enables autonomous AI agents to inspect, control, compose, synthesize, and analyze music programmatically. It operates over standard `stdio` JSON-RPC 2.0.
 
@@ -414,11 +414,11 @@ Oxide Studio directly integrates the **top 5 community-requested electronic prod
 
 ### 1. One-Click Bounce-in-Place (`Freeze & Flatten in 1 Click` / `Cmd+B`)
 - **Producer Problem in Stock Live**: Ableton's "Freeze & Flatten" is destructive—it permanently overwrites MIDI note sequences, synth patch states, and automation envelopes unless manually cloned beforehand. Furthermore, Live cannot freeze Group tracks or tracks with sidechain routings.
-- **Oxide Studio Solution**: Pressing `Cmd+B` renders selected clips or time selections offline via `ableton-bounce` in-process. The original MIDI/synth chain is automatically preserved in an underlying, zero-CPU "Source Take Lane" with an interactive header button: `[Audio Bounced] -> (Click to Revert to MIDI)`. Non-destructive, instant, and supports Group stem bouncing.
+- **Oxide Studio Solution**: Pressing `Cmd+B` renders selected clips or time selections offline via `oxide-bounce` in-process. The original MIDI/synth chain is automatically preserved in an underlying, zero-CPU "Source Take Lane" with an interactive header button: `[Audio Bounced] -> (Click to Revert to MIDI)`. Non-destructive, instant, and supports Group stem bouncing.
 
 ### 2. Native Ducking / Sidechain Envelope Shaper (`Pump / LFO Shaper` / `DuckShaper`)
 - **Producer Problem in Stock Live**: Traditional compressor sidechain routing suffers from detector lag, non-linear release tails, and clicky transient distortion under fast attack times (<1 ms). Electronic producers universally buy Cableguys ShaperBox ($99) or Kickstart 2 ($19).
-- **Oxide Studio Solution**: Native `DuckShaper` in `ableton-fx` evaluates a sample-accurate 2048-point bezier ducking curve per sample on the audio thread with zero latency. Triggered by tempo sync ($1/4, 1/8, 1/16$, dotted/triplet), ghost MIDI note re-triggers, or audio transient peak detection. Features a 4th-order Linkwitz-Riley $120\text{ Hz}$ crossover to duck low-end rumble while preserving transient attack grit.
+- **Oxide Studio Solution**: Native `DuckShaper` in `oxide-fx` evaluates a sample-accurate 2048-point bezier ducking curve per sample on the audio thread with zero latency. Triggered by tempo sync ($1/4, 1/8, 1/16$, dotted/triplet), ghost MIDI note re-triggers, or audio transient peak detection. Features a 4th-order Linkwitz-Riley $120\text{ Hz}$ crossover to duck low-end rumble while preserving transient attack grit.
 
 ### 3. Hard/Soft Clipper with Oversampling (`Club Clipper` / `MasterClipper`)
 - **Producer Problem in Stock Live**: Achieving modern club loudness ($-6$ to $-4\text{ LUFS}$) in Techno, Bass House, and DnB requires shaving transient crest factor before the master limiter. Stock Saturator lacks adjustable polynomial knees and ceiling gain staging; non-oversampled clipping generates harsh high-frequency aliasing foldback across hi-hats.
@@ -450,7 +450,7 @@ Oxide Studio v1.0.0 is available as pre-compiled standalone native release archi
 ### Install via Cargo
 
 ```bash
-cargo install --git https://github.com/juancruzmunozalbelo/oxide-studio.git ableton-gui --bin ableton-rust
+cargo install --git https://github.com/juancruzmunozalbelo/oxide-studio.git oxide-gui --bin oxide-studio
 ```
 
 All release artifacts include the executable workstation binary, the 36-chapter Operational Knowledge Framework manual (`OXIDE_STUDIO_MANUAL_OKF.md`), licenses, and documentation.
@@ -476,7 +476,7 @@ cargo build --release
 ### 2. Launch Native Workstation GUI
 Launch the 60 FPS single-window studio interface:
 ```bash
-./target/release/ableton-rust
+./target/release/oxide-studio
 ```
 *Keyboard Shortcuts*:
 - `Tab`: Toggle between **Session Matrix View** and **Arrangement Timeline View**.
@@ -487,13 +487,13 @@ Launch the 60 FPS single-window studio interface:
 ### 3. Run Headless Demo Bounce & Verification
 Render a 4.5-second multi-track demo arrangement and verify signal integrity:
 ```bash
-./target/release/ableton-rust --render-demo /tmp/oxide_studio_demo.wav
+./target/release/oxide-studio --render-demo /tmp/oxide_studio_demo.wav
 ```
 
 ### 4. Run Out-of-Process Plugin Scanner
 Scan installed AUv2 and VST3 plugins:
 ```bash
-./target/release/ableton-rust --scan-plugins --output plugins.json
+./target/release/oxide-studio --scan-plugins --output plugins.json
 ```
 
 ---
@@ -503,7 +503,7 @@ Scan installed AUv2 and VST3 plugins:
 ### Running Standalone MCP Server
 To run the MCP server over standard input/output (`stdio`):
 ```bash
-./target/release/ableton-rust --mcp
+./target/release/oxide-studio --mcp
 ```
 
 ### Configuration for Claude Desktop / Antigravity / Cursor
@@ -513,7 +513,7 @@ Add the following to your `claude_desktop_config.json` or `mcp_config.json`:
 {
   "mcpServers": {
     "oxide-studio": {
-      "command": "/absolute/path/to/oxide-studio/target/release/ableton-rust",
+      "command": "/absolute/path/to/oxide-studio/target/release/oxide-studio",
       "args": ["--mcp"],
       "env": {}
     }
@@ -528,7 +528,7 @@ Add the following to your `claude_desktop_config.json` or `mcp_config.json`:
 Oxide Studio eliminates external Python remote script dependencies with an all-Rust, native architecture bridging GUI, DSP, autonomous agents, and DAW interoperability.
 
 ### 1. 100% Native Rust Live GUI <-> MCP TCP Bridge (`127.0.0.1:9877`)
-- **Module**: [`crates/ableton-gui/src/live_rpc.rs`](crates/ableton-gui/src/live_rpc.rs)
+- **Module**: [`crates/oxide-gui/src/live_rpc.rs`](crates/oxide-gui/src/live_rpc.rs)
 - **Architecture**: Embedded non-blocking TCP socket server (`live_rpc.rs`) listening on `127.0.0.1:9877`.
 - **Live Bidirectional Synchronization**: External MCP tool invocations (`live12_*`) communicate directly with the running Oxide Studio GUI window:
   - Dispatches line-delimited JSON-RPC 2.0 requests with zero external runtime dependencies.
@@ -536,7 +536,7 @@ Oxide Studio eliminates external Python remote script dependencies with an all-R
   - Propagates corresponding lock-free `AudioCommand` messages into the real-time audio thread ring buffer without allocation or jitter.
 
 ### 2. In-App `🤖 AI Producer Copilot`
-- **Module**: [`crates/ableton-gui/src/panels/ai_chat.rs`](crates/ableton-gui/src/panels/ai_chat.rs)
+- **Module**: [`crates/oxide-gui/src/panels/ai_chat.rs`](crates/oxide-gui/src/panels/ai_chat.rs)
 - **Features**:
   - **Context-Aware Studio State**: Inspects selected track names, kick/synth parameter state (frequency, drive, cutoff), and real-time 4-band spectral FFT telemetry ("Agent Ears").
   - **Producer Slang Intent Router**: Understands English and Argentine Spanish (Rioplatense) music production terminology (`"hace este kick mas gordo"`, `"dale mas acido al bajo"`, `"arma un drop de peak techno"`, `"mete un patron de rkt / turreo"`, `"limpia el barro con ott"`).
@@ -544,24 +544,24 @@ Oxide Studio eliminates external Python remote script dependencies with an all-R
   - **Clickable MCP Badges**: Visual indicators (`⚡ drums_configure_pad`, `⚡ fx_set_saturator`) with 1-click clipboard copying.
 
 ### 3. Bidirectional Ableton `.als` Live Set Interoperability
-- **Module**: [`crates/ableton-project/src/als.rs`](crates/ableton-project/src/als.rs)
+- **Module**: [`crates/oxide-project/src/als.rs`](crates/oxide-project/src/als.rs)
 - **CLI Commands**:
   ```bash
   # Import native Ableton Live 12 XML Gzip project (.als) into Oxide Studio
-  ./target/release/ableton-rust --import-als session.als
+  ./target/release/oxide-studio --import-als session.als
 
   # Export current Oxide Studio session directly to Ableton Live 12 Set (.als)
-  ./target/release/ableton-rust --export-als exported_session.als
+  ./target/release/oxide-studio --export-als exported_session.als
   ```
 - **MCP Tools**: `project_import_als`, `project_export_als`.
 - **Fidelity**: Directly parses and serializes Gzip magic bytes (`\x1f\x8b`), reconstructing Ableton Live 12 tracks, mixer channel faders, send routings, tempo markers, and MIDI clips.
 
 ### 4. 1-Click 4-Stem Remix Extractor
-- **Module**: [`crates/ableton-bounce/src/stems.rs`](crates/ableton-bounce/src/stems.rs)
+- **Module**: [`crates/oxide-bounce/src/stems.rs`](crates/oxide-bounce/src/stems.rs)
 - **CLI Command**:
   ```bash
   # Extract isolated 4-stem remix package from rendered audio
-  ./target/release/ableton-rust --split-stems master.wav --output-dir ./stems/
+  ./target/release/oxide-studio --split-stems master.wav --output-dir ./stems/
   ```
 - **MCP Tools**: `stems_separate_remix`, `bounce_export_stems`.
 - **DSP Separation**:
@@ -600,8 +600,8 @@ Oxide Studio is free and open-source software, dual-licensed under either:
 at your option.
 
 ### Community & Legal Documents
-- [CHANGELOG.md](CHANGELOG.md) — Comprehensive v1.0.0 release notes & Ableton Live 12.4.6 Suite parity changelog.
-- [docs/ROADMAP_100_PARITY.md](docs/ROADMAP_100_PARITY.md) — 100% Commercial Ableton Live 12.4.6 Suite Parity Roadmap & verification evidence.
+- [CHANGELOG.md](CHANGELOG.md) — Comprehensive v1.0.0 release notes & Oxide Studio Workstation Architecture & DSP Specification changelog.
+- [docs/ROADMAP_100_PARITY.md](docs/ROADMAP_100_PARITY.md) — Oxide Studio Workstation Architecture & DSP Specification Roadmap & verification evidence.
 - [NOTICE.md](NOTICE.md) — Clean-room architectural provenance, mathematical citations & trademark non-affiliation disclaimer.
 - [CONTRIBUTING.md](CONTRIBUTING.md) — Contribution workflow, 3-Gate Definition of Done, and real-time audio thread safety invariants.
 - [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md) — Contributor Covenant v2.1.

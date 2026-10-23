@@ -12,8 +12,8 @@
 //!    plate resonator stability under impulsive excitation.
 
 use std::f32::consts::PI;
-use ableton_core::{AudioBuffer, InstrumentDevice, MidiEvent, MusicalTime};
-use ableton_dsp::{
+use oxide_core::{AudioBuffer, InstrumentDevice, MidiEvent, MusicalTime};
+use oxide_dsp::{
     CircuitModel, CytomicFilterType, CytomicZdfFilter, DualCytomicFilter, FilterRouting,
     DriftDevice, FmAlgorithm, MeldDevice, MeldMacroEngine, MeldScale, PlateResonator,
     OperatorDevice, OperatorFreqMode, OperatorWaveform,

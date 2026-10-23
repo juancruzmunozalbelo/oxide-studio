@@ -1,4 +1,4 @@
-//! End-to-End Test Suite for Model Context Protocol (MCP) Server (`crates/ableton-mcp`).
+//! End-to-End Test Suite for Model Context Protocol (MCP) Server (`crates/oxide-mcp`).
 //!
 //! Verifies:
 //! - JSON-RPC 2.0 stdio initialization handshake (protocolVersion "2024-11-05")
@@ -17,7 +17,7 @@ use std::fs;
 use std::path::Path;
 use serde_json::{json, Value};
 
-use ableton_mcp::McpServer;
+use oxide_mcp::McpServer;
 
 fn send_request(server: &mut McpServer, req: Value) -> Value {
     let line = req.to_string();
@@ -46,7 +46,7 @@ fn test_mcp_initialize_and_ping() {
 
     let result = &resp["result"];
     assert_eq!(result["protocolVersion"], "2024-11-05");
-    assert_eq!(result["serverInfo"]["name"], "ableton-rust-mcp");
+    assert_eq!(result["serverInfo"]["name"], "oxide-mcp");
     assert_eq!(result["serverInfo"]["version"], "1.0.0");
     assert!(result["capabilities"]["tools"].is_object());
     assert!(result["capabilities"]["resources"].is_object());
@@ -215,7 +215,7 @@ fn test_mcp_project_lifecycle_and_transport() {
     assert!(tel_text.contains("cpu_load"));
 
     // 6. project_save to disk
-    let test_proj_path = format!("/tmp/ableton_mcp_e2e_test_proj_{}.json", std::process::id());
+    let test_proj_path = format!("/tmp/oxide_mcp_e2e_test_proj_{}.json", std::process::id());
     let save_req = json!({
         "jsonrpc": "2.0",
         "id": 16,
@@ -469,7 +469,7 @@ fn test_mcp_mixer_fx_and_bounce_wav() {
     assert_eq!(server.state.delay.subdivision.beats(), 0.375);
 
     // 3. bounce_wav / render_bounce_wav
-    let out_wav = format!("/tmp/ableton_mcp_e2e_bounce_{}.wav", std::process::id());
+    let out_wav = format!("/tmp/oxide_mcp_e2e_bounce_{}.wav", std::process::id());
     let bounce_req = json!({
         "jsonrpc": "2.0",
         "id": 43,
@@ -645,7 +645,7 @@ fn test_mcp_agentic_generators_and_preview() {
     assert_eq!(server.state.timeline.tracks[0].clips.len(), 4);
 
     // 7. preview_synth_patch
-    let preview_wav = format!("/tmp/ableton_mcp_preview_test_{}.wav", std::process::id());
+    let preview_wav = format!("/tmp/oxide_mcp_preview_test_{}.wav", std::process::id());
     let prev_req = json!({
         "jsonrpc": "2.0",
         "id": 56,

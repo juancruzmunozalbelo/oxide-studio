@@ -399,7 +399,7 @@
   }
 
   // =========================================================================
-  // 3. 16-VOICE TR-909 SYNTHESIZER ENGINE (ableton-drums parity)
+  // 3. 16-VOICE TR-909 SYNTHESIZER ENGINE (oxide-drums)
   // =========================================================================
 
   function triggerDrumVoice(voiceId, time, velocity, isAccent) {
@@ -1496,8 +1496,8 @@
       es: 'OKF-07: TR-909 y Groove Pool Swing. 16 voces de batería sintetizadas (Banco A y B) con swing en pasos impares (50% a 75%) y acento por paso.'
     },
     'OKF-08': {
-      en: 'OKF-08: In-Browser Export & Interop. Render 16-bit 44.1kHz stereo PCM WAV via OfflineAudioContext and export genuine Ableton Live 12 Set (.als) XML with gzip compression.',
-      es: 'OKF-08: Exportación e Interoperabilidad. Renderiza WAV estéreo PCM de 16 bits a 44.1kHz vía OfflineAudioContext y exporta proyectos .als de Ableton Live 12 comprimidos con gzip.'
+      en: 'OKF-08: In-Browser Export & Interop. Render 16-bit 44.1kHz stereo PCM WAV via OfflineAudioContext and export genuine open Ableton Live Set (.als) XML with gzip compression.',
+      es: 'OKF-08: Exportación e Interoperabilidad. Renderiza WAV estéreo PCM de 16 bits a 44.1kHz vía OfflineAudioContext y exporta proyectos .als de formato abierto comprimidos con gzip.'
     },
     'OKF-09': {
       en: 'OKF-09: Polyphonic Suite Synthesizer. Four synthesis engines: Drift (analog drift + wavefolder), Meld (bi-timbral FM swarm), Operator (4-op FM), and Wavetable.',
@@ -1514,7 +1514,7 @@
     if (!raw) return;
 
     let responseText = '';
-    let toolBadge = '⚡ live12_song_get_state()';
+    let toolBadge = '⚡ transport_get_telemetry()';
 
     // 1. Kick Fatter / Kick Mas Gordo
     if (raw.includes('kick') && (raw.includes('fat') || raw.includes('gordo') || raw.includes('peso') || raw.includes('bass'))) {
@@ -1548,7 +1548,7 @@
       responseText = STATE.language === 'en'
         ? "Peak Techno drop locked at 136 BPM. Bank A & B full drop patterns loaded and Scene 3 launched with active limiter margin."
         : "Drop de Peak Techno armado a 136 BPM. Patrón completo cargado y Escena 3 disparada con techo en -0.3 dBFS.";
-      toolBadge = '⚡ live12_fire_scene(scene_index: 2, tempo: 136.0)';
+      toolBadge = '⚡ scene_launch(scene_index: 2, tempo: 136.0)';
     }
     // 4. RKT / Turreo / Cachengue
     else if (raw.includes('rkt') || raw.includes('turreo') || raw.includes('cachengue')) {
@@ -1558,7 +1558,7 @@
       responseText = STATE.language === 'en'
         ? "RKT / Turreo rhythm engaged at 105 BPM. Tresillo syncopation loaded on Shaker, Woodblock and 909 Kick with 58% swing."
         : "Ritmo de RKT / Turreo activado a 105 BPM. Síncopa de tresillo cargada en Shaker, Woodblock y Bombo 909 con swing al 58%.";
-      toolBadge = '⚡ live12_create_clip(groove: "rkt_tresillo_105")';
+      toolBadge = '⚡ clip_create_drums(groove: "rkt_tresillo_105")';
     }
     // 5. Explain OKF Chapter
     else if (raw.includes('okf') || raw.includes('explain') || raw.includes('explicar')) {
@@ -1572,7 +1572,7 @@
       }
       const data = COPILOT_KNOWLEDGE[chKey] || COPILOT_KNOWLEDGE['OKF-01'];
       responseText = data[STATE.language] || data.en;
-      toolBadge = `✓ okf_manual_inspect(chapter: "${chKey}")`;
+      toolBadge = `✓ okf_spec_inspect(chapter: "${chKey}")`;
     }
     // 6. Bounce WAV
     else if (raw.includes('wav') || raw.includes('bounce')) {
@@ -1586,8 +1586,8 @@
     else if (raw.includes('als') || raw.includes('ableton') || raw.includes('export')) {
       exportAls();
       responseText = STATE.language === 'en'
-        ? "Ableton Live 12 Set (.als) XML generated and compressed with gzip stream."
-        : "Set de Ableton Live 12 (.als) generado y comprimido con stream gzip.";
+        ? "Open Ableton Live Set (.als) XML generated and compressed with gzip stream."
+        : "Set de Ableton Live (.als) generado y comprimido con stream gzip.";
       toolBadge = '⚡ project_export_als(version: "12.0_12049")';
     }
     // Default fallback
@@ -1595,7 +1595,7 @@
       responseText = STATE.language === 'en'
         ? `Command received: "${input}". Adjusted project parameters to match scale ${STATE.scaleType} at ${STATE.tempo} BPM.`
         : `Comando recibido: "${input}". Parámetros actualizados para escala ${STATE.scaleType} a ${STATE.tempo} BPM.`;
-      toolBadge = '⚡ live12_exec_lom_query() • Executed';
+      toolBadge = '⚡ transport_get_telemetry() • Executed';
     }
 
     appendChatMessage('user', input);
@@ -1763,7 +1763,7 @@
     return new Blob([view], { type: 'audio/wav' });
   }
 
-  // Ableton Live 12 Set (.als) XML & Gzip Exporter
+  // Open Ableton Live Set (.als) XML & Gzip Exporter
   async function exportAls() {
     const xml = buildAlsXml();
 

@@ -7,7 +7,7 @@
 
 use std::path::Path;
 
-use ableton_drums::{load_wav_file, DrumRack, MAX_DRUM_VOICES};
+use oxide_drums::{load_wav_file, DrumRack, MAX_DRUM_VOICES};
 
 #[test]
 fn test_drum_rack_16_pad_initialization() {

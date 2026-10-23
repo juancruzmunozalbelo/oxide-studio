@@ -23,14 +23,14 @@
 //!      bypass, and all 9 interactive visualizers:
 //!      Wavetable, Operator, Roar, EQ Eight, Glue Compressor, Auto Filter, OTT, Simpler, Drum Rack.
 //! 5. Full Studio App Integration:
-//!    - Headless `AbletonStudioApp::new_mock` instantiation.
+//!    - Headless `OxideStudioApp::new_mock` instantiation.
 //!    - Audio command dispatch, telemetry polling, and one-click arrangement WAV export.
 
-use ableton_core::{
+use oxide_core::{
     AudioCommand, GlobalScale, ScaleMode, TuningSystem, TuningType, ROOT_NAMES,
 };
-use ableton_gui::{
-    app::{AbletonStudioApp, DeckTab, WorkspaceView},
+use oxide_gui::{
+    app::{OxideStudioApp, DeckTab, WorkspaceView},
     keyboard::{KeyboardMode},
     panels::{
         browser::{BrowserCategory, BrowserState, ALL_TAGS},
@@ -46,7 +46,7 @@ use ableton_gui::{
         SimplerPlayMode, SimplerVisualizerState, WavetableVisualizerState,
     },
 };
-use ableton_timeline::{
+use oxide_timeline::{
     generate::{generate_euclidean, generate_seed, generate_stacks, StacksChordType, StacksVoicing},
     quantization::QuantizeMode,
     transform::{transform_connect, transform_ornament, transform_recombine, transform_strum, StrumDirection},
@@ -291,14 +291,14 @@ fn test_center_arrangement_timeline_automation_and_comping() {
     let mut midi_trk = ArrangementTrack::new(1, "Bassline", "MidiSynth");
 
     // Comping Take Lanes
-    let mut comping_mgr = ableton_timeline::TrackCompingManager::new();
+    let mut comping_mgr = oxide_timeline::TrackCompingManager::new();
     comping_mgr.add_take_lane("Take 1 (Main)");
     comping_mgr.add_take_lane("Take 2 (Alt)");
     comping_mgr.add_take_lane("Take 3 (Punch-in)");
     assert_eq!(comping_mgr.take_lanes.len(), 3);
 
     // Multi-Lane Parameter Automation with continuous bezier curves
-    let mut multi_auto = ableton_timeline::MultiLaneAutomation::new();
+    let mut multi_auto = oxide_timeline::MultiLaneAutomation::new();
     let filter_lane = multi_auto.get_or_create_lane(0, "Cutoff Hz");
     filter_lane.add_point(AutomationPoint::new(0.0, 0.1, AutomationCurveType::Linear.to_curve_tension()));
     filter_lane.add_point(AutomationPoint::new(4.0, 0.5, AutomationCurveType::SCurve.to_curve_tension()));
@@ -371,7 +371,7 @@ fn test_bottom_clip_view_piano_roll_transforms_and_warping() {
     let mut melodic = MidiPattern::new(4.0);
     melodic.add_note(MidiNote::new(60, 100, 0.0, 0.5));
     melodic.add_note(MidiNote::new(67, 100, 2.0, 0.5));
-    let scale_lock = ableton_timeline::generate::ScaleLock::major(0);
+    let scale_lock = oxide_timeline::generate::ScaleLock::major(0);
     transform_connect(&mut melodic, scale_lock, 0.5);
     assert!(melodic.notes.len() > 2, "Connect transform should insert passing notes between distant pitches");
 
@@ -432,7 +432,7 @@ fn test_bottom_clip_view_piano_roll_transforms_and_warping() {
     let scale = GlobalScale::default();
     let _ = ctx.run(raw_input, |ctx| {
         egui::CentralPanel::default().show(ctx, |ui| {
-            let _act = ableton_gui::panels::clip_view::render_clip_view(
+            let _act = oxide_gui::panels::clip_view::render_clip_view(
                 ui,
                 &mut clip_state,
                 &mut pattern,
@@ -532,7 +532,7 @@ fn test_bottom_device_chain_visualizers_and_rack_reordering() {
 
 #[test]
 fn test_e2e_full_studio_app_headless_integration() {
-    let mut app = AbletonStudioApp::new_mock(44100.0);
+    let mut app = OxideStudioApp::new_mock(44100.0);
 
     // Initial View Routing
     assert_eq!(app.workspace_view, WorkspaceView::SessionMatrix);
@@ -825,7 +825,7 @@ fn test_adversarial_sound_similarity_metric_properties() {
     for i in 0..8 {
         let mut feats = [0.0f32; 8];
         feats[i] = 1.0;
-        basis_items.push(ableton_gui::panels::browser::BrowserItem::new(
+        basis_items.push(oxide_gui::panels::browser::BrowserItem::new(
             format!("basis_{}", i),
             format!("Basis {}", i),
             BrowserCategory::Sounds,
@@ -847,7 +847,7 @@ fn test_adversarial_sound_similarity_metric_properties() {
     println!("2. Orthogonality Property S_C(e_i, e_j) = 0.0: PASSED across all 8 standard basis vectors");
 
     // 3. Zero-Norm Handling
-    let zero_item = ableton_gui::panels::browser::BrowserItem::new(
+    let zero_item = oxide_gui::panels::browser::BrowserItem::new(
         "zero",
         "Zero",
         BrowserCategory::Sounds,
@@ -866,7 +866,7 @@ fn test_adversarial_sound_similarity_metric_properties() {
     println!("3. Zero-Norm Handling S_C(0, u) = 0.0: PASSED (no NaN, no panic, strictly 0.0)");
 
     // 4. Precision Threshold for Small Magnitude Vectors
-    let small_item = ableton_gui::panels::browser::BrowserItem::new(
+    let small_item = oxide_gui::panels::browser::BrowserItem::new(
         "small",
         "Small",
         BrowserCategory::Sounds,
@@ -914,10 +914,10 @@ fn test_adversarial_sound_similarity_metric_properties() {
 // ============================================================================
 
 use egui::{pos2, vec2, Rect};
-use ableton_gui::panels::session_matrix::render_session_matrix;
-use ableton_gui::panels::timeline::render_arrangement_timeline;
-use ableton_gui::visualizers::*;
-use ableton_timeline::comping::TrackCompingManager;
+use oxide_gui::panels::session_matrix::render_session_matrix;
+use oxide_gui::panels::timeline::render_arrangement_timeline;
+use oxide_gui::visualizers::*;
+use oxide_timeline::comping::TrackCompingManager;
 
 #[test]
 fn test_adversarial_session_view_and_mixer_extreme_tracks() {
@@ -925,7 +925,7 @@ fn test_adversarial_session_view_and_mixer_extreme_tracks() {
 
     let ctx = egui::Context::default();
     let raw_input = egui::RawInput::default();
-    let telemetry = ableton_core::AudioTelemetry::new();
+    let telemetry = oxide_core::AudioTelemetry::new();
 
     // 1. Extreme Track Counts: 0 tracks, 1 track, 64 tracks
     for &track_count in &[0, 1, 64] {
@@ -1046,7 +1046,7 @@ fn test_adversarial_arrangement_view_bezier_comping_and_zoom() {
     println!("\n=== Challenger 2: Arrangement View Adversarial Stress Test ===");
 
     // 1. Bezier Automation Curves with extreme / identical breakpoint coordinates
-    let mut lane = ableton_timeline::automation::AutomationLane::new(1, "Filter Cutoff");
+    let mut lane = oxide_timeline::automation::AutomationLane::new(1, "Filter Cutoff");
 
     // Empty lane evaluation
     assert_eq!(lane.interpolate_at(0.0, 0.42), 0.42);

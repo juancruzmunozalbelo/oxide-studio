@@ -1,6 +1,6 @@
 # TEST_READY.md: E2E Test Suite Readiness Declaration
 
-**Project:** `ableton-rust` (Native macOS Electronic Music DAW)  
+**Project:** `oxide-studio` (Native macOS Electronic Music DAW)  
 **Author:** E2E Test Suite Designer (`teamwork_preview_test_writer_e2e_1`)  
 **Status:** READY & VERIFIED  
 **Date:** 2026-10-20T16:44:00Z  
@@ -9,7 +9,7 @@
 
 ## 1. Executive Summary
 
-The complete End-to-End (E2E) integration test infrastructure and verification test suites for `ableton-rust` have been authored, compiled with zero warnings (`-D warnings`), and 100% verified against the authoritative baselines from `ORIGINAL_REQUEST.md`, `PROJECT.md`, and the decompiled Ableton Live 12.4.6 Suite / Learning Synths reference implementations (`/Users/juancruz/ableton-rea`).
+The complete End-to-End (E2E) integration test infrastructure and verification test suites for `oxide-studio` have been authored, compiled with zero warnings (`-D warnings`), and 100% verified against the authoritative baselines from `ORIGINAL_REQUEST.md`, `PROJECT.md`, and the Oxide Studio Workstation Architecture & DSP Specification.
 
 All 6 required E2E test suites in `/Users/juancruz/ableton-rust/tests/` and the master `/Users/juancruz/ableton-rust/TEST_INFRA.md` specification are in place and passing.
 

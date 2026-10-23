@@ -6,7 +6,7 @@
 //! - /Users/juancruz/ableton-rea/docs/adr/0001-dual-dsp-engine-and-mystran-zdf-ladder.md
 //! - /Users/juancruz/ableton-rust/PROJECT.md
 
-use ableton_dsp::{
+use oxide_dsp::{
     AdsrEnvelope, EnvStage, Lfo, LfoShape, MystranZdfLadder, PulseOscillator, SawOscillator,
 };
 

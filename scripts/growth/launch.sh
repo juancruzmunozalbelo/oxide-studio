@@ -41,12 +41,12 @@ case "${1:-help}" in
       "https://www.reddit.com/r/rust/submit?type=TEXT&title=I%20wrote%20a%20clean-room%20electronic%20music%20DAW%20in%20100%25%20Rust%20%28cpal%20%2B%20egui%2C%20lock-free%20DSP%2C%20Ableton%20.als%20interop%2C%20and%20an%20MCP%20server%29" \
       "r/rust"
     ;;
-  ableton)
+  edmproduction|ableton)
     open_post \
       "I built a free, open-source (MIT) lightweight DAW in Rust that natively imports and exports Ableton Live 12 (.als) projects" \
-      "$POSTS_DIR/03_r_ableton.md" \
-      "https://www.reddit.com/r/ableton/submit?type=TEXT&title=I%20built%20a%20free%2C%20open-source%20%28MIT%29%20lightweight%20DAW%20in%20Rust%20that%20natively%20imports%20and%20exports%20Ableton%20Live%2012%20%28.als%29%20projects" \
-      "r/ableton"
+      "$POSTS_DIR/03_r_edmproduction.md" \
+      "https://www.reddit.com/r/edmproduction/submit?type=TEXT&title=I%20built%20a%20free%2C%20open-source%20%28MIT%29%20lightweight%20DAW%20in%20Rust%20that%20natively%20imports%20and%20exports%20Ableton%20Live%2012%20%28.als%29%20projects" \
+      "r/edmproduction"
     ;;
   localllama)
     open_post \
@@ -82,7 +82,7 @@ case "${1:-help}" in
     echo "  ./scripts/growth/launch.sh rust        -> Día 1: r/rust"
     echo "  ./scripts/growth/launch.sh hn          -> Día 2: Show HN (Hacker News)"
     echo "  ./scripts/growth/launch.sh localllama  -> Día 4: r/LocalLLaMA"
-    echo "  ./scripts/growth/launch.sh ableton     -> Semana 2: r/ableton"
+    echo "  ./scripts/growth/launch.sh edmproduction  -> Semana 2: r/edmproduction"
     echo "  ./scripts/growth/launch.sh techno      -> Semana 2: r/TechnoProduction"
     echo "  ./scripts/growth/launch.sh kvr         -> Semana 3: KVR Audio"
     echo "  ./scripts/growth/launch.sh jules       -> Enviar las 3 tareas de código a Jules"

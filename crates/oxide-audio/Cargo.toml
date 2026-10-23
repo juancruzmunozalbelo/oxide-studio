@@ -1,0 +1,23 @@
+[package]
+name = "oxide-audio"
+version = "1.0.0"
+edition = "2021"
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
+
+[dependencies]
+oxide-core = { path = "../oxide-core" }
+oxide-dsp = { path = "../oxide-dsp" }
+oxide-drums = { path = "../oxide-drums" }
+oxide-fx = { path = "../oxide-fx" }
+oxide-timeline = { path = "../oxide-timeline" }
+cpal = "0.18"
+rtrb = "0.4"
+portable-atomic = { version = "1.15", features = ["float"] }
+serde = { version = "1.0", features = ["derive"], optional = true }
+
+[features]
+default = []
+serde = ["dep:serde"]

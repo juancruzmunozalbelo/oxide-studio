@@ -30,10 +30,10 @@ We will acknowledge receipt within 48 hours and coordinate a coordinated disclos
 
 Oxide Studio operates as a native desktop DAW, a low-latency audio engine, and a Model Context Protocol (MCP) server. Our threat model focuses on two key boundaries:
 
-### 1. Out-of-Process Plugin Sandbox Isolation (`ableton-plugin-scanner`)
+### 1. Out-of-Process Plugin Sandbox Isolation (`oxide-plugin-scanner`)
 
 - **Untrusted Code**: Audio plugins (AudioUnit v2, VST3, CLAP) are third-party native dynamic libraries (`.component`, `.vst3`, `.clap`) executing with host user privileges. Third-party plugins frequently contain memory-safety defects, invalid memory accesses, or unhandled exceptions.
-- **Isolation Supervisor**: Plugin discovery and scanning run in an isolated subprocess (`ableton-plugin-scanner`). If an untrusted plugin segfaults, aborts, or corrupts memory during discovery, only the ephemeral worker process terminates. The main Oxide Studio workstation host remains unharmed and records the failing plugin in a crash-quarantine manifest.
+- **Isolation Supervisor**: Plugin discovery and scanning run in an isolated subprocess (`oxide-plugin-scanner`). If an untrusted plugin segfaults, aborts, or corrupts memory during discovery, only the ephemeral worker process terminates. The main Oxide Studio workstation host remains unharmed and records the failing plugin in a crash-quarantine manifest.
 - **Hosted Instance Boundaries**: Hosted plugins instantiated on track device chains run with input buffer bounding and floating-point denormal sanitization (`flush-to-zero` / `denormals-are-zero`).
 
 ### 2. Local Loopback RPC & Network Security

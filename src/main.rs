@@ -13,9 +13,9 @@ use std::env;
 use std::path::{Path, PathBuf};
 use std::process::exit;
 
-use ableton_bounce::{DemoArrangementRenderer, WavWriter};
-use ableton_plugin_scanner::PluginScannerSupervisor;
-use ableton_project::DAWProject;
+use oxide_bounce::{DemoArrangementRenderer, WavWriter};
+use oxide_plugin_scanner::PluginScannerSupervisor;
+use oxide_project::DAWProject;
 
 fn main() {
     let args: Vec<String> = env::args().collect();
@@ -84,7 +84,7 @@ fn main() {
 
     // Check for --mcp
     if args.iter().any(|a| a == "--mcp") {
-        ableton_mcp::run_mcp_server_stdio();
+        oxide_mcp::run_mcp_server_stdio();
         return;
     }
 
@@ -96,7 +96,7 @@ fn main() {
 
     // Default: Launch native single-window studio GUI
     println!("Launching Oxide Studio Dark Carbon GUI...");
-    if let Err(e) = ableton_gui::run_gui() {
+    if let Err(e) = oxide_gui::run_gui() {
         eprintln!("Notice: GUI terminated: {}", e);
     }
 }
@@ -106,7 +106,7 @@ fn print_usage() {
         "Oxide Studio — Native macOS Electronic Music DAW\n\
         \n\
         USAGE:\n\
-            ableton-rust [OPTIONS]\n\
+            oxide-studio [OPTIONS]\n\
         \n\
         OPTIONS:\n\
             -h, --help                          Print this help message\n\
@@ -127,7 +127,7 @@ fn render_demo_and_verify(output_path: &Path) {
     let duration_seconds = 4.5; // >= 4.0s required
 
     println!("============================================================");
-    println!("  Ableton Rust Multi-Track Arrangement Demo Renderer");
+    println!("  Oxide Studio Multi-Track Arrangement Demo Renderer");
     println!("============================================================");
     println!("• Target Path:    {}", output_path.display());
     println!("• Sample Rate:    {:.0} Hz (Stereo 24/16-bit PCM)", sample_rate);
@@ -198,7 +198,7 @@ fn render_demo_and_verify(output_path: &Path) {
 /// Out-of-process AU/VST3 plugin scanner CLI handler.
 fn scan_plugins_cli(output_path: &Path) {
     println!("============================================================");
-    println!("  Ableton Plugin Scanner (Out-of-Process macOS AU/VST3)");
+    println!("  Oxide Plugin Scanner (Out-of-Process macOS AU/VST3)");
     println!("============================================================");
     println!("• Output Manifest: {}", output_path.display());
 
@@ -276,12 +276,12 @@ fn export_als_cli(out_als: &Path) {
     let mut project = DAWProject::new("Oxide Studio Session");
     project.transport.bpm = 126.0;
 
-    let mut lead_synth = ableton_project::TrackDefinition::new_synth(1, "Lead Synth");
+    let mut lead_synth = oxide_project::TrackDefinition::new_synth(1, "Lead Synth");
     lead_synth.mixer.volume_db = -2.5;
     lead_synth.mixer.pan = 0.0;
     project.tracks.push(lead_synth);
 
-    let mut drums = ableton_project::TrackDefinition::new_drum_rack(2, "909 Drums");
+    let mut drums = oxide_project::TrackDefinition::new_drum_rack(2, "909 Drums");
     drums.mixer.volume_db = -1.0;
     project.tracks.push(drums);
 
@@ -307,7 +307,7 @@ fn split_stems_cli(in_wav: &Path, out_dir: &Path) {
     println!("• Input WAV:      {}", in_wav.display());
     println!("• Output Dir:     {}", out_dir.display());
 
-    match ableton_bounce::stems::export_remix_stems_from_wav(in_wav, out_dir) {
+    match oxide_bounce::stems::export_remix_stems_from_wav(in_wav, out_dir) {
         Ok(files) => {
             println!("✓ 4-Stem Separation Succeeded:");
             println!("  - Drums:  {}", files.drums.display());

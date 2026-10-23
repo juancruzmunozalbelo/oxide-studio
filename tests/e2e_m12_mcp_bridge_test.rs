@@ -12,7 +12,7 @@
 //! - Group 9 Mixer, Returns & Global Scale: `return_track_create`, `mixer_set_send`, `scale_set_global`
 //! - Group 11 Master FX: `fx_set_limiter`, `fx_set_saturator`
 //! - Group 15 Live 12 LOM Dual-Target TCP Bridge:
-//!   - Offline fallback (structured fallback to ableton-rust engine state when port 9877 is unbound)
+//!   - Offline fallback (structured fallback to oxide-studio engine state when port 9877 is unbound)
 //!   - Online roundtrip (mock TCP server on 127.0.0.1:9877 answering live JSON-RPC 2.0 requests)
 
 use std::io::{BufRead, BufReader, Write};
@@ -23,7 +23,7 @@ use std::thread;
 use std::time::Duration;
 
 use serde_json::{json, Value};
-use ableton_mcp::McpServer;
+use oxide_mcp::McpServer;
 
 fn send_request(server: &mut McpServer, req: Value) -> Value {
     let line = req.to_string();
@@ -61,7 +61,7 @@ fn test_mcp_all_76_tools_registration() {
     });
     let init_resp = send_request(&mut server, init_req);
     assert_eq!(init_resp["jsonrpc"], "2.0");
-    assert_eq!(init_resp["result"]["serverInfo"]["name"], "ableton-rust-mcp");
+    assert_eq!(init_resp["result"]["serverInfo"]["name"], "oxide-mcp");
 
     // List all tools
     let list_req = json!({

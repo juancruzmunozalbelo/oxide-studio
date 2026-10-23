@@ -324,7 +324,7 @@
               Compile and install directly from crates or source repository using the official Rust toolchain:
             </p>
             <div style="background: var(--surface-sunken); border: 1px solid var(--surface-border-subtle); padding: 12px; border-radius: var(--radius-sm); font-family: var(--font-mono); font-size: 11px; color: var(--text-muted); margin-top: 8px;">
-              <div><span style="color: var(--laser-cyan);">$</span> cargo install --git https://github.com/juancruzmunozalbelo/oxide-studio --tag v1.0.0 ableton-rust</div>
+              <div><span style="color: var(--laser-cyan);">$</span> cargo install --git https://github.com/juancruzmunozalbelo/oxide-studio --tag v1.0.0 oxide-gui --bin oxide-studio</div>
               <div style="margin-top: 4px;"><span style="color: var(--laser-cyan);">$</span> oxide-studio --mcp</div>
               <div style="color: var(--meter-green); margin-top: 6px;">✓ 674 workspace tests passing • 576 layout guard frames</div>
             </div>
@@ -505,7 +505,7 @@
             </p>
 
             <div style="background: var(--surface-sunken); border: 1px solid var(--surface-border); border-radius: var(--radius-sm); padding: 16px; font-family: var(--font-mono); font-size: 11px; color: var(--text-muted); line-height: 1.6;">
-              <div style="color: var(--laser-cyan); margin-bottom: 8px;">// Native Rust GUI Copilot Integration (crates/ableton-gui)</div>
+              <div style="color: var(--laser-cyan); margin-bottom: 8px;">// Native Rust GUI Copilot Integration (crates/oxide-gui)</div>
               <div>app.dispatch_studio_intent(<span style="color: var(--signal-amber);">"hace este kick mas gordo"</span>);</div>
               <div style="color: var(--text-dim); margin: 6px 0;">&gt;&gt; Executes drums_configure_pad(pitch=48.0, decay=480)</div>
               <div style="color: var(--text-dim);">&gt;&gt; Executes fx_set_saturator(drive_db=+6.5, curve="Pade44")</div>
@@ -524,7 +524,7 @@
       <div class="container">
         <div class="section-header">
           <div class="section-eyebrow"><span>⚙️</span> Modular Rust Architecture</div>
-          <h2 class="section-title">9 Crates, 10 Instruments & 15 Audio Effects.</h2>
+          <h2 class="section-title">11 Crates, 10 Instruments & 15 Audio Effects.</h2>
           <p class="section-desc">
             Organized into clean, decoupled crates with zero circular dependencies. 
             Real-time audio threads maintain zero allocations while GUI and MCP servers interact over lock-free ring buffers.
@@ -533,15 +533,15 @@
 
         <!-- Navigation Tabs -->
         <div class="tabs-nav">
-          <button class="tab-btn active" data-tab="tab-crates">9 RUST CRATES</button>
+          <button class="tab-btn active" data-tab="tab-crates">11 RUST CRATES</button>
           <button class="tab-btn" data-tab="tab-instruments">10 INSTRUMENTS</button>
           <button class="tab-btn" data-tab="tab-effects">15 AUDIO EFFECTS</button>
         </div>
 
-        <!-- Tab 1: 9 Crates -->
+        <!-- Tab 1: 11 Crates -->
         <div class="crates-grid tab-content" id="tab-crates">
           <div class="crate-card">
-            <div class="crate-name">ableton-core</div>
+            <div class="crate-name">oxide-core</div>
             <p class="crate-desc">Lock-free SPSC ring buffers (<span class="mono">rtrb</span>), audio buffer slices, sample clock, GlobalScale, and project definitions.</p>
             <ul class="crate-invariants">
               <li>Zero audio-thread heap allocations</li>
@@ -550,7 +550,7 @@
           </div>
 
           <div class="crate-card">
-            <div class="crate-name">ableton-dsp</div>
+            <div class="crate-name">oxide-dsp</div>
             <p class="crate-desc">PolyBLEP oscillators, Cytomic ZDF filters, Mystran 2x-oversampled 4-pole ladder filter, Wavetable, Operator, Drift, and Meld.</p>
             <ul class="crate-invariants">
               <li>Padé [4/4] rational saturation</li>
@@ -559,7 +559,7 @@
           </div>
 
           <div class="crate-card">
-            <div class="crate-name">ableton-drums</div>
+            <div class="crate-name">oxide-drums</div>
             <p class="crate-desc">TR-909 physical drum synthesis models, multi-pad Drum Rack (128-pad bank view), sample slicing, and choke groups.</p>
             <ul class="crate-invariants">
               <li>Dual-component kick & tuned snare</li>
@@ -568,7 +568,7 @@
           </div>
 
           <div class="crate-card">
-            <div class="crate-name">ableton-fx</div>
+            <div class="crate-name">oxide-fx</div>
             <p class="crate-desc">Dynamic multi-device chain hosting EQ Eight, Glue Compressor, Roar saturator, Auto Filter, OTT, Hybrid Reverb, and Limiter.</p>
             <ul class="crate-invariants">
               <li>Cytomic SSL bus compressor model</li>
@@ -577,25 +577,7 @@
           </div>
 
           <div class="crate-card">
-            <div class="crate-name">ableton-audio</div>
-            <p class="crate-desc">Native macOS CoreAudio real-time output via CPAL with low-latency device streams and buffer callbacks.</p>
-            <ul class="crate-invariants">
-              <li>Sub-5ms hardware roundtrip latency</li>
-              <li>Real-time thread priority scheduling</li>
-            </ul>
-          </div>
-
-          <div class="crate-card">
-            <div class="crate-name">ableton-bounce</div>
-            <p class="crate-desc">Offline multi-track WAV renderer, sample-rate conversion, 16/24/32-bit RIFF export, and 4-stem remix extractor.</p>
-            <ul class="crate-invariants">
-              <li>Linkwitz-Riley 4-band crossover</li>
-              <li>Mid/Side harmonic decomposition</li>
-            </ul>
-          </div>
-
-          <div class="crate-card">
-            <div class="crate-name">ableton-timeline</div>
+            <div class="crate-name">oxide-timeline</div>
             <p class="crate-desc">Session clip launcher, Arrangement multi-track timeline, automation ramps, comping take lanes, and 6-mode warping.</p>
             <ul class="crate-invariants">
               <li>OWarper phase vocoder reconstruction</li>
@@ -604,20 +586,56 @@
           </div>
 
           <div class="crate-card">
-            <div class="crate-name">ableton-project</div>
-            <p class="crate-desc">Atomic JSON/RON project persistence and bidirectional Ableton Live 12 Set (<span class="mono">.als</span>) Gzip XML parser/serializer.</p>
+            <div class="crate-name">oxide-audio</div>
+            <p class="crate-desc">Native macOS CoreAudio real-time output via CPAL with low-latency device streams and buffer callbacks.</p>
             <ul class="crate-invariants">
-              <li>Full round-trip fidelity with Live 12</li>
+              <li>Sub-5ms hardware roundtrip latency</li>
+              <li>Real-time thread priority scheduling</li>
+            </ul>
+          </div>
+
+          <div class="crate-card">
+            <div class="crate-name">oxide-bounce</div>
+            <p class="crate-desc">Offline multi-track WAV renderer, sample-rate conversion, 16/24/32-bit RIFF export, and 4-stem remix extractor.</p>
+            <ul class="crate-invariants">
+              <li>Linkwitz-Riley 4-band crossover</li>
+              <li>Mid/Side harmonic decomposition</li>
+            </ul>
+          </div>
+
+          <div class="crate-card">
+            <div class="crate-name">oxide-project</div>
+            <p class="crate-desc">Atomic JSON/RON project persistence and bidirectional open Ableton Live 12 Set (<span class="mono">.als</span>) Gzip XML parser/serializer.</p>
+            <ul class="crate-invariants">
+              <li>Full round-trip fidelity with .als projects</li>
               <li>Flate2 Gzip automatic detection</li>
             </ul>
           </div>
 
           <div class="crate-card">
-            <div class="crate-name">ableton-plugin-scanner</div>
+            <div class="crate-name">oxide-plugin-scanner</div>
             <p class="crate-desc">Crash-isolated out-of-process supervisor enumerating and hosting AUv2, VST3, and CLAP plugins.</p>
             <ul class="crate-invariants">
               <li>Process isolation crash supervisor</li>
               <li>Host DAW survives plugin segfaults</li>
+            </ul>
+          </div>
+
+          <div class="crate-card">
+            <div class="crate-name">oxide-gui</div>
+            <p class="crate-desc">Single-window 60 FPS workstation interface rendered natively on macOS Metal using egui and eframe, with piano roll and perform pad.</p>
+            <ul class="crate-invariants">
+              <li>60 FPS Metal GPU rendering</li>
+              <li>Zero-allocation UI state dispatch</li>
+            </ul>
+          </div>
+
+          <div class="crate-card">
+            <div class="crate-name">oxide-mcp</div>
+            <p class="crate-desc">Dual-target Model Context Protocol server exposing 76 JSON-RPC 2.0 tools over stdio and live TCP RPC bridge.</p>
+            <ul class="crate-invariants">
+              <li>Deterministic LLM-to-DSP tool dispatch</li>
+              <li>Sample-accurate parameter automation</li>
             </ul>
           </div>
         </div>

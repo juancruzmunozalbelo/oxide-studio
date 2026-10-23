@@ -1,4 +1,4 @@
-name: Aruston Cross-Platform CI
+name: Oxide Studio Cross-Platform CI
 
 on:
   push:
@@ -48,3 +48,67 @@ jobs:
 
       - name: Run full workspace test suite
         run: cargo test --workspace
+
+  e2e-verification:
+    name: E2E Workstation & Clean-Room Regression Verification (macOS)
+    runs-on: macos-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Rust stable toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Rust Cache
+        uses: Swatinem/rust-cache@v2
+
+      - name: Run E2E workstation verification suite
+        run: cargo test -p oxide-gui --test e2e_workstation_verification_test
+
+      - name: Run adversarial acoustic layout stress test
+        run: cargo test -p oxide-gui --test adversarial_acoustic_layout_stress_test
+
+      - name: Clean-room regression guards
+        run: |
+          echo "Asserting zero matches for legacy ableton- crate names..."
+          MATCHES_DASH=$(grep -rEI "ableton-(core|dsp|drums|fx|audio|bounce|timeline|project|plugin-scanner|gui|mcp)" --exclude-dir=target --exclude-dir=.git . || true)
+          if [ -n "$MATCHES_DASH" ]; then
+            echo "❌ Error: Found prohibited ableton- crate reference:"
+            echo "$MATCHES_DASH"
+            exit 1
+          fi
+
+          echo "Asserting zero matches for legacy ableton_ crate names..."
+          MATCHES_UNDERSCORE=$(grep -rEI "ableton_(core|dsp|drums|fx|audio|bounce|timeline|project|plugin_scanner|gui|mcp)" --exclude-dir=target --exclude-dir=.git . || true)
+          if [ -n "$MATCHES_UNDERSCORE" ]; then
+            echo "❌ Error: Found prohibited ableton_ crate reference:"
+            echo "$MATCHES_UNDERSCORE"
+            exit 1
+          fi
+
+          echo "Asserting zero files returned by find . -maxdepth 4 -not -path '*/target/*' -not -path '*/.git/*' -iname '*ableton*'..."
+          ILLEGAL_FILES=$(find . -maxdepth 4 -not -path "*/target/*" -not -path "*/.git/*" -iname "*ableton*")
+          if [ -n "$ILLEGAL_FILES" ]; then
+            echo "❌ Error: Prohibited files found matching *ableton*:"
+            echo "$ILLEGAL_FILES"
+            exit 1
+          fi
+
+          echo "✓ All clean-room regression guards passed cleanly."
+
+  web-dsp-verification:
+    name: Web DAW & Showcase DSP Verification
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Verify Web DAW & Showcase scripts syntax
+        run: |
+          node --check docs/web/daw.js
+          node --check docs/app.js

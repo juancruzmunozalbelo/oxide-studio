@@ -1,0 +1,46 @@
+[package]
+name = "oxide-mcp"
+version = "1.0.0"
+edition = "2021"
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
+
+[dependencies]
+oxide-core = { path = "../oxide-core" }
+oxide-dsp = { path = "../oxide-dsp" }
+oxide-drums = { path = "../oxide-drums" }
+oxide-fx = { path = "../oxide-fx" }
+oxide-audio = { path = "../oxide-audio" }
+oxide-bounce = { path = "../oxide-bounce" }
+oxide-timeline = { path = "../oxide-timeline" }
+oxide-project = { path = "../oxide-project" }
+oxide-plugin-scanner = { path = "../oxide-plugin-scanner" }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+
+[lib]
+name = "oxide_mcp"
+path = "src/lib.rs"
+
+[[bin]]
+name = "oxide-mcp"
+path = "src/bin/main.rs"
+
+[[test]]
+name = "e2e_mcp_server_test"
+path = "../../tests/e2e_mcp_server_test.rs"
+
+[[test]]
+name = "e2e_mcp_adversarial_m7_2_test"
+path = "../../tests/e2e_mcp_adversarial_m7_2_test.rs"
+
+[[test]]
+name = "e2e_m12_mcp_bridge_test"
+path = "../../tests/e2e_m12_mcp_bridge_test.rs"
+
+[[test]]
+name = "adversarial_m12_stress_test"
+path = "../../tests/adversarial_m12_stress_test.rs"
+

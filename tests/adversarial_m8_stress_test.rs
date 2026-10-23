@@ -2,13 +2,13 @@
 //! Percussion, Physical Models, and Polymorphic Trait Dispatch.
 
 use std::sync::Arc;
-use ableton_core::{AudioBuffer, InstrumentDevice, MidiEvent, MusicalTime};
-use ableton_dsp::{
+use oxide_core::{AudioBuffer, InstrumentDevice, MidiEvent, MusicalTime};
+use oxide_dsp::{
     AnalogDevice, CollisionDevice, DriftDevice, ElectricDevice, MeldDevice,
     OperatorDevice, ResonatorStructure, TensionDevice, TensionExciterType,
     WavetableDevice,
 };
-use ableton_drums::{
+use oxide_drums::{
     DrumPadSource, DrumRack, OneShotRetrigger, SimplerDevice, SimplerMode,
     SlicingMode, NUM_BANKS, PADS_PER_BANK,
 };

@@ -1,22 +1,28 @@
-# r/rust — I wrote a clean-room electronic music DAW in 100% Rust (cpal + egui, lock-free DSP, Ableton .als interop, and an MCP server)
+# r/rust — I wrote a clean-room electronic music DAW in 100% Rust (cpal + egui, lock-free DSP, open .als interop, and an MCP server)
 
-Over the past few months I've been building **Oxide Studio**, an open-source (MIT/Apache-2.0) electronic music DAW and session/arrangement workstation written from scratch in Rust.
+Over the past few months I've been building **Oxide Studio**, an original open-source (MIT/Apache-2.0) electronic music workstation and session/arrangement DAW written from scratch in Rust.
 
-* **Repo:** https://github.com/juancruzmunozalbelo/oxide-studio
-* **Web / Architecture overview:** https://juancruzmunozalbelo.github.io/oxide-studio/
+* **Repo & v1.0.0 Releases:** https://github.com/juancruzmunozalbelo/oxide-studio
+* **Try the Web Edition in Browser (WebAudio):** https://juancruzmunozalbelo.github.io/oxide-studio/web/
+* **Architecture & Showcase:** https://juancruzmunozalbelo.github.io/oxide-studio/
 
-I wanted a fast, single-binary workstation inspired by Ableton Live 12 that boots in under a second, runs a lock-free synth/FX engine, reads and writes `.als` project files, and exposes its entire state machine over a local TCP RPC bridge (`127.0.0.1:19384`) and an MCP (Model Context Protocol) server.
+I wanted a fast, single-binary electronic music workstation that boots in under a second, runs a lock-free synth/FX engine, reads and writes `.als` project files for open interop, and exposes its entire state machine over a local TCP RPC bridge (`127.0.0.1:19384`) and a 76-tool MCP (Model Context Protocol) server.
 
 ### Workspace Architecture (11 Crates)
 
-To keep compilation times sane and enforce strict boundaries between the real-time audio thread and the UI/network layers, the project is split into 11 crates:
+To keep compilation times sane and enforce strict boundaries between the real-time audio thread and the UI/network layers, the project is cleanly separated into 11 specialized workspace crates:
 
-* `ableton-core` & `ableton-timeline`: Transport state, tempo map, session clip matrix, arrangement timeline, and MIDI clip structures (with scale-folding, Euclidean generators, and chord stacks).
-* `ableton-dsp`, `ableton-drums`, `ableton-fx`: The synthesis and effects engines. Includes a 4-operator FM synth, Wavetable synth, 303 bass synth, TR-909 drum rack, multiband saturation, OTT multiband upward/downward compression, 8-band biquad EQ, Auto Filter, Glue bus compressor, and a 4-band stem separator (`Kick+Sub`, `Bass`, `Synths/Mids`, `Hats/Air`).
-* `ableton-audio` & `ableton-bounce`: `cpal` stream management and offline deterministic rendering (WAV/AIFF stem export).
-* `ableton-project`: Gzip + XML parser and serializer for native `.als` (Ableton Live 12) bidirectional project exchange.
-* `ableton-gui`: Immediate-mode 60 FPS desktop interface built on `eframe` / `egui`, including an interactive Piano Roll, Session/Arrangement dual views, and an 8-macro XY pad with an Orbit LFO.
-* `ableton-mcp`: A 76-tool JSON-RPC / MCP server that translates external commands into lock-free messages sent to the running audio engine.
+* `oxide-core`: Core domain models, lock-free single-producer single-consumer (SPSC) ring buffers (`rtrb`), audio buffer slices, sample clock, GlobalScale, and microtonal tuning systems.
+* `oxide-dsp`: Real-time polyphonic synthesis engines (Wavetable, 4-operator FM, 303 acid bass, Drift, Meld bi-timbral), Mystran 2x-oversampled zero-delay feedback (ZDF) 4-pole transistor ladder filter with Padé saturator, and Cytomic state-variable filters.
+* `oxide-drums`: TR-909 physical drum synthesis models, 128-pad Drum Rack bank view, sample slicing, and choke groups.
+* `oxide-fx`: Dynamic multi-device chain hosting EQ Eight, Glue bus compressor, Roar multi-stage saturator with 1st-order ADAA antialiasing, Auto Filter, 3-band OTT dynamics, and Hybrid Reverb.
+* `oxide-timeline`: Dual-paradigm Session Matrix and Arrangement Timeline, automation curves, comping take lanes with equal-power micro-crossfades, and 6-mode warping engine.
+* `oxide-audio`: Low-latency native CoreAudio integration via `cpal` with real-time thread priority scheduling and zero heap allocations on the audio callback.
+* `oxide-bounce`: Deterministic offline 24-bit WAV bounce renderer, sample-rate conversion, and 4-stem harmonic remix separation (`Kick+Sub`, `Bass`, `Synths/Mids`, `Hats/Air`).
+* `oxide-project`: Native project state serialization and bidirectional open `.als` (Ableton Live 12 Set) Gzip XML parser/serializer.
+* `oxide-plugin-scanner`: Out-of-process crash-isolated supervisor for enumerating and hosting AUv2, VST3, and CLAP plugins without crashing the main host.
+* `oxide-gui`: Single-window 60 FPS workstation interface rendered natively via Metal/egui, with interactive Piano Roll, Session/Arrangement dual views, and an 8-macro XY perform pad with Orbit LFO.
+* `oxide-mcp`: Dual-target 76-tool Model Context Protocol (MCP) server and JSON-RPC bridge allowing autonomous local LLMs to manipulate the DAW state machine in real time.
 
 ### Real-Time Audio Constraints & `egui` Trade-offs
 

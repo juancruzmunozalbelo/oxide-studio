@@ -1,16 +1,16 @@
 //! Adversarial Empirical Stress-Test Suite for Milestone M9:
 //! Dynamic Device Chains, Live 12 Audio FX Suite, Generative/Transform MIDI Tools & Dynamic Reordering.
 
-use ableton_core::{
+use oxide_core::{
     AudioBuffer, AudioEffectDevice, DeviceCategory, DeviceChain, MidiEffectDevice, MidiEvent,
     MusicalTime,
 };
-use ableton_fx::{
+use oxide_fx::{
     ArpPattern, Arpeggiator, AutoFilter, Chord, Compressor, Echo, EQEight, EqBandType,
     GlueCompressor, HybridReverb, HybridReverbMode, MasterLimiter, MultibandDynamics, NoteLength,
     Pitch, Random, Roar, RoarCurve, RoarTopology, Scale, SpectralResonator, Velocity,
 };
-use ableton_timeline::{
+use oxide_timeline::{
     generate_euclidean, generate_seed, generate_stacks, transform_connect, transform_ornament,
     transform_quantize, transform_recombine, transform_span, transform_strum, transform_time_warp,
     MidiNote, MidiPattern, ScaleLock, SpanMode, StacksChordType, StacksVoicing, StrumDirection,

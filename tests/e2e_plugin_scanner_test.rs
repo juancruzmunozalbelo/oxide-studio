@@ -1,9 +1,8 @@
 //! E2E Test Suite: Out-of-Process AU/VST3 Plugin Scanner, Crash Isolation & Manifest
 //!
 //! Authoritative baselines:
-//! - /Users/juancruz/ableton-rea/rea-artifacts/live12-suite/Extensions/Ableton_Plugin_Scanner_arm64
 //! - /Users/juancruz/ableton-rust/PROJECT.md § 8 & § Interface Contracts
-//! - /Users/juancruz/ableton-rust/.agents/teamwork/teamwork_preview_explorer_survey_2/handoff.md § 2.5 & 4.6
+//! - Oxide Studio Plugin Scanner Architecture Specification
 
 use std::fs;
 use std::path::{Path, PathBuf};

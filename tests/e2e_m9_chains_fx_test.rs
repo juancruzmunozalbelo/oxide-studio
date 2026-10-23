@@ -16,9 +16,9 @@
 //! 6. Issue #14 Plugin Hosting: HostedPluginDevice loaded into DeviceChain instrument and effect slots with bypass & reordering.
 
 use std::path::PathBuf;
-use ableton_core::{AudioBuffer, AudioEffectDevice, Device, DeviceCategory, DeviceChain, InstrumentDevice, MidiEffectDevice, MidiEvent, MusicalTime};
-use ableton_dsp::WavetableDevice;
-use ableton_fx::{
+use oxide_core::{AudioBuffer, AudioEffectDevice, Device, DeviceCategory, DeviceChain, InstrumentDevice, MidiEffectDevice, MidiEvent, MusicalTime};
+use oxide_dsp::WavetableDevice;
+use oxide_fx::{
     ArpPattern, Arpeggiator, AutoFilter, AutoShift, BeatRepeat, ChorusEnsemble, ChorusMode, Chord,
     CircuitModel, Compressor, CompressorMode, Corpus, CorpusResonatorType, CytomicFilterType, Echo,
     EQEight, EqBandType, EqStereoMode, Erosion, ErosionMode, GlueCompressor, HybridReverb,
@@ -26,10 +26,10 @@ use ableton_fx::{
     PhaserFlangerMode, Pitch, Random, Redux, Roar, RoarCurve, RoarTopology, Scale,
     SpectralResonator, Utility, Velocity,
 };
-use ableton_plugin_scanner::{
+use oxide_plugin_scanner::{
     HostedPluginDevice, PluginCategory, PluginDescriptor, PluginFormat, PluginParameter,
 };
-use ableton_timeline::{
+use oxide_timeline::{
     generate_euclidean, generate_rhythm, generate_seed, generate_shape, generate_stacks,
     transform_arpeggiate, transform_connect, transform_ornament, transform_quantize,
     transform_recombine, transform_span, transform_strum, transform_time_warp, ContourShape,

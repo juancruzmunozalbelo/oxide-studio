@@ -1,17 +1,17 @@
 # Changelog
 
-All notable changes to **Oxide Studio** (`oxide-studio` / `ableton-rust`) are documented in this file.
+All notable changes to **Oxide Studio** (`oxide-studio`) are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
 
 ## [1.0.0] — 2026-10-22
 
-### 🎉 Landmark 1.0.0 Production Release: 100% Commercial Ableton Live 12.4.6 Suite Parity
+### 🎉 Landmark 1.0.0 Production Release: Oxide Studio Workstation Architecture & DSP Specification
 
-Oxide Studio v1.0.0 marks the official public open-source release of the clean-room native Rust digital audio workstation (DAW), Ableton Live 12.4.6 studio workstation, and 76-tool Model Context Protocol (MCP) server.
+Oxide Studio v1.0.0 marks the official public open-source release of the clean-room native Rust digital audio workstation (DAW), Oxide Studio electronic music workstation, and 76-tool Model Context Protocol (MCP) server.
 
-This release represents the culmination of all 12 Ableton Live 12.4.6 Suite Parity Epics (#17–#28), backed by 674 passing automated tests, 576 layout guard frames, and an interactive In-Browser Web Workstation.
+This release represents the culmination of all 12 Workstation Architecture & DSP Specification Epics (#17–#28), backed by 674 passing automated tests, 576 layout guard frames, and an interactive In-Browser Web Workstation.
 
 ---
 
@@ -26,9 +26,9 @@ This release represents the culmination of all 12 Ableton Live 12.4.6 Suite Pari
 - **Bilingual OKF Copilot**: Interactive AI studio assistant answering in English and Argentine Spanish (`EN`/`ES`).
 - **1-Click In-Browser WAV Bounce**: Render and export studio arrangements to 16/24-bit WAV directly in the browser.
 
-#### 2. The 12 Ableton Live 12.4.6 Suite Parity Epics (#17–#28)
+#### 2. The 12 Workstation Architecture & DSP Specification Epics (#17–#28)
 - **Epic #17 (DSP Engine)**: Real-time multi-track audio recording with hardware I/O matrix (up to 64 buses), zero-allocation circular recording ring buffers, and sample-accurate `DriverLatencyCompensator` ensuring loopback click transients align to $\le 1$ sample accuracy.
-- **Epic #18 (Plugin Hosting)**: Out-of-process isolation architecture hosting `CLAP`, `VST3`, and macOS `AUv2` plugins via `ableton-plugin-scanner`. Features a POSIX shared-memory IPC audio ring buffer and crash watchdog with transparent zero-latency dry bypass (DAW survives `kill -SEGV` with zero dropouts).
+- **Epic #18 (Plugin Hosting)**: Out-of-process isolation architecture hosting `CLAP`, `VST3`, and macOS `AUv2` plugins via `oxide-plugin-scanner`. Features a POSIX shared-memory IPC audio ring buffer and crash watchdog with transparent zero-latency dry bypass (DAW survives `kill -SEGV` with zero dropouts).
 - **Epic #19 (Audio Warping)**: 6-mode audio warping engine (`Beats`, `Tones`, `Texture`, `RePitch`, `Complex`, `ComplexPro`) powered by a 2048-point STFT phase-vocoder with Laroche-Dolson phase locking and LPC/cepstral formant preservation. Double-buffered disk streaming cache for multi-gigabyte audio assets.
 - **Epic #20 (DSP Graph & Live Coding)**: Modular patch graph with embedded Wasmtime JIT compiler and Faust DSP backend for Max for Live (`.amxd`) equivalent visual patching and audio-rate parameter modulation.
 - **Epic #21 (Suite Instruments)**: Complete 8-instrument suite (`Drift`, `Meld` bi-timbral macro-synth with 12 engines, `Collision` mallet resonator, `Tension` waveguide string model, `Electric` electro-mechanical piano, `Analog` dual-VCO synth, `Sampler`, and `Granulator III` MPE granular scrub engine) plus 16 TR-909 physical modeling percussion voices.

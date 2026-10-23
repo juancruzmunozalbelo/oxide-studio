@@ -2,7 +2,7 @@
 
 > **Target Audience:** Electronic Music Producers (Techno, Melodic Techno, Peak-Time, House, Drum & Bass, Dubstep, UK Garage, RKT & Latin Bass).  
 > **Research Corpus:** Reddit (`r/ableton`, `r/TechnoProduction`, `r/edmproduction`, `r/trapproduction`), Gearspace, KVR Audio, Ableton Official Forums, and YouTube producer wishlists for Ableton Live 12 / 13.  
-> **Status:** Strategic Architectural Benchmark & Implementation Blueprint for **Aruston (`ableton-rust`)**.
+> **Status:** Strategic Architectural Benchmark & Implementation Blueprint for **Oxide Studio (`oxide-studio`)**.
 
 ---
 
@@ -16,7 +16,7 @@ Electronic music production operates under strict physical and acoustic constrai
 - **Extreme Crest Factor & Club Loudness:** Competitive electronic releases require transparent crest-factor shaving via high-order oversampled hard/soft clippers before brickwall limiters.
 - **Workflow Velocity:** In-lane non-destructive bounce-in-place (`Cmd+B`), zero-setup master reference track A/B testing, and crash-proof plugin sandboxing are universal workflow imperatives that Ableton Live has neglected for over a decade.
 
-**Aruston (`ableton-rust`)** is uniquely positioned to fulfill these demands natively. Because Aruston is written in modern Rust with a zero-allocation audio engine, lock-free SPSC telemetry rings, and GPU-accelerated Metal rendering, it can ship these high-impact features with zero plugin latency, zero CPU buffer lag, and zero subscription costs.
+**Oxide Studio (`oxide-studio`)** is uniquely positioned to fulfill these demands natively. Because Oxide Studio is written in modern Rust with a zero-allocation audio engine, lock-free SPSC telemetry rings, and GPU-accelerated Metal rendering, it can ship these high-impact features with zero plugin latency, zero CPU buffer lag, and zero subscription costs.
 
 ---
 
@@ -24,13 +24,13 @@ Electronic music production operates under strict physical and acoustic constrai
 
 | Feature / Domain | Stock Ableton Live 12 | 3rd-Party Workaround Required | Already Solved in Aruston | High-Impact Electronic Features to Highlight / Ship in Aruston |
 | :--- | :--- | :--- | :--- | :--- |
-| **Ducking / Sidechain Curve Shaper** | Stock Compressor sidechain (clicky attack, sluggish release, tail bloat) or M4L Shaper + Utility (buffer latency) | Cableguys ShaperBox 3 ($99), Nicky Romero Kickstart 2 ($19), Xfer LFO Tool ($49) | 4-shape LFO & piecewise breakpoint XY macros in `ableton-dsp` | **Native `DuckShaper`**: Multi-node bezier ducking curve, sample-accurate, MIDI/Transient sidechain trigger, and split-band sub-only ducking (<120 Hz). |
+| **Ducking / Sidechain Curve Shaper** | Stock Compressor sidechain (clicky attack, sluggish release, tail bloat) or M4L Shaper + Utility (buffer latency) | Cableguys ShaperBox 3 ($99), Nicky Romero Kickstart 2 ($19), Xfer LFO Tool ($49) | 4-shape LFO & piecewise breakpoint XY macros in `oxide-dsp` | **Native `DuckShaper`**: Multi-node bezier ducking curve, sample-accurate, MIDI/Transient sidechain trigger, and split-band sub-only ducking (<120 Hz). |
 | **Mastering & Bus Clipper** | Misusing Saturator ("Digital Clip" / "Soft Clip") or Glue Compressor soft-clip toggle; no dedicated clipper UI | SIR Audio StandardCLIP ($25), Klevgrand FreeAMP, Schwabe Gold Clip ($399), FL Studio Soft Clipper | Roar multi-stage saturator with 1st-order ADAA (Antiderivative Antialiasing) and 10 shaper curves | **Native `MasterClipper`**: Dedicated hard/soft clipper, $2\times/4\times/8\times$ linear-phase oversampling, shave-meter visualizer, and ceiling fader. |
-| **Dual-Waveform Phase & Collision Scope** | Tuner and Spectrum (FFT only); no time-domain multi-waveform comparison | Excite Audio Vision 4X ($89), Psyscope Pro ($40), Oszillos Megascope ($39), MTM Bassroom | Real-time 256-sample oscilloscope and 64-bin FFT spectrum in `ableton-core` / `ableton-gui` | **Native `PhaseScope`**: Real-time dual-waveform overlay (Kick vs. Sub), phase correlation index (-1 to +1), and instantaneous low-frequency phase offset angle. |
-| **Bounce-in-Place Workflow** | "Freeze & Flatten" destructively deletes MIDI/synth data; no group/return freeze; no single-clip freeze | Custom Python scripts, manual duplication to resample tracks | Deterministic headless offline WAV bounce engine (`ableton-bounce`) | **One-Click `Cmd+B` Bounce-in-Place**: Non-destructive audio bounce on same track with hidden MIDI take lane and one-click "Revert to Synth" button. |
+| **Dual-Waveform Phase & Collision Scope** | Tuner and Spectrum (FFT only); no time-domain multi-waveform comparison | Excite Audio Vision 4X ($89), Psyscope Pro ($40), Oszillos Megascope ($39), MTM Bassroom | Real-time 256-sample oscilloscope and 64-bin FFT spectrum in `oxide-core` / `oxide-gui` | **Native `PhaseScope`**: Real-time dual-waveform overlay (Kick vs. Sub), phase correlation index (-1 to +1), and instantaneous low-frequency phase offset angle. |
+| **Bounce-in-Place Workflow** | "Freeze & Flatten" destructively deletes MIDI/synth data; no group/return freeze; no single-clip freeze | Custom Python scripts, manual duplication to resample tracks | Deterministic headless offline WAV bounce engine (`oxide-bounce`) | **One-Click `Cmd+B` Bounce-in-Place**: Non-destructive audio bounce on same track with hidden MIDI take lane and one-click "Revert to Synth" button. |
 | **Stem Separation** | Live 12.3 Suite-only 4-stem split (Vocals, Drums, Bass, Other); slow offline CPU; audible phase artifacts | UVR5 (Ultimate Vocal Remover), Demucs v4, RipX DAW ($198), FL Studio Stem Separation | 8D spectral audio analysis engine and Simpler transient slice engine | **Local SOTA Neural Stem Separation**: Metal MPS-accelerated BS-RoFormer / Demucs separation for all editions with granular 6-stem extraction (Vocals, Drums, Bass, Percussion, Synths, FX). |
-| **Dynamic EQ & Frequency Masking** | EQ Eight is purely static; requires complex M4L Envelope Follower workarounds | FabFilter Pro-Q 3 ($179), Tokyo Dawn Nova, Waves F6 | 8-band parametric EQ Eight with real-time Bode curve response in `ableton-fx` | **Native `DynamicEQ8`**: Dynamic threshold mode per band, external sidechain dynamic ducking, and real-time frequency collision clash indicators. |
-| **Club Loudness & Reference A/B Suite** | Master track only has basic peak/RMS meters; requires convoluted "Ext. Out" key-map hack to A/B references | ADPTR Metric AB ($199), iZotope Insight 2 ($199), Mastering The Mix Reference ($69) | Master RMS, Peak, and 8D spectral metrics (`ableton-bounce`) | **Integrated `ClubDeck`**: Master EBU R128 integrated/short-term LUFS, True-Peak inter-sample detection (-0.3 dBFS ceiling), Mono Sub (<90 Hz) switch, and single-click reference track A/B toggle. |
+| **Dynamic EQ & Frequency Masking** | EQ Eight is purely static; requires complex M4L Envelope Follower workarounds | FabFilter Pro-Q 3 ($179), Tokyo Dawn Nova, Waves F6 | 8-band parametric EQ Eight with real-time Bode curve response in `oxide-fx` | **Native `DynamicEQ8`**: Dynamic threshold mode per band, external sidechain dynamic ducking, and real-time frequency collision clash indicators. |
+| **Club Loudness & Reference A/B Suite** | Master track only has basic peak/RMS meters; requires convoluted "Ext. Out" key-map hack to A/B references | ADPTR Metric AB ($199), iZotope Insight 2 ($199), Mastering The Mix Reference ($69) | Master RMS, Peak, and 8D spectral metrics (`oxide-bounce`) | **Integrated `ClubDeck`**: Master EBU R128 integrated/short-term LUFS, True-Peak inter-sample detection (-0.3 dBFS ceiling), Mono Sub (<90 Hz) switch, and single-click reference track A/B toggle. |
 | **Plugin Host & Format Ecosystem** | Only AU and VST3; **NO CLAP** support; plugin crash kills entire DAW session | Bitwig Studio / Reaper (CLAP pioneers); jBridge / Kushview Element | **Out-of-Process Plugin Scanner & HostedPluginDevice with macOS AUv2, VST3, and CLAP support** | **Highlight Existing Aruston Native CLAP + Crash-Proof Sandbox**: Zero session crashes, multithreaded CLAP thread-pool processing. |
 
 ---
@@ -44,13 +44,13 @@ Electronic music production operates under strict physical and acoustic constrai
   - Slower attack times (>10 ms) let kick transient and bass transient collide at 60 Hz, triggering master limiter pumping.
   - Sub-bass needs 100% ducking, but mid/high bass grit should remain audible so the groove doesn't feel uncoupled.
 - **Aruston Implementation Blueprint:**
-  - **DSP Engine (`ableton-fx`):** Bezier curve lookup table (2048 points) evaluated per sample in lock-free audio thread.
+  - **DSP Engine (`oxide-fx`):** Bezier curve lookup table (2048 points) evaluated per sample in lock-free audio thread.
   - **Trigger Modes:**
     1. *Tempo Sync:* $1/4, 1/2, 1/1, 1/8$ tied to transport rational beat ticks.
     2. *MIDI Trigger:* Ghost MIDI note input re-triggers the curve envelope instantly.
     3. *Audio Sidechain Transient:* Internal envelope peak follower detects kick hit and triggers envelope reset with 0 ms lookahead.
   - **Dual-Band Crossover:** Linkwitz-Riley 4th-order (24 dB/oct) crossover at $120\text{ Hz}$. Duck only Band 1 (Low), leaving Band 2 (Mid/High) transparent or lightly modulated.
-  - **UI Widget (`ableton-gui`):** Real-time oscilloscope background with dragging bezier handles and visual ducked gain reduction curve in neon green.
+  - **UI Widget (`oxide-gui`):** Real-time oscilloscope background with dragging bezier handles and visual ducked gain reduction curve in neon green.
 
 ---
 
@@ -73,11 +73,11 @@ Electronic music production operates under strict physical and acoustic constrai
 - **The Electronic Producer Problem:**
   - Ableton Live offers only a single-track Tuner or a frequency-domain FFT Spectrum analyzer. Frequency domain charts cannot show time-domain phase cancellation or cycle alignment.
 - **Aruston Implementation Blueprint:**
-  - **Dual Ring Buffers (`ableton-core`):** Capture 512 samples from Track A (Primary / Bass) and Sidechain Track B (External / Kick).
+  - **Dual Ring Buffers (`oxide-core`):** Capture 512 samples from Track A (Primary / Bass) and Sidechain Track B (External / Kick).
   - **Real-Time Phase Correlation Index:**
     $$\rho = \frac{\sum_{i=1}^{N} A_i \cdot B_i}{\sqrt{\sum_{i=1}^{N} A_i^2} \cdot \sqrt{\sum_{i=1}^{N} B_i^2}} \in [-1.0, +1.0]$$
   - **Phase Alignment Micro-Engine:** Integrated continuous $0^\circ \dots 360^\circ$ Hilbert transform phase rotator and micro-delay slider ($\pm 25\text{ ms}$) on the device itself.
-  - **Visualizer (`ableton-gui`):** Two superimposed phosphor waveforms (Kick in Neon Pink `#ff007f`, Bass in Cyan `#00e5ff`). When overlapping in phase, the intersection glows in bright white; when canceling, an amber warning badge displays: `LOW-END PHASE CANCELLATION: -4.2 dB`.
+  - **Visualizer (`oxide-gui`):** Two superimposed phosphor waveforms (Kick in Neon Pink `#ff007f`, Bass in Cyan `#00e5ff`). When overlapping in phase, the intersection glows in bright white; when canceling, an amber warning badge displays: `LOW-END PHASE CANCELLATION: -4.2 dB`.
 
 ---
 
@@ -89,7 +89,7 @@ Electronic music production operates under strict physical and acoustic constrai
 - **Aruston Implementation Blueprint:**
   - **Action Shortcut:** `Cmd+B` (Arrangement and Session).
   - **Workflow Mechanics:**
-    1. Instantly renders the selected clip or time selection offline via `ableton-bounce` in-process.
+    1. Instantly renders the selected clip or time selection offline via `oxide-bounce` in-process.
     2. Automatically creates a parent "Audio Comp Lane" and demotes the original MIDI/Synth device chain into an inactive, zero-CPU "Underlying Source Lane".
     3. Leaves an interactive banner on the track header: `[Audio Bounced] -> (Click to Revert to MIDI)`.
     4. Supports Group Bouncing: Renders all child tracks to a stereo stem while keeping child tracks folded and muted.
@@ -133,7 +133,7 @@ Electronic music production operates under strict physical and acoustic constrai
   - Ableton Live’s master channel offers only simple peak and RMS meters. It lacks ITU-R BS.1770 / EBU R128 integrated LUFS metering, short-term LUFS, True-Peak inter-sample over detection, and seamless A/B referencing.
   - Setting up an A/B reference track in Live requires routing track outputs to "Ext. Out" and mapping complex key commands to bypass master limiter chains.
 - **Aruston Implementation Blueprint:**
-  - **Integrated Master Telemetry Deck (`ableton-gui`):**
+  - **Integrated Master Telemetry Deck (`oxide-gui`):**
     - *Integrated LUFS (EBU R128)* with target marker (-8 LUFS for Club, -14 LUFS for Streaming).
     - *Short-Term (3-second) LUFS* for drop impact measurement.
     - *True-Peak Inter-Sample Metering* ($4\times$ oversampled sinc interpolation) with inter-sample clip alerts (> -0.3 dBFS).
@@ -153,7 +153,7 @@ Electronic music production operates under strict physical and acoustic constrai
   - Ableton Live 12 refuses to adopt CLAP, despite its adoption by u-he, FabFilter, Vital, and Bitwig.
   - Ableton hosts all plugins in-process: if a plugin crashes, the entire Ableton Live application exits immediately.
 - **Aruston Implementation Blueprint:**
-  - **Already Architected in Aruston (`ableton-plugin-scanner` & `HostedPluginDevice`):**
+  - **Already Architected in Aruston (`oxide-plugin-scanner` & `HostedPluginDevice`):**
     - Fully supports **AUv2, VST3, and CLAP**.
     - Out-of-process isolation architecture: Plugins run in a dedicated sandboxed subprocess communicating with the real-time audio engine via shared memory ring buffers.
     - If a third-party plugin throws a `SIGSEGV` or `SIGBUS`, Aruston detects the dead subprocess, quarantines the plugin, and presents a non-destructive GUI alert: `[Plugin XYZ Crashed: Click to Reload]`, keeping the DAW audio engine running without missing a sample!
@@ -188,18 +188,18 @@ flowchart LR
 ```
 
 ### Phase 1: Electronic Music Mixing Core (Immediate High-Impact Deliverables)
-1. **`DuckShaper` Device (`crates/ableton-fx`):**
+1. **`DuckShaper` Device (`crates/oxide-fx`):**
    - Provide factory presets for 4/4 House pumping, Techno rumble curve, and fast DnB ghost-kick sidechain.
    - Expose MCP tools `fx_set_duck_shaper` to allow AI agents to dial in ducking curves programmatically.
-2. **`MasterClipper` Device (`crates/ableton-fx`):**
+2. **`MasterClipper` Device (`crates/oxide-fx`):**
    - Add $4\times$ linear-phase oversampling with polynomial soft-knee and shaving meters.
    - Add preset bank: *Techno Master Shaver (1.5 dB)*, *RKT Heavy 808 Clip*, *Transparent EDM Ceiling*.
-3. **`PhaseScope` Visualizer (`crates/ableton-gui`):**
-   - Implement dual-channel ring buffer telemetry in `ableton-core`.
+3. **`PhaseScope` Visualizer (`crates/oxide-gui`):**
+   - Implement dual-channel ring buffer telemetry in `oxide-core`.
    - Render dual-color oscilloscope with phase correlation coefficient on the master bottom deck.
 
 ### Phase 2: Workflow Velocity & Club Readiness
-4. **`ClubDeck` Master Toolbar (`crates/ableton-gui` & `ableton-audio`):**
+4. **`ClubDeck` Master Toolbar (`crates/oxide-gui` & `oxide-audio`):**
    - Add integrated/short-term LUFS and True Peak detector to real-time audio callback.
    - Add global reference track slot with loudness matching and `\` A/B switch.
 5. **One-Click Bounce-in-Place (`Cmd+B`):**
@@ -208,7 +208,7 @@ flowchart LR
    - Add dynamic threshold parameters and sidechain collision overlays to `Eq8Device`.
 
 ### Phase 3: SOTA Neural Separation & Open Ecosystem
-7. **Local Neural Stem Splitter (`crates/ableton-project`):**
+7. **Local Neural Stem Splitter (`crates/oxide-project`):**
    - Package quantized RoFormer ONNX weights with Metal GPU acceleration.
    - Expose `clip_separate_stems` MCP tool.
 8. **CLAP & Out-of-Process Sandboxing Showcase:**

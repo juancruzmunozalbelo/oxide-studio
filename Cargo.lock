@@ -19,137 +19,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "366ffbaa4442f4684d91e2cd7c5ea7c4ed8add41959a31447066e279e432b618"
 
 [[package]]
-name = "ableton-audio"
-version = "1.0.0"
-dependencies = [
- "ableton-core",
- "ableton-drums",
- "ableton-dsp",
- "ableton-fx",
- "ableton-timeline",
- "cpal",
- "portable-atomic",
- "rtrb",
- "serde",
-]
-
-[[package]]
-name = "ableton-bounce"
-version = "1.0.0"
-dependencies = [
- "ableton-audio",
- "ableton-core",
- "ableton-drums",
- "ableton-dsp",
- "ableton-fx",
- "ableton-plugin-scanner",
- "ableton-project",
- "ableton-timeline",
- "serde",
-]
-
-[[package]]
-name = "ableton-core"
-version = "1.0.0"
-dependencies = [
- "serde",
-]
-
-[[package]]
-name = "ableton-drums"
-version = "1.0.0"
-dependencies = [
- "ableton-core",
- "ableton-dsp",
- "serde",
-]
-
-[[package]]
-name = "ableton-dsp"
-version = "1.0.0"
-dependencies = [
- "ableton-core",
- "serde",
- "serde_json",
-]
-
-[[package]]
-name = "ableton-fx"
-version = "1.0.0"
-dependencies = [
- "ableton-core",
- "ableton-drums",
- "ableton-dsp",
- "serde",
-]
-
-[[package]]
-name = "ableton-gui"
-version = "1.0.0"
-dependencies = [
- "ableton-audio",
- "ableton-bounce",
- "ableton-core",
- "ableton-drums",
- "ableton-dsp",
- "ableton-fx",
- "ableton-mcp",
- "ableton-plugin-scanner",
- "ableton-project",
- "ableton-timeline",
- "eframe",
- "egui",
-]
-
-[[package]]
-name = "ableton-mcp"
-version = "1.0.0"
-dependencies = [
- "ableton-audio",
- "ableton-bounce",
- "ableton-core",
- "ableton-drums",
- "ableton-dsp",
- "ableton-fx",
- "ableton-plugin-scanner",
- "ableton-project",
- "ableton-timeline",
- "serde",
- "serde_json",
-]
-
-[[package]]
-name = "ableton-plugin-scanner"
-version = "1.0.0"
-dependencies = [
- "ableton-core",
- "serde",
- "serde_json",
-]
-
-[[package]]
-name = "ableton-project"
-version = "1.0.0"
-dependencies = [
- "ableton-core",
- "ableton-dsp",
- "ableton-timeline",
- "flate2",
- "quick-xml 0.37.5",
- "serde",
- "serde_json",
-]
-
-[[package]]
-name = "ableton-timeline"
-version = "1.0.0"
-dependencies = [
- "ableton-core",
- "serde",
- "serde_json",
-]
-
-[[package]]
 name = "adler2"
 version = "2.0.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1880,6 +1749,137 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "36820e9051aca1014ddc75770aab4d68bc1e9e632f0f5627c4086bc216fb583b"
 dependencies = [
  "ttf-parser",
+]
+
+[[package]]
+name = "oxide-audio"
+version = "1.0.0"
+dependencies = [
+ "cpal",
+ "oxide-core",
+ "oxide-drums",
+ "oxide-dsp",
+ "oxide-fx",
+ "oxide-timeline",
+ "portable-atomic",
+ "rtrb",
+ "serde",
+]
+
+[[package]]
+name = "oxide-bounce"
+version = "1.0.0"
+dependencies = [
+ "oxide-audio",
+ "oxide-core",
+ "oxide-drums",
+ "oxide-dsp",
+ "oxide-fx",
+ "oxide-plugin-scanner",
+ "oxide-project",
+ "oxide-timeline",
+ "serde",
+]
+
+[[package]]
+name = "oxide-core"
+version = "1.0.0"
+dependencies = [
+ "serde",
+]
+
+[[package]]
+name = "oxide-drums"
+version = "1.0.0"
+dependencies = [
+ "oxide-core",
+ "oxide-dsp",
+ "serde",
+]
+
+[[package]]
+name = "oxide-dsp"
+version = "1.0.0"
+dependencies = [
+ "oxide-core",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "oxide-fx"
+version = "1.0.0"
+dependencies = [
+ "oxide-core",
+ "oxide-drums",
+ "oxide-dsp",
+ "serde",
+]
+
+[[package]]
+name = "oxide-gui"
+version = "1.0.0"
+dependencies = [
+ "eframe",
+ "egui",
+ "oxide-audio",
+ "oxide-bounce",
+ "oxide-core",
+ "oxide-drums",
+ "oxide-dsp",
+ "oxide-fx",
+ "oxide-mcp",
+ "oxide-plugin-scanner",
+ "oxide-project",
+ "oxide-timeline",
+]
+
+[[package]]
+name = "oxide-mcp"
+version = "1.0.0"
+dependencies = [
+ "oxide-audio",
+ "oxide-bounce",
+ "oxide-core",
+ "oxide-drums",
+ "oxide-dsp",
+ "oxide-fx",
+ "oxide-plugin-scanner",
+ "oxide-project",
+ "oxide-timeline",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "oxide-plugin-scanner"
+version = "1.0.0"
+dependencies = [
+ "oxide-core",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "oxide-project"
+version = "1.0.0"
+dependencies = [
+ "flate2",
+ "oxide-core",
+ "oxide-dsp",
+ "oxide-timeline",
+ "quick-xml 0.37.5",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "oxide-timeline"
+version = "1.0.0"
+dependencies = [
+ "oxide-core",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]

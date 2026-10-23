@@ -17,7 +17,7 @@ Protocolo operativo para posicionar **Oxide Studio** (DAW nativo en Rust con pue
 * **Repositorio:** `https://github.com/juancruzmunozalbelo/oxide-studio`
 * **Landing / Demo:** `https://juancruzmunozalbelo.github.io/oxide-studio/`
 * **Licencia:** `MIT OR Apache-2.0` (100% libre, sin telemetría, sin cuentas).
-* **Arquitectura:** Workspace de 11 crates en Rust (`ableton-core`, `ableton-dsp`, `ableton-drums`, `ableton-fx`, `ableton-audio`, `ableton-bounce`, `ableton-timeline`, `ableton-project`, `ableton-plugin-scanner`, `ableton-gui`, `ableton-mcp`).
+* **Arquitectura:** Workspace de 11 crates en Rust (`oxide-core`, `oxide-dsp`, `oxide-drums`, `oxide-fx`, `oxide-audio`, `oxide-bounce`, `oxide-timeline`, `oxide-project`, `oxide-plugin-scanner`, `oxide-gui`, `oxide-mcp`).
 * **Audio Real-Time:** Callback de `cpal` con cero alocaciones en el audio thread (`zero-allocation`). Comunicación entre UI/RPC y el motor de audio mediante colas SPSC lock-free (`rtrb` / `ringbuf`).
 * **GUI:** 60 FPS en modo inmediato con `egui` / `eframe` sobre `wgpu` (Metal en macOS). Incluye Session Matrix, Arrangement Timeline, Piano Roll con `Scale-Fold`, generador euclidiano, Chord Stacks y XY Perform Pad de 8 macros con Orbit LFO.
 * **Puente `.als` Bidireccional:** Lee y escribe archivos `.als` de Ableton Live 12 (gzip + XML) preservando pistas, clips MIDI, tempo y estructura de sesión/arreglo.

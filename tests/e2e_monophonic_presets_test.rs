@@ -7,7 +7,7 @@
 //! - /Users/juancruz/ableton-rea/src/data/mapping-catalog.json (17 XY macro mappings)
 //! - /Users/juancruz/ableton-rust/PROJECT.md
 
-use ableton_dsp::{
+use oxide_dsp::{
     evaluate_macro_target, load_mapping_catalog, load_preset_catalog, MacroBreakpoint,
     MonophonicVoice, NoteStack, VoiceReleaseAction, VoiceTriggerAction,
 };
@@ -189,7 +189,7 @@ fn test_17_xy_macro_mappings_and_breakpoints() {
     assert_eq!(ctrl_at_1, max_ctrl_x);
 
     // Test custom piecewise breakpoints
-    let custom_target = ableton_dsp::MacroTarget {
+    let custom_target = oxide_dsp::MacroTarget {
         parameter_name: "test".to_string(),
         min_control_value: 0.0,
         max_control_value: 1.0,

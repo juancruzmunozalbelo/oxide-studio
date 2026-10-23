@@ -13,14 +13,14 @@
 //! 10. Drum Rack (128-pad 8x16 banks, 16 visible, choke groups, solo/mute, sends)
 //! 11. Unified `InstrumentDevice` trait polymorphic dispatch across all instruments.
 
-use ableton_core::{AudioBuffer, Device, DeviceCategory, InstrumentDevice, MidiEvent, MusicalTime};
-use ableton_dsp::{
+use oxide_core::{AudioBuffer, Device, DeviceCategory, InstrumentDevice, MidiEvent, MusicalTime};
+use oxide_dsp::{
     AnalogDevice, CircuitModel, CollisionDevice, CytomicFilterType, DriftDevice,
     DriftOsc2Waveform, ElectricDevice, FilterRouting, FmAlgorithm, MeldDevice, MeldMacroEngine,
     MeldScale, OperatorDevice, OperatorFreqMode, OperatorWaveform, ResonatorStructure,
     TensionDevice, TensionExciterType, UnisonMode, WarpMode, WavetableCategory, WavetableDevice,
 };
-use ableton_drums::{
+use oxide_drums::{
     DrumRack, OneShotRetrigger, SimplerDevice, SimplerMode, SimplerWarpMode, SlicingMode,
     NUM_BANKS, PADS_PER_BANK, TOTAL_DRUM_PADS,
 };

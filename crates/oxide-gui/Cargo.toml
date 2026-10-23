@@ -1,0 +1,64 @@
+[package]
+name = "oxide-gui"
+version = "1.0.0"
+edition = "2021"
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
+default-run = "oxide-studio"
+
+[lib]
+name = "oxide_gui"
+path = "src/lib.rs"
+
+[[bin]]
+name = "oxide-studio"
+path = "../../src/main.rs"
+
+[dependencies]
+eframe = { version = "0.29", default-features = false, features = ["default_fonts", "wgpu"] }
+egui = "0.29"
+oxide-core = { path = "../oxide-core" }
+oxide-dsp = { path = "../oxide-dsp" }
+oxide-drums = { path = "../oxide-drums" }
+oxide-fx = { path = "../oxide-fx" }
+oxide-audio = { path = "../oxide-audio" }
+oxide-bounce = { path = "../oxide-bounce" }
+oxide-timeline = { path = "../oxide-timeline" }
+oxide-project = { path = "../oxide-project" }
+oxide-plugin-scanner = { path = "../oxide-plugin-scanner" }
+oxide-mcp = { path = "../oxide-mcp" }
+
+[[test]]
+name = "e2e_m11_gui_test"
+path = "../../tests/e2e_m11_gui_test.rs"
+
+[[test]]
+name = "e2e_workstation_clip_view_test"
+path = "tests/e2e_workstation_clip_view_test.rs"
+
+[[test]]
+name = "e2e_workstation_sync_sequencer_test"
+path = "tests/e2e_workstation_sync_sequencer_test.rs"
+
+[[test]]
+name = "e2e_workstation_layout_audit_test"
+path = "tests/e2e_workstation_layout_audit_test.rs"
+
+[[test]]
+name = "adversarial_m1_m3_test"
+path = "tests/adversarial_m1_m3_test.rs"
+
+[[test]]
+name = "adversarial_m2_m4_test"
+path = "tests/adversarial_m2_m4_test.rs"
+
+[[test]]
+name = "e2e_workstation_verification_test"
+path = "tests/e2e_workstation_verification_test.rs"
+
+[[test]]
+name = "adversarial_acoustic_layout_stress_test"
+path = "tests/adversarial_acoustic_layout_stress_test.rs"
+

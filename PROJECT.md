@@ -1,45 +1,45 @@
-# Project: ableton-rust (Native macOS Electronic Music DAW)
+# Project: oxide-studio (Native macOS Electronic Music DAW)
 
 ## Architecture Overview
-`ableton-rust` is a native macOS electronic music DAW implemented in Rust, inspired by the reverse-engineered architecture of Ableton Live 12.4.6 Suite and Ableton Learning Synths (`/Users/juancruz/ableton-rea`). It delivers a high-performance, single-window GPU-accelerated electronic music production studio.
+`oxide-studio` is a native macOS electronic music DAW implemented in Rust, built according to the clean-room Oxide Studio Workstation Architecture & DSP Specification. It delivers a high-performance, single-window GPU-accelerated electronic music production studio.
 
 ### Key Architectural Layers
-1. **Core Domain & Models (`ableton-core`)**:
+1. **Core Domain & Models (`oxide-core`)**:
    - Audio buffer structures, musical time representations (rational beats, bars, ticks), MIDI events, parameter IDs, and shared atomic telemetry types.
-2. **DSP & Built-in Synthesizer (`ableton-dsp`)**:
+2. **DSP & Built-in Synthesizer (`oxide-dsp`)**:
    - Mystran 2x-oversampled non-linear ZDF 4-pole low-pass ladder filter with Padé [4/4] tanh(x)/x saturation (20 Hz - 15 kHz, resonance <= 1.0).
    - Band-limited PolyBLEP Sawtooth and Square/PWM (5-95%) oscillators + 32-bit XorShift white noise generator.
    - Dual ADSR envelopes (Amp & Mod) with RNBO convex attack lockout and exponential decay/release.
    - 4-shape LFO (Sine, Saw Down, Square, Sample & Hold).
    - Monophonic last-note priority voice stack with exponential one-pole portamento glide.
    - 38 factory synth presets catalog & 17 XY macro mappings with piecewise breakpoint interpolation.
-3. **Electronic Drum Rack & Sample Engine (`ableton-drums`)**:
+3. **Electronic Drum Rack & Sample Engine (`oxide-drums`)**:
    - 16-pad drum machine with 32-voice allocation pool.
-   - 909 sample playback (`kick.wav`, `snare.wav`, `hihat.wav` from `/Users/juancruz/ableton-rea/public/sounds/`) + synthesized electronic percussion.
+   - 909 sample playback (`kick.wav`, `snare.wav`, `hihat.wav` from `assets/`) + synthesized electronic percussion.
    - Per-pad controls (level, pan, pitch transpose, decay envelope) and choke/mute groups with 5 ms clickless fadeout.
-4. **Mixer & FX Chain (`ableton-fx`)**:
+4. **Mixer & FX Chain (`oxide-fx`)**:
    - Per-track volume, pan, mute, solo, peak/RMS ballistics metering.
    - Saturator / overdrive distortion (Padé [4/4] tanh approximation).
    - Tempo-synced ping-pong delay with feedback filter.
    - Reverb (algorithmic FDN / convolution with impulse response).
    - Master 128-sample lookahead brickwall limiter (-0.3 dBFS ceiling).
-5. **Real-Time Audio Engine & CoreAudio HAL (`ableton-audio`)**:
+5. **Real-Time Audio Engine & CoreAudio HAL (`oxide-audio`)**:
    - Zero-allocation steady-state audio callback running on CoreAudio HAL thread (`com.apple.audio.IOThread.client`) via `cpal`.
    - Lock-free SPSC command queue (`AudioCommand`) and triple-buffered telemetry queue (`AudioTelemetry`) via `rtrb`.
-6. **Headless & Real-Time WAV Bounce Engine (`ableton-bounce`)**:
+6. **Headless & Real-Time WAV Bounce Engine (`oxide-bounce`)**:
    - Offline multi-track render engine exporting 16-bit PCM (TPDF dither) or 32-bit float stereo `.wav` files with verified RIFF headers.
    - Headless CLI integration (`--render-demo <path>`).
-7. **Session Matrix, Arrangement Timeline & Persistence (`ableton-timeline` & `ableton-project`)**:
+7. **Session Matrix, Arrangement Timeline & Persistence (`oxide-timeline` & `oxide-project`)**:
    - Session clip matrix with quantized launching (`1 bar`, `1/4`, `immediate`), clip slot state machine, and pattern looping.
    - Linear multi-track arrangement timeline with automation curve interpolation (linear & bezier/power curves).
    - Session-to-Arrangement recording with "Back to Arrangement" track override.
    - `serde`-driven JSON project serialization (`DAWProject`).
-8. **Out-of-Process AU/VST3 Plugin Scanner (`ableton-plugin-scanner`)**:
-   - Reverse-engineered from Live 12's `Ableton Plugin Scanner`.
+8. **Out-of-Process AU/VST3 Plugin Scanner (`oxide-plugin-scanner`)**:
+   - Oxide Studio crash-isolated plugin scanner.
    - Scans `/Library/Audio/Plug-Ins/VST3`, `~/Library/Audio/Plug-Ins/VST3`, `/Library/Audio/Plug-Ins/Components`, and `~/Library/Audio/Plug-Ins/Components`.
    - Out-of-process crash isolation (SIGSEGV/SIGBUS quarantine) via CLI `--scan-plugins`.
    - JSON manifest cache.
-9. **Single-Window 60 FPS GPU Studio UI/UX (`ableton-gui` & main binary `ableton-rust`)**:
+9. **Single-Window 60 FPS GPU Studio UI/UX (`oxide-gui` & main binary `oxide-studio`)**:
    - Native macOS single window using `egui` + `eframe` over `wgpu` (Metal).
    - Dark carbon studio theme (`#07080a`, `#111318`) with high-contrast accents (`#ffbe00`, `#00d2ff`, `#00e676`).
    - Top transport & telemetry bar, Center workspace (Session Matrix vs Linear Arrangement toggle/split), Bottom deck (Device controls, Piano Roll / 16-step drum sequencer, XY Perform Pad).
@@ -57,7 +57,7 @@ Every feature from the original request and survey is assigned to a milestone:
 | 2 | PolyBLEP Oscillators | Band-limited Sawtooth, Square/PWM (5-95%), and 32-bit XorShift White Noise generator | M1 | ORIGINAL_REQUEST §R1.1 |
 | 3 | ADSR Envelopes & 4-Shape LFO | RNBO convex attack lockout, exponential decay/release, LFO (Sine, Saw Down, Square, S&H) | M1 | ORIGINAL_REQUEST §R1.1 |
 | 4 | Monophonic Voicing & Portamento | Monophonic last-note priority stack, legato gate persistence, exponential one-pole glide | M1 | ORIGINAL_REQUEST §R1.1 |
-| 5 | Presets & Macro XY Catalog | 38 factory synth presets & 17 XY macro breakpoint curves imported from ableton-rea | M1 | ORIGINAL_REQUEST §R1.1 |
+| 5 | Presets & Macro XY Catalog | 38 factory synth presets & 17 XY macro breakpoint curves based on Oxide DSP specifications | M1 | ORIGINAL_REQUEST §R1.1 |
 | 6 | 909 Drum Rack (Sample + Synth) | 16-pad drum machine, 909 sample playback (kick, snare, hihat) + synth percussion, choke groups | M2 | ORIGINAL_REQUEST §R1.2 |
 | 7 | Insert & Master FX Chain | Saturator (Padé tanh), tempo-synced delay, reverb (FDN/convolution), master lookahead limiter | M2 | ORIGINAL_REQUEST §R1.3 |
 | 8 | Multi-Track Mixer & Metering | Volume, pan, mute, solo, and peak/RMS ballistics metering per track and master bus | M2 | ORIGINAL_REQUEST §R1.3 |
@@ -75,7 +75,7 @@ Every feature from the original request and survey is assigned to a milestone:
 | 20 | Interactive XY Perform Pad | Performance XY pad with phosphor decay trail, parameter cross-modulation | M5 | ORIGINAL_REQUEST §R4.1 |
 | 21 | Playable Computer Keyboards | Piano layout (A-S-D-F... + W-E-T...) and Wicki-Hayden Isomorphic layout with octave shift | M5 | ORIGINAL_REQUEST §R4.2 |
 | 22 | Comprehensive E2E Verification | 100% pass of Tiers 1-4 E2E tests, Tier 5 adversarial hardening, and full acceptance suite | M6 | Acceptance Criteria |
-| 23 | Model Context Protocol Server | JSON-RPC 2.0 stdio MCP server (crates/ableton-mcp & --mcp) for full autonomous control | M7 | ORIGINAL_REQUEST §R5 |
+| 23 | Model Context Protocol Server | JSON-RPC 2.0 stdio MCP server (crates/oxide-mcp & --mcp) for full autonomous control | M7 | ORIGINAL_REQUEST §R5 |
 
 ---
 
@@ -83,19 +83,19 @@ Every feature from the original request and survey is assigned to a milestone:
 
 | # | Milestone Name | Scope | Dependencies | Status |
 |---|----------------|-------|-------------|--------|
-| M0 | Workspace Setup & Core Crates | Workspace Cargo.toml, toolchain environment, `ableton-core` definitions | None | DONE |
-| M1 | DSP Core & Synth Engine | `ableton-dsp`: Mystran ZDF, PolyBLEP, ADSR, LFO, Voicing, 38 Presets, 17 Mappings | M0 | DONE |
-| M2 | Drums, FX, Audio Engine & Bounce | `ableton-drums`, `ableton-fx`, `ableton-audio`, `ableton-bounce`, CLI `--render-demo` | M1 | DONE |
-| M3 | Session, Arrangement & Project | `ableton-timeline`, `ableton-project`, Session matrix, timeline, serde persistence | M2 | DONE |
-| M4 | AU/VST3 Plugin Scanner | `ableton-plugin-scanner`, crash isolation, `--scan-plugins`, manifest cache | M0 | DONE |
-| M5 | 60 FPS Single-Window UI/UX | `ableton-gui`, egui/eframe Metal, visualizers, step sequencer, XY pad, keyboards | M1, M2, M3, M4 | DONE |
+| M0 | Workspace Setup & Core Crates | Workspace Cargo.toml, toolchain environment, `oxide-core` definitions | None | DONE |
+| M1 | DSP Core & Synth Engine | `oxide-dsp`: Mystran ZDF, PolyBLEP, ADSR, LFO, Voicing, 38 Presets, 17 Mappings | M0 | DONE |
+| M2 | Drums, FX, Audio Engine & Bounce | `oxide-drums`, `oxide-fx`, `oxide-audio`, `oxide-bounce`, CLI `--render-demo` | M1 | DONE |
+| M3 | Session, Arrangement & Project | `oxide-timeline`, `oxide-project`, Session matrix, timeline, serde persistence | M2 | DONE |
+| M4 | AU/VST3 Plugin Scanner | `oxide-plugin-scanner`, crash isolation, `--scan-plugins`, manifest cache | M0 | DONE |
+| M5 | 60 FPS Single-Window UI/UX | `oxide-gui`, egui/eframe Metal, visualizers, step sequencer, XY pad, keyboards | M1, M2, M3, M4 | DONE |
 | M6 | Final E2E Integration & Audit | E2E suite pass, headless bounce verify, roundtrip test, 60 FPS GUI check | M1, M2, M3, M4, M5 | DONE |
-| M7 | Full-Control MCP Server | `crates/ableton-mcp`, `--mcp` CLI flag, `tests/e2e_mcp_server_test.rs` | M0..M6 | DONE |
+| M7 | Full-Control MCP Server | `crates/oxide-mcp`, `--mcp` CLI flag, `tests/e2e_mcp_server_test.rs` | M0..M6 | DONE |
 | M8 | Live 12 Flagship Instruments | Wavetable, Operator, Drift, Meld, Analog, Collision, Tension, Electric, Simpler, 128-Pad Drum Rack | M0..M7 | DONE |
 | M9 | Dynamic Chains, FX & MIDI Tools | Dynamic device chains, EQ Eight, Glue, Roar, Auto Filter, OTT, Hybrid Reverb, etc. + MIDI FX/Generators/Transformers + HostedPluginDevice (Issue #14) | M8 | DONE |
 | M10 | Warping, Grooves, Take Lanes & Mixer | 6-mode warping, Groove Pool (.agr), unlimited tracks/returns, sends, take lanes comping, automation overlays | M8, M9 | DONE |
 | M11 | Complete Live 12 Workstation GUI | Top Scale Bar, Left Browser + Sound Similarity, Session/Arrangement + Returns, Bottom Clip View & Device Chain visualizers | M8, M9, M10 | DONE |
-| M12 | Dual-Target MCP & LOM Remote Script | 76-tool MCP server in `crates/ableton-mcp` + `AbletonMCP` Python 3.11 Remote Script on `127.0.0.1:9877` | M8, M9, M10, M11 | DONE |
+| M12 | Dual-Target MCP & LOM Remote Script | 76-tool MCP server in `crates/oxide-mcp` + `AbletonMCP` Python 3.11 Remote Script on `127.0.0.1:9877` | M8, M9, M10, M11 | DONE |
 | M13 | Comprehensive E2E Verification & Audit | Tiers 1-4 E2E tests, audio validation, py_compile, simulated socket E2E, forensic integrity audit | M8..M12 | DONE |
 
 
@@ -106,37 +106,37 @@ Every feature from the original request and survey is assigned to a milestone:
 /Users/juancruz/ableton-rust/
 ├── Cargo.toml                      # Root workspace manifest
 ├── crates/
-│   ├── ableton-core/               # Fundamental types: AudioBuffer, MusicalTime, MidiEvent, AtomicTelemetry
+│   ├── oxide-core/               # Fundamental types: AudioBuffer, MusicalTime, MidiEvent, AtomicTelemetry
 │   │   ├── Cargo.toml
 │   │   └── src/
-│   ├── ableton-dsp/                # Mystran ZDF ladder, PolyBLEP, ADSR, LFO, Synth, Presets, Mappings
+│   ├── oxide-dsp/                # Mystran ZDF ladder, PolyBLEP, ADSR, LFO, Synth, Presets, Mappings
 │   │   ├── Cargo.toml
 │   │   └── src/
-│   ├── ableton-drums/              # 16-pad Drum Rack, 909 sample player, synth drums, choke groups
+│   ├── oxide-drums/              # 16-pad Drum Rack, 909 sample player, synth drums, choke groups
 │   │   ├── Cargo.toml
 │   │   └── src/
-│   ├── ableton-fx/                 # Saturator, ping-pong delay, reverb, limiter, meters
+│   ├── oxide-fx/                 # Saturator, ping-pong delay, reverb, limiter, meters
 │   │   ├── Cargo.toml
 │   │   └── src/
-│   ├── ableton-audio/              # CoreAudio HAL via cpal, zero-alloc audio loop, SPSC queues
+│   ├── oxide-audio/              # CoreAudio HAL via cpal, zero-alloc audio loop, SPSC queues
 │   │   ├── Cargo.toml
 │   │   └── src/
-│   ├── ableton-bounce/             # Headless multi-track bounce, 16/32-bit WAV RIFF writer
+│   ├── oxide-bounce/             # Headless multi-track bounce, 16/32-bit WAV RIFF writer
 │   │   ├── Cargo.toml
 │   │   └── src/
-│   ├── ableton-timeline/           # Session matrix, arrangement timeline, automation curves
+│   ├── oxide-timeline/           # Session matrix, arrangement timeline, automation curves
 │   │   ├── Cargo.toml
 │   │   └── src/
-│   ├── ableton-project/            # DAWProject serialization (serde JSON/RON), schema
+│   ├── oxide-project/            # DAWProject serialization (serde JSON/RON), schema
 │   │   ├── Cargo.toml
 │   │   └── src/
-│   ├── ableton-plugin-scanner/     # Out-of-process AU/VST3 scanner, crash-isolated worker
+│   ├── oxide-plugin-scanner/     # Out-of-process AU/VST3 scanner, crash-isolated worker
 │   │   ├── Cargo.toml
 │   │   └── src/
-│   ├── ableton-gui/                # egui/eframe single-window studio, visualizers, perform pad
+│   ├── oxide-gui/                # egui/eframe single-window studio, visualizers, perform pad
 │   │   ├── Cargo.toml
 │   │   └── src/
-│   └── ableton-mcp/                # Full-control Model Context Protocol server (JSON-RPC 2.0 stdio)
+│   └── oxide-mcp/                # Full-control Model Context Protocol server (JSON-RPC 2.0 stdio)
 │       ├── Cargo.toml
 │       └── src/
 ├── src/                            # Main application binary entrypoint
@@ -160,7 +160,7 @@ Every feature from the original request and survey is assigned to a milestone:
 
 ## Interface Contracts
 
-### 1. `ableton-core` ↔ Audio Thread & DSP
+### 1. `oxide-core` ↔ Audio Thread & DSP
 ```rust
 pub struct AudioBuffer {
     pub left: [f32; 1024],

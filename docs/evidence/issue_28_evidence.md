@@ -13,8 +13,8 @@
 | Gate | Verification Domain | Test Target | Status | Passing Tests |
 | :--- | :--- | :--- | :---: | :---: |
 | **Gate 1** | **Ableton Manual & OKF Doc Sync** | `docs/okf/OXIDE_STUDIO_MANUAL_OKF.md` & `okf_knowledge.rs` (`OKF-01..10`) | **PASS** | 23 tests |
-| **Gate 2** | **End-to-End Manual & Real-Time DSP Audio** | `e2e_ableton_manual_verification_test` & `ableton-drums` / `ableton-audio` | **PASS** | 88 tests |
-| **Gate 3** | **Anti-Breakage Layout Guard (576-Frame Matrix)** | `e2e_live12_layout_audit_test` & `adversarial_acoustic_layout_stress_test` | **PASS** | 10 tests |
+| **Gate 2** | **End-to-End Manual & Real-Time DSP Audio** | `e2e_workstation_verification_test` & `oxide-drums` / `oxide-audio` | **PASS** | 88 tests |
+| **Gate 3** | **Anti-Breakage Layout Guard (576-Frame Matrix)** | `e2e_workstation_layout_audit_test` & `adversarial_acoustic_layout_stress_test` | **PASS** | 10 tests |
 | **Total** | **Comprehensive Full Suite DoD Gate** | **All 3 Verification Gates Combined** | **PASS** | **121 tests** |
 
 ---

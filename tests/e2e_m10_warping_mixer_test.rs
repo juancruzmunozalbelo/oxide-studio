@@ -25,8 +25,8 @@
 //!    - Multi-lane parameter automation overlays with Linear, Exponential, Logarithmic, SCurve, and Step curves.
 
 use std::f32::consts::PI;
-use ableton_audio::ModularAudioMixer;
-use ableton_timeline::{
+use oxide_audio::ModularAudioMixer;
+use oxide_timeline::{
     decode_wav_pcm, ArrangementClip, AutomationCurveType, AutomationPoint, ClipPattern,
     CrossfadeAssign, GroovePool, MicroCrossfade, MidiNote, MidiPattern, MultiLaneAutomation,
     OWarper, OutputDestination, SendRoutingMode, TrackCompingManager, TrackManager, TrackType,
