@@ -44,3 +44,7 @@ path = "../../tests/e2e_m12_mcp_bridge_test.rs"
 name = "adversarial_m12_stress_test"
 path = "../../tests/adversarial_m12_stress_test.rs"
 
+[[test]]
+name = "e2e_production_projects_mcp_test"
+path = "tests/e2e_production_projects_mcp_test.rs"
+

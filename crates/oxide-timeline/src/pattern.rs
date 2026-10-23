@@ -291,6 +291,8 @@ pub struct AudioClipData {
     pub gain_db: f32,
     pub warp_mode: String,
     pub length_beats: f64,
+    #[serde(skip)]
+    pub samples: Vec<f32>,
 }
 
 impl AudioClipData {
@@ -302,6 +304,7 @@ impl AudioClipData {
             gain_db: 0.0,
             warp_mode: "Beats".to_string(),
             length_beats,
+            samples: Vec::new(),
         }
     }
 }

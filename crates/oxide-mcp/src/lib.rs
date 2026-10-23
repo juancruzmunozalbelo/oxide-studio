@@ -39,7 +39,7 @@ pub use protocol::{
 pub use resources::{get_resource_definitions, read_resource};
 pub use server::McpServer;
 pub use state::DawState;
-pub use tools::{call_tool, get_tool_definitions};
+pub use tools::{call_tool, dispatch_tool_call, get_tool_definitions};
 
 /// Entry point to run line-delimited JSON-RPC 2.0 MCP server over standard I/O.
 pub fn run_mcp_server_stdio() {

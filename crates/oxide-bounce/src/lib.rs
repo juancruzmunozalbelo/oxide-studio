@@ -16,7 +16,7 @@ pub use pack_formats::{
     calculate_crc32, AlpError, AlpPackArchive, AlpPackEntry, DawClip, DawNote, DawProject,
     DawProjectError, DawProjectExchange, DawTrack, FreezeCodecError, LosslessFreezeCodec,
 };
-pub use renderer::DemoArrangementRenderer;
+pub use renderer::{render_project_to_wav, render_project_window_to_wav, DemoArrangementRenderer};
 pub use stems::{
     export_all_tracks_as_stems, export_remix_stems, export_remix_stems_from_wav,
     separate_audio_into_4_stems, separate_audio_streams, separate_interleaved_samples,

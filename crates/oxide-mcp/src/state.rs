@@ -8,11 +8,11 @@ use oxide_core::AudioTelemetry;
 use oxide_dsp::SynthEngine;
 use oxide_drums::DrumRack;
 use oxide_fx::{FdnReverb, MasterLimiter, Mixer, Saturator, TempoDelay};
-use oxide_project::{DAWProject, TrackDefinition};
+use oxide_project::{DAWProject, InstrumentConfig, TrackDefinition, TrackType};
 use oxide_timeline::groove::GroovePool;
 use oxide_timeline::track::TrackManager;
 use oxide_timeline::warping::WarpedAudioClip;
-use oxide_timeline::{ArrangementTimeline, SessionMatrix};
+use oxide_timeline::{ArrangementTimeline, AudioClipData, ClipPattern, SessionClip, SessionMatrix};
 
 use crate::bridge::TcpLomClient;
 use crate::browser::BrowserLibrary;
@@ -130,17 +130,99 @@ impl DawState {
         self.lom_client = TcpLomClient::default();
     }
 
-    /// Synchronize project document with live state before saving.
+    /// Synchronize project document with live state before saving or rendering.
     pub fn sync_project_from_state(&mut self) {
         self.project.transport.bpm = self.bpm;
         self.project.transport.swing_16th_ratio = self.swing;
-        // Sync mixer tracks
+
+        let max_track_idx = self
+            .project
+            .tracks
+            .len()
+            .max(self.matrix.tracks.len())
+            .max(self.timeline.tracks.len())
+            .max(
+                self.audio_clips
+                    .keys()
+                    .map(|(t, _)| (*t as usize) + 1)
+                    .max()
+                    .unwrap_or(0),
+            );
+
+        while self.project.tracks.len() < max_track_idx {
+            let tid = self.project.tracks.len() as u32;
+            self.project
+                .tracks
+                .push(TrackDefinition::new_synth(tid, format!("Track {}", tid)));
+        }
+
+        // Sync mixer tracks (only overwrite if mixer track has non-default state or project track is within mixer bounds)
         for (i, trk) in self.project.tracks.iter_mut().enumerate() {
             if let Some(m_trk) = self.mixer.tracks.get(i) {
-                trk.mixer.volume_db = m_trk.volume_db;
-                trk.mixer.pan = m_trk.pan;
-                trk.mixer.mute = m_trk.mute;
-                trk.mixer.solo = m_trk.solo;
+                if m_trk.volume_db != 0.0 || m_trk.pan != 0.0 || m_trk.mute || m_trk.solo {
+                    trk.mixer.volume_db = m_trk.volume_db;
+                    trk.mixer.pan = m_trk.pan;
+                    trk.mixer.mute = m_trk.mute;
+                    trk.mixer.solo = m_trk.solo;
+                }
+            }
+        }
+
+        // Sync session matrix clips into project tracks
+        for (i, m_track) in self.matrix.tracks.iter().enumerate() {
+            if let Some(p_track) = self.project.tracks.get_mut(i) {
+                for (slot_idx, slot) in m_track.slots.iter().enumerate() {
+                    if let Some(clip) = &slot.clip {
+                        while p_track.session_clips.len() <= slot_idx {
+                            p_track.session_clips.push(None);
+                        }
+                        p_track.session_clips[slot_idx] = Some(clip.clone());
+                    }
+                }
+            }
+        }
+
+        // Sync warped audio clips into project tracks
+        for (&(track_id, slot_id), w_clip) in &self.audio_clips {
+            if let Some(p_track) = self.project.tracks.get_mut(track_id as usize) {
+                p_track.track_type = TrackType::Audio;
+                p_track.instrument = InstrumentConfig::None;
+                let slot_idx = slot_id as usize;
+                while p_track.session_clips.len() <= slot_idx {
+                    p_track.session_clips.push(None);
+                }
+                let clip_id = (track_id * 100) + slot_id + 1;
+                let name = Path::new(&w_clip.name)
+                    .file_stem()
+                    .and_then(|s| s.to_str())
+                    .unwrap_or("Audio Clip")
+                    .to_string();
+                let audio_data = AudioClipData {
+                    file_path: w_clip.name.clone(),
+                    sample_rate: w_clip.sample_rate,
+                    channels: w_clip.channels,
+                    length_beats: w_clip.length_beats,
+                    gain_db: 0.0,
+                    warp_mode: format!("{:?}", w_clip.warper.config.mode),
+                    samples: w_clip.raw_samples.clone(),
+                };
+                p_track.session_clips[slot_idx] = Some(SessionClip::new(
+                    clip_id,
+                    name,
+                    ClipPattern::Audio(audio_data),
+                ));
+            }
+        }
+
+        // Sync arrangement timeline clips and automation lanes into project tracks
+        for (i, a_track) in self.timeline.tracks.iter().enumerate() {
+            if let Some(p_track) = self.project.tracks.get_mut(i) {
+                if !a_track.clips.is_empty() {
+                    p_track.arrangement_clips = a_track.clips.clone();
+                }
+                if !a_track.automation_lanes.is_empty() {
+                    p_track.automation_lanes = a_track.automation_lanes.clone();
+                }
             }
         }
     }

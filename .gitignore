@@ -4,6 +4,8 @@
 .DS_Store
 .agents/
 *.wav
+!projects/*.wav
+!projects/melodic_techno_stems/*.wav
 __pycache__/
 *.pyc
 .env

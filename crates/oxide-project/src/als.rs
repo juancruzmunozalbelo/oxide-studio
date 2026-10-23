@@ -3,10 +3,10 @@
 use std::collections::{BTreeMap, HashMap};
 use std::fs;
 use std::io::{Read, Write};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use oxide_timeline::{
-    ClipPattern, MidiNote, MidiPattern, Scene, SessionClip,
+    ArrangementClip, ClipPattern, MidiNote, MidiPattern, Scene, SessionClip,
 };
 use flate2::read::GzDecoder;
 use flate2::write::GzEncoder;
@@ -183,6 +183,446 @@ pub fn parse_xml_to_node(xml: &str) -> Result<XmlNode, DAWProjectError> {
     root.ok_or_else(|| {
         DAWProjectError::Validation("Empty XML document or missing root element".to_string())
     })
+}
+
+/// Read PCM samples from a standard RIFF WAV file, capped to `max_seconds`.
+/// Returns `(sample_rate, channels, interleaved_stereo_samples)`.
+pub fn read_wav_preview<P: AsRef<Path>>(path: P, max_seconds: f64) -> Option<(u32, u16, Vec<f32>)> {
+    let bytes = fs::read(path).ok()?;
+    if bytes.len() < 44 || &bytes[0..4] != b"RIFF" || &bytes[8..12] != b"WAVE" {
+        return None;
+    }
+
+    let mut pos = 12;
+    let mut sample_rate = 44100u32;
+    let mut channels = 2u16;
+    let mut bits_per_sample = 16u16;
+    let mut audio_format = 1u16;
+    let mut data_offset = 0;
+    let mut data_len = 0;
+
+    while pos + 8 <= bytes.len() {
+        let chunk_id = &bytes[pos..pos + 4];
+        let chunk_size = u32::from_le_bytes(bytes[pos + 4..pos + 8].try_into().ok()?) as usize;
+        pos += 8;
+
+        if chunk_id == b"fmt " {
+            if chunk_size < 16 || pos + 16 > bytes.len() {
+                return None;
+            }
+            audio_format = u16::from_le_bytes(bytes[pos..pos + 2].try_into().ok()?);
+            channels = u16::from_le_bytes(bytes[pos + 2..pos + 4].try_into().ok()?);
+            sample_rate = u32::from_le_bytes(bytes[pos + 4..pos + 8].try_into().ok()?);
+            bits_per_sample = u16::from_le_bytes(bytes[pos + 14..pos + 16].try_into().ok()?);
+            if audio_format == 0xFFFE && chunk_size >= 40 && pos + 26 <= bytes.len() {
+                let sub_format = u16::from_le_bytes(bytes[pos + 24..pos + 26].try_into().ok()?);
+                audio_format = sub_format;
+            }
+            pos += chunk_size;
+        } else if chunk_id == b"data" {
+            data_offset = pos;
+            data_len = chunk_size.min(bytes.len().saturating_sub(pos));
+            break;
+        } else {
+            pos += chunk_size;
+        }
+    }
+
+    if data_offset == 0 || channels == 0 || sample_rate == 0 {
+        return None;
+    }
+
+    let raw_data = &bytes[data_offset..data_offset + data_len];
+    let max_frames = if max_seconds > 0.0 {
+        (max_seconds * sample_rate as f64).ceil() as usize
+    } else {
+        usize::MAX
+    };
+
+    let mut stereo_samples = Vec::new();
+    let is_float = audio_format == 3;
+
+    if is_float && bits_per_sample == 32 {
+        let count = data_len / 4;
+        let total_frames = count / (channels as usize);
+        let frames_to_read = total_frames.min(max_frames);
+        stereo_samples.reserve(frames_to_read * 2);
+        for f in 0..frames_to_read {
+            let base = f * (channels as usize);
+            let s_left = f32::from_le_bytes(raw_data[base * 4..(base + 1) * 4].try_into().ok()?);
+            let s_right = if channels > 1 {
+                f32::from_le_bytes(raw_data[(base + 1) * 4..(base + 2) * 4].try_into().ok()?)
+            } else {
+                s_left
+            };
+            stereo_samples.push(if s_left.is_finite() { s_left.clamp(-16.0, 16.0) } else { 0.0 });
+            stereo_samples.push(if s_right.is_finite() { s_right.clamp(-16.0, 16.0) } else { 0.0 });
+        }
+    } else if bits_per_sample == 24 {
+        let count = data_len / 3;
+        let total_frames = count / (channels as usize);
+        let frames_to_read = total_frames.min(max_frames);
+        stereo_samples.reserve(frames_to_read * 2);
+        for f in 0..frames_to_read {
+            let base = f * (channels as usize);
+            let b0 = &raw_data[base * 3..(base + 1) * 3];
+            let raw0 = ((b0[2] as i32) << 24) | ((b0[1] as i32) << 16) | ((b0[0] as i32) << 8);
+            let s_left = (raw0 >> 8) as f32 / 8_388_608.0;
+
+            let s_right = if channels > 1 {
+                let b1 = &raw_data[(base + 1) * 3..(base + 2) * 3];
+                let raw1 = ((b1[2] as i32) << 24) | ((b1[1] as i32) << 16) | ((b1[0] as i32) << 8);
+                (raw1 >> 8) as f32 / 8_388_608.0
+            } else {
+                s_left
+            };
+            stereo_samples.push(if s_left.is_finite() { s_left } else { 0.0 });
+            stereo_samples.push(if s_right.is_finite() { s_right } else { 0.0 });
+        }
+    } else if bits_per_sample == 16 {
+        let count = data_len / 2;
+        let total_frames = count / (channels as usize);
+        let frames_to_read = total_frames.min(max_frames);
+        stereo_samples.reserve(frames_to_read * 2);
+        for f in 0..frames_to_read {
+            let base = f * (channels as usize);
+            let val0 = i16::from_le_bytes(raw_data[base * 2..(base + 1) * 2].try_into().ok()?);
+            let s_left = val0 as f32 / 32768.0;
+
+            let s_right = if channels > 1 {
+                let val1 = i16::from_le_bytes(raw_data[(base + 1) * 2..(base + 2) * 2].try_into().ok()?);
+                val1 as f32 / 32768.0
+            } else {
+                s_left
+            };
+            stereo_samples.push(if s_left.is_finite() { s_left } else { 0.0 });
+            stereo_samples.push(if s_right.is_finite() { s_right } else { 0.0 });
+        }
+    } else {
+        return None;
+    }
+
+    Some((sample_rate, 2, stereo_samples))
+}
+
+/// Resolves an audio sample path against the filesystem or relative to the ALS base directory.
+pub fn resolve_sample_path(
+    path_val: &str,
+    relative_path_val: &str,
+    base_dir: Option<&Path>,
+) -> PathBuf {
+    // 1. Direct path exists on disk
+    if !path_val.is_empty() {
+        let p = Path::new(path_val);
+        if p.exists() {
+            return p.to_path_buf();
+        }
+    }
+
+    // 2. Resolve relative to base_dir
+    if let Some(base) = base_dir {
+        // Try relative_path_val
+        if !relative_path_val.is_empty() {
+            let rel_clean = relative_path_val.replace('\\', "/");
+            let p1 = base.join(&rel_clean);
+            if p1.exists() {
+                return p1;
+            }
+            let trimmed = rel_clean.trim_start_matches('/');
+            let p2 = base.join(trimmed);
+            if p2.exists() {
+                return p2;
+            }
+        }
+
+        // Try extracting suffix starting from "Samples/" or "samples/" from path_val or relative_path_val
+        for candidate in [relative_path_val, path_val] {
+            let norm = candidate.replace('\\', "/");
+            if let Some(idx) = norm.to_lowercase().find("samples/") {
+                let suffix = &norm[idx..];
+                let p = base.join(suffix);
+                if p.exists() {
+                    return p;
+                }
+            }
+        }
+
+        // Fallback with base_dir if relative path exists as a string
+        if !relative_path_val.is_empty() {
+            let rel_clean = relative_path_val.replace('\\', "/");
+            return base.join(rel_clean.trim_start_matches('/'));
+        }
+    }
+
+    // Fallback to path_val or relative_path_val
+    if !path_val.is_empty() {
+        PathBuf::from(path_val)
+    } else {
+        PathBuf::from(relative_path_val)
+    }
+}
+
+fn parse_midi_clip_node(
+    node: &XmlNode,
+    fallback_id: u32,
+    fallback_name: &str,
+    fallback_color: &str,
+) -> (u32, String, String, bool, f64, f64, f64, f64, MidiPattern) {
+    let clip_id = node
+        .get_attr("Id")
+        .or_else(|| node.find_child("LomId").and_then(|l| l.get_attr_or_text("Value")))
+        .and_then(|v| v.parse::<u32>().ok())
+        .unwrap_or(fallback_id);
+
+    let name = node
+        .find_child("Name")
+        .and_then(|n| n.get_attr_or_text("Value"))
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| fallback_name.to_string());
+
+    let clip_color = node
+        .find_child("ColorHex")
+        .and_then(|c| c.get_attr_or_text("Value"))
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| fallback_color.to_string());
+
+    let loop_node = node.find_child("Loop");
+    let loop_on = loop_node
+        .and_then(|l| l.find_child("LoopOn"))
+        .and_then(|v| v.get_attr_or_text("Value"))
+        .and_then(|v| v.parse::<bool>().ok())
+        .unwrap_or(true);
+    let loop_start = loop_node
+        .and_then(|l| l.find_child("LoopStart"))
+        .and_then(|v| v.get_attr_or_text("Value"))
+        .and_then(|v| v.parse::<f64>().ok())
+        .unwrap_or(0.0);
+    let loop_end = loop_node
+        .and_then(|l| l.find_child("LoopEnd"))
+        .and_then(|v| v.get_attr_or_text("Value"))
+        .and_then(|v| v.parse::<f64>().ok())
+        .unwrap_or(4.0);
+
+    let cur_start = node
+        .find_child("CurrentStart")
+        .and_then(|c| c.get_attr_or_text("Value"))
+        .or_else(|| node.get_attr("Time"))
+        .and_then(|v| v.parse::<f64>().ok())
+        .unwrap_or(0.0);
+    let cur_end = node
+        .find_child("CurrentEnd")
+        .and_then(|c| c.get_attr_or_text("Value"))
+        .and_then(|v| v.parse::<f64>().ok())
+        .unwrap_or_else(|| cur_start + (loop_end - loop_start).max(4.0));
+
+    let mut notes = Vec::new();
+    let key_tracks = node.find_descendants("KeyTrack");
+    if !key_tracks.is_empty() {
+        for kt in key_tracks {
+            let pitch = kt
+                .find_descendant("MidiKey")
+                .and_then(|k| k.get_attr_or_text("Value"))
+                .and_then(|v| v.parse::<u8>().ok())
+                .unwrap_or(60);
+            for note_ev in kt.find_descendants("MidiNoteEvent") {
+                let time = note_ev
+                    .get_attr("Time")
+                    .or_else(|| {
+                        note_ev
+                            .find_child("Time")
+                            .and_then(|t| t.get_attr_or_text("Value"))
+                    })
+                    .and_then(|v| v.parse::<f64>().ok())
+                    .unwrap_or(0.0);
+                let dur = note_ev
+                    .get_attr("Duration")
+                    .or_else(|| {
+                        note_ev
+                            .find_child("Duration")
+                            .and_then(|d| d.get_attr_or_text("Value"))
+                    })
+                    .and_then(|v| v.parse::<f64>().ok())
+                    .unwrap_or(1.0);
+                let vel = note_ev
+                    .get_attr("Velocity")
+                    .or_else(|| {
+                        note_ev
+                            .find_child("Velocity")
+                            .and_then(|v| v.get_attr_or_text("Value"))
+                    })
+                    .and_then(|v| v.parse::<f32>().ok())
+                    .map(|v| v.round().clamp(1.0, 127.0) as u8)
+                    .unwrap_or(100);
+                let prob = note_ev
+                    .get_attr("Probability")
+                    .or_else(|| {
+                        note_ev
+                            .find_child("Probability")
+                            .and_then(|p| p.get_attr_or_text("Value"))
+                    })
+                    .and_then(|v| v.parse::<f32>().ok())
+                    .unwrap_or(1.0);
+                notes.push(MidiNote {
+                    pitch,
+                    velocity: vel,
+                    start_beat: time,
+                    duration_beats: dur,
+                    probability: prob,
+                });
+            }
+        }
+    } else {
+        for note_ev in node.find_descendants("MidiNoteEvent") {
+            let pitch = note_ev
+                .get_attr("MidiKey")
+                .or_else(|| note_ev.get_attr("Pitch"))
+                .and_then(|v| v.parse::<u8>().ok())
+                .unwrap_or(60);
+            let time = note_ev
+                .get_attr("Time")
+                .and_then(|v| v.parse::<f64>().ok())
+                .unwrap_or(0.0);
+            let dur = note_ev
+                .get_attr("Duration")
+                .and_then(|v| v.parse::<f64>().ok())
+                .unwrap_or(1.0);
+            let vel = note_ev
+                .get_attr("Velocity")
+                .and_then(|v| v.parse::<f32>().ok())
+                .map(|v| v.round().clamp(1.0, 127.0) as u8)
+                .unwrap_or(100);
+            let prob = note_ev
+                .get_attr("Probability")
+                .and_then(|v| v.parse::<f32>().ok())
+                .unwrap_or(1.0);
+            notes.push(MidiNote {
+                pitch,
+                velocity: vel,
+                start_beat: time,
+                duration_beats: dur,
+                probability: prob,
+            });
+        }
+    }
+
+    notes.sort_by(|a, b| {
+        a.start_beat
+            .partial_cmp(&b.start_beat)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| a.pitch.cmp(&b.pitch))
+    });
+    let pat_len = (loop_end - loop_start).max(4.0);
+    let pattern = MidiPattern {
+        length_beats: pat_len,
+        notes,
+    };
+
+    (
+        clip_id,
+        name,
+        clip_color,
+        loop_on,
+        loop_start,
+        loop_end,
+        cur_start,
+        cur_end,
+        pattern,
+    )
+}
+
+fn parse_audio_clip_node(
+    node: &XmlNode,
+    fallback_id: u32,
+    fallback_name: &str,
+    fallback_color: &str,
+    base_dir: Option<&Path>,
+    sample_cache: &mut HashMap<PathBuf, (u32, u16, Vec<f32>)>,
+) -> (u32, String, String, bool, f64, f64, f64, f64, oxide_timeline::AudioClipData) {
+    let clip_id = node
+        .get_attr("Id")
+        .or_else(|| node.find_child("LomId").and_then(|l| l.get_attr_or_text("Value")))
+        .and_then(|v| v.parse::<u32>().ok())
+        .unwrap_or(fallback_id);
+
+    let name = node
+        .find_child("Name")
+        .and_then(|n| n.get_attr_or_text("Value"))
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| fallback_name.to_string());
+
+    let clip_color = node
+        .find_child("ColorHex")
+        .and_then(|c| c.get_attr_or_text("Value"))
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| fallback_color.to_string());
+
+    let loop_node = node.find_child("Loop");
+    let loop_on = loop_node
+        .and_then(|l| l.find_child("LoopOn"))
+        .and_then(|v| v.get_attr_or_text("Value"))
+        .and_then(|v| v.parse::<bool>().ok())
+        .unwrap_or(true);
+    let loop_start = loop_node
+        .and_then(|l| l.find_child("LoopStart"))
+        .and_then(|v| v.get_attr_or_text("Value"))
+        .and_then(|v| v.parse::<f64>().ok())
+        .unwrap_or(0.0);
+    let loop_end = loop_node
+        .and_then(|l| l.find_child("LoopEnd"))
+        .and_then(|v| v.get_attr_or_text("Value"))
+        .and_then(|v| v.parse::<f64>().ok())
+        .unwrap_or(4.0);
+
+    let cur_start = node
+        .find_child("CurrentStart")
+        .and_then(|c| c.get_attr_or_text("Value"))
+        .or_else(|| node.get_attr("Time"))
+        .and_then(|v| v.parse::<f64>().ok())
+        .unwrap_or(0.0);
+    let cur_end = node
+        .find_child("CurrentEnd")
+        .and_then(|c| c.get_attr_or_text("Value"))
+        .and_then(|v| v.parse::<f64>().ok())
+        .unwrap_or_else(|| cur_start + (loop_end - loop_start).max(4.0));
+
+    let path_val = node
+        .find_descendant("Path")
+        .and_then(|p| p.get_attr_or_text("Value"))
+        .unwrap_or_default();
+    let rel_val = node
+        .find_descendant("RelativePath")
+        .and_then(|r| r.get_attr_or_text("Value"))
+        .unwrap_or_default();
+
+    let resolved = resolve_sample_path(&path_val, &rel_val, base_dir);
+    let (sr, ch, samples) = if resolved.exists() {
+        let entry = sample_cache.entry(resolved.clone()).or_insert_with(|| {
+            read_wav_preview(&resolved, 30.0).unwrap_or((44100, 2, Vec::new()))
+        });
+        (entry.0, entry.1, entry.2.clone())
+    } else {
+        (44100, 2, Vec::new())
+    };
+
+    let mut audio_data = oxide_timeline::AudioClipData::new(
+        resolved.to_string_lossy().to_string(),
+        sr,
+        ch,
+        (loop_end - loop_start).max(4.0),
+    );
+    audio_data.samples = samples;
+
+    (
+        clip_id,
+        name,
+        clip_color,
+        loop_on,
+        loop_start,
+        loop_end,
+        cur_start,
+        cur_end,
+        audio_data,
+    )
 }
 
 impl DAWProject {
@@ -552,6 +992,69 @@ impl DAWProject {
                 out.push_str("              </ClipSlot>\n");
             }
             out.push_str("            </ClipSlotList>\n");
+            if !track.arrangement_clips.is_empty() {
+                match track.track_type {
+                    TrackType::Audio => {
+                        out.push_str("            <Sample>\n");
+                        out.push_str("              <ArrangerAutomation>\n");
+                        out.push_str("                <Events>\n");
+                        for clip in &track.arrangement_clips {
+                            if let ClipPattern::Audio(audio_data) = &clip.pattern {
+                                out.push_str("                  <AudioClip>\n");
+                                out.push_str(&format!("                    <LomId Value=\"{}\"/>\n", clip.id));
+                                out.push_str(&format!("                    <CurrentStart Value=\"{:.4}\"/>\n", clip.timeline_start_beat));
+                                out.push_str(&format!("                    <CurrentEnd Value=\"{:.4}\"/>\n", clip.timeline_end_beat()));
+                                out.push_str(&format!("                    <Name Value=\"{}\"/>\n", xml_escape(&clip.name)));
+                                out.push_str("                    <SampleRef><FileRef>\n");
+                                out.push_str(&format!("                      <Path Value=\"{}\"/>\n", xml_escape(&audio_data.file_path)));
+                                out.push_str(&format!("                      <RelativePath Value=\"{}\"/>\n", xml_escape(&audio_data.file_path)));
+                                out.push_str("                    </FileRef></SampleRef>\n");
+                                out.push_str("                  </AudioClip>\n");
+                            }
+                        }
+                        out.push_str("                </Events>\n");
+                        out.push_str("              </ArrangerAutomation>\n");
+                        out.push_str("            </Sample>\n");
+                    }
+                    _ => {
+                        out.push_str("            <ClipTimeable>\n");
+                        out.push_str("              <ArrangerAutomation>\n");
+                        out.push_str("                <Events>\n");
+                        for clip in &track.arrangement_clips {
+                            if let ClipPattern::Midi(midi_pat) = &clip.pattern {
+                                out.push_str("                  <MidiClip>\n");
+                                out.push_str(&format!("                    <LomId Value=\"{}\"/>\n", clip.id));
+                                out.push_str(&format!("                    <CurrentStart Value=\"{:.4}\"/>\n", clip.timeline_start_beat));
+                                out.push_str(&format!("                    <CurrentEnd Value=\"{:.4}\"/>\n", clip.timeline_end_beat()));
+                                out.push_str(&format!("                    <Name Value=\"{}\"/>\n", xml_escape(&clip.name)));
+                                out.push_str("                    <Notes><KeyTracks>\n");
+                                let mut notes_by_key: BTreeMap<u8, Vec<&MidiNote>> = BTreeMap::new();
+                                for note in &midi_pat.notes {
+                                    notes_by_key.entry(note.pitch).or_default().push(note);
+                                }
+                                for (pitch, key_notes) in notes_by_key {
+                                    out.push_str("                      <KeyTrack>\n");
+                                    out.push_str(&format!("                        <MidiKey Value=\"{}\"/>\n", pitch));
+                                    out.push_str("                        <Notes>\n");
+                                    for n in key_notes {
+                                        out.push_str(&format!(
+                                            "                          <MidiNoteEvent Time=\"{:.4}\" Duration=\"{:.4}\" Velocity=\"{:.1}\" OffVelocity=\"64\" Probability=\"{:.2}\" IsEnabled=\"true\"/>\n",
+                                            n.start_beat, n.duration_beats, n.velocity as f32, n.probability
+                                        ));
+                                    }
+                                    out.push_str("                        </Notes>\n");
+                                    out.push_str("                      </KeyTrack>\n");
+                                }
+                                out.push_str("                    </KeyTracks></Notes>\n");
+                                out.push_str("                  </MidiClip>\n");
+                            }
+                        }
+                        out.push_str("                </Events>\n");
+                        out.push_str("              </ArrangerAutomation>\n");
+                        out.push_str("            </ClipTimeable>\n");
+                    }
+                }
+            }
             out.push_str("          </MainSequencer>\n");
 
             // Devices
@@ -648,6 +1151,14 @@ impl DAWProject {
 
     /// Parse project from bytes (auto-detects Gzip magic `[0x1f, 0x8b]` or raw XML).
     pub fn from_als_bytes(bytes: &[u8]) -> Result<DAWProject, DAWProjectError> {
+        Self::from_als_bytes_with_base_dir(bytes, None)
+    }
+
+    /// Parse project from bytes with an optional base directory for resolving relative sample paths.
+    pub fn from_als_bytes_with_base_dir(
+        bytes: &[u8],
+        base_dir: Option<&Path>,
+    ) -> Result<DAWProject, DAWProjectError> {
         if bytes.len() >= 2 && bytes[0] == 0x1f && bytes[1] == 0x8b {
             let decoder = GzDecoder::new(bytes);
             let mut limited = Read::take(decoder, MAX_ALS_XML_BYTES + 1);
@@ -658,7 +1169,7 @@ impl DAWProject {
                     "ALS decompressed payload exceeds 64 MiB safety limit".to_string(),
                 ));
             }
-            Self::from_als_xml(&xml)
+            Self::from_als_xml_with_base_dir(&xml, base_dir)
         } else {
             if bytes.len() as u64 > MAX_ALS_XML_BYTES {
                 return Err(DAWProjectError::Validation(
@@ -668,12 +1179,20 @@ impl DAWProject {
             let xml = std::str::from_utf8(bytes).map_err(|e| {
                 DAWProjectError::Validation(format!("Invalid UTF-8 in ALS bytes: {}", e))
             })?;
-            Self::from_als_xml(xml)
+            Self::from_als_xml_with_base_dir(xml, base_dir)
         }
     }
 
     /// Parse project from uncompressed Ableton Live XML string.
     pub fn from_als_xml(xml: &str) -> Result<DAWProject, DAWProjectError> {
+        Self::from_als_xml_with_base_dir(xml, None)
+    }
+
+    /// Parse project from uncompressed Ableton Live XML string with an optional base directory for resolving samples.
+    pub fn from_als_xml_with_base_dir(
+        xml: &str,
+        base_dir: Option<&Path>,
+    ) -> Result<DAWProject, DAWProjectError> {
         let root = parse_xml_to_node(xml)?;
         let liveset = if root.tag == "LiveSet" {
             &root
@@ -681,6 +1200,23 @@ impl DAWProject {
             root.find_child("LiveSet").ok_or_else(|| {
                 DAWProjectError::Validation("Missing <LiveSet> element in Ableton XML".to_string())
             })?
+        };
+
+        let is_oxide_creator = root
+            .get_attr("Creator")
+            .map(|c| c.contains("Oxide"))
+            .unwrap_or(false);
+
+        let convert_volume = |v: f32| -> f32 {
+            if !is_oxide_creator {
+                if v <= 0.0001 {
+                    -60.0
+                } else {
+                    (20.0 * (v / 0.85).log10()).clamp(-60.0, 6.0)
+                }
+            } else {
+                v
+            }
         };
 
         // Project metadata
@@ -801,7 +1337,7 @@ impl DAWProject {
                 })
                 .and_then(|v| v.parse::<f32>().ok())
             {
-                master_track.volume_db = vol;
+                master_track.volume_db = convert_volume(vol);
             }
             if let Some(pan) = mt
                 .find_descendant("Pan")
@@ -817,9 +1353,13 @@ impl DAWProject {
         }
 
         // Tracks
+        let mut sample_cache: HashMap<PathBuf, (u32, u16, Vec<f32>)> = HashMap::new();
         let mut tracks = Vec::new();
         if let Some(tracks_node) = liveset.find_child("Tracks") {
             for (idx, child) in tracks_node.children.iter().enumerate() {
+                if child.tag == "GroupTrack" {
+                    continue;
+                }
                 if child.tag != "MidiTrack"
                     && child.tag != "AudioTrack"
                     && child.tag != "ReturnTrack"
@@ -883,7 +1423,7 @@ impl DAWProject {
                         })
                         .and_then(|v| v.parse::<f32>().ok())
                     {
-                        mixer.volume_db = vol;
+                        mixer.volume_db = convert_volume(vol);
                     }
                     if let Some(pan) = mixer_node
                         .find_descendant("Pan")
@@ -960,191 +1500,29 @@ impl DAWProject {
                     TrackType::Audio => InstrumentConfig::None,
                 };
 
-                // Clips
+                // 1. Session Clips
                 let mut session_clips = Vec::new();
                 if let Some(slot_list) = child.find_descendant("ClipSlotList") {
                     for (slot_idx, slot_node) in
                         slot_list.find_children("ClipSlot").iter().enumerate()
                     {
-                        let clip_id = slot_node
-                            .get_attr("Id")
-                            .and_then(|v| v.parse::<u32>().ok())
-                            .unwrap_or(slot_idx as u32);
                         if let Some(midi_clip_node) = slot_node.find_descendant("MidiClip") {
-                            let name = midi_clip_node
-                                .find_child("Name")
-                                .and_then(|n| n.get_attr_or_text("Value"))
-                                .unwrap_or_else(|| format!("Clip {}", slot_idx + 1));
-                            let clip_color = midi_clip_node
-                                .find_child("ColorHex")
-                                .and_then(|c| c.get_attr_or_text("Value"))
-                                .unwrap_or_else(|| color_hex.clone());
-
-                            let loop_node = midi_clip_node.find_child("Loop");
-                            let loop_on = loop_node
-                                .and_then(|l| l.find_child("LoopOn"))
-                                .and_then(|v| v.get_attr_or_text("Value"))
-                                .and_then(|v| v.parse::<bool>().ok())
-                                .unwrap_or(true);
-                            let loop_start = loop_node
-                                .and_then(|l| l.find_child("LoopStart"))
-                                .and_then(|v| v.get_attr_or_text("Value"))
-                                .and_then(|v| v.parse::<f64>().ok())
-                                .unwrap_or(0.0);
-                            let loop_end = loop_node
-                                .and_then(|l| l.find_child("LoopEnd"))
-                                .and_then(|v| v.get_attr_or_text("Value"))
-                                .and_then(|v| v.parse::<f64>().ok())
-                                .unwrap_or(4.0);
-
-                            let mut notes = Vec::new();
-                            let key_tracks = midi_clip_node.find_descendants("KeyTrack");
-                            if !key_tracks.is_empty() {
-                                for kt in key_tracks {
-                                    let pitch = kt
-                                        .find_descendant("MidiKey")
-                                        .and_then(|k| k.get_attr_or_text("Value"))
-                                        .and_then(|v| v.parse::<u8>().ok())
-                                        .unwrap_or(60);
-                                    for note_ev in kt.find_descendants("MidiNoteEvent") {
-                                        let time = note_ev
-                                            .get_attr("Time")
-                                            .or_else(|| {
-                                                note_ev
-                                                    .find_child("Time")
-                                                    .and_then(|t| t.get_attr_or_text("Value"))
-                                            })
-                                            .and_then(|v| v.parse::<f64>().ok())
-                                            .unwrap_or(0.0);
-                                        let dur = note_ev
-                                            .get_attr("Duration")
-                                            .or_else(|| {
-                                                note_ev
-                                                    .find_child("Duration")
-                                                    .and_then(|d| d.get_attr_or_text("Value"))
-                                            })
-                                            .and_then(|v| v.parse::<f64>().ok())
-                                            .unwrap_or(1.0);
-                                        let vel = note_ev
-                                            .get_attr("Velocity")
-                                            .or_else(|| {
-                                                note_ev
-                                                    .find_child("Velocity")
-                                                    .and_then(|v| v.get_attr_or_text("Value"))
-                                            })
-                                            .and_then(|v| v.parse::<f32>().ok())
-                                            .map(|v| v.round().clamp(1.0, 127.0) as u8)
-                                            .unwrap_or(100);
-                                        let prob = note_ev
-                                            .get_attr("Probability")
-                                            .or_else(|| {
-                                                note_ev
-                                                    .find_child("Probability")
-                                                    .and_then(|p| p.get_attr_or_text("Value"))
-                                            })
-                                            .and_then(|v| v.parse::<f32>().ok())
-                                            .unwrap_or(1.0);
-                                        notes.push(MidiNote {
-                                            pitch,
-                                            velocity: vel,
-                                            start_beat: time,
-                                            duration_beats: dur,
-                                            probability: prob,
-                                        });
-                                    }
-                                }
-                            } else {
-                                for note_ev in midi_clip_node.find_descendants("MidiNoteEvent") {
-                                    let pitch = note_ev
-                                        .get_attr("MidiKey")
-                                        .or_else(|| note_ev.get_attr("Pitch"))
-                                        .and_then(|v| v.parse::<u8>().ok())
-                                        .unwrap_or(60);
-                                    let time = note_ev
-                                        .get_attr("Time")
-                                        .and_then(|v| v.parse::<f64>().ok())
-                                        .unwrap_or(0.0);
-                                    let dur = note_ev
-                                        .get_attr("Duration")
-                                        .and_then(|v| v.parse::<f64>().ok())
-                                        .unwrap_or(1.0);
-                                    let vel = note_ev
-                                        .get_attr("Velocity")
-                                        .and_then(|v| v.parse::<f32>().ok())
-                                        .map(|v| v.round().clamp(1.0, 127.0) as u8)
-                                        .unwrap_or(100);
-                                    let prob = note_ev
-                                        .get_attr("Probability")
-                                        .and_then(|v| v.parse::<f32>().ok())
-                                        .unwrap_or(1.0);
-                                    notes.push(MidiNote {
-                                        pitch,
-                                        velocity: vel,
-                                        start_beat: time,
-                                        duration_beats: dur,
-                                        probability: prob,
-                                    });
-                                }
-                            }
-
-                            notes.sort_by(|a, b| {
-                                a.start_beat
-                                    .partial_cmp(&b.start_beat)
-                                    .unwrap_or(std::cmp::Ordering::Equal)
-                                    .then_with(|| a.pitch.cmp(&b.pitch))
-                            });
-                            let pat_len = (loop_end - loop_start).max(4.0);
-                            let pattern = MidiPattern {
-                                length_beats: pat_len,
-                                notes,
-                            };
-                            let mut clip =
-                                SessionClip::new(clip_id, name, ClipPattern::Midi(pattern));
+                            let (clip_id, name, clip_color, loop_on, loop_start, loop_end, _cur_start, _cur_end, pattern) =
+                                parse_midi_clip_node(midi_clip_node, slot_idx as u32, &format!("Clip {}", slot_idx + 1), &color_hex);
+                            let mut clip = SessionClip::new(clip_id, name, ClipPattern::Midi(pattern));
                             clip.loop_enabled = loop_on;
                             clip.loop_start_beat = loop_start;
                             clip.loop_end_beat = loop_end;
                             clip.color_hex = clip_color;
                             session_clips.push(Some(clip));
-                        } else if let Some(audio_clip_node) =
-                            slot_node.find_descendant("AudioClip")
-                        {
-                            let name = audio_clip_node
-                                .find_child("Name")
-                                .and_then(|n| n.get_attr_or_text("Value"))
-                                .unwrap_or_else(|| format!("Audio {}", slot_idx + 1));
-                            let path = audio_clip_node
-                                .find_descendant("Path")
-                                .and_then(|p| p.get_attr_or_text("Value"))
-                                .unwrap_or_default();
-                            let loop_node = audio_clip_node.find_child("Loop");
-                            let loop_on = loop_node
-                                .and_then(|l| l.find_child("LoopOn"))
-                                .and_then(|v| v.get_attr_or_text("Value"))
-                                .and_then(|v| v.parse::<bool>().ok())
-                                .unwrap_or(true);
-                            let loop_start = loop_node
-                                .and_then(|l| l.find_child("LoopStart"))
-                                .and_then(|v| v.get_attr_or_text("Value"))
-                                .and_then(|v| v.parse::<f64>().ok())
-                                .unwrap_or(0.0);
-                            let loop_end = loop_node
-                                .and_then(|l| l.find_child("LoopEnd"))
-                                .and_then(|v| v.get_attr_or_text("Value"))
-                                .and_then(|v| v.parse::<f64>().ok())
-                                .unwrap_or(4.0);
-
-                            let audio_data = oxide_timeline::AudioClipData::new(
-                                path,
-                                44100,
-                                2,
-                                (loop_end - loop_start).max(4.0),
-                            );
-                            let mut clip =
-                                SessionClip::new(clip_id, name, ClipPattern::Audio(audio_data));
+                        } else if let Some(audio_clip_node) = slot_node.find_descendant("AudioClip") {
+                            let (clip_id, name, clip_color, loop_on, loop_start, loop_end, _cur_start, _cur_end, audio_data) =
+                                parse_audio_clip_node(audio_clip_node, slot_idx as u32, &format!("Audio {}", slot_idx + 1), &color_hex, base_dir, &mut sample_cache);
+                            let mut clip = SessionClip::new(clip_id, name, ClipPattern::Audio(audio_data));
                             clip.loop_enabled = loop_on;
                             clip.loop_start_beat = loop_start;
                             clip.loop_end_beat = loop_end;
-                            clip.color_hex = color_hex.clone();
+                            clip.color_hex = clip_color;
                             session_clips.push(Some(clip));
                         } else {
                             session_clips.push(None);
@@ -1154,6 +1532,65 @@ impl DAWProject {
 
                 if session_clips.iter().all(|c| c.is_none()) {
                     session_clips.clear();
+                }
+
+                // 2. Arrangement Clips
+                let mut arrangement_clips = Vec::new();
+                let main_seq = child.find_descendant("MainSequencer");
+                let automation_nodes = if let Some(ms) = main_seq {
+                    ms.find_descendants("ArrangerAutomation")
+                } else {
+                    child.find_descendants("ArrangerAutomation")
+                };
+
+                for aa in automation_nodes {
+                    if let Some(events) = aa.find_child("Events") {
+                        if track_type != TrackType::Audio {
+                            for (m_idx, mc_node) in events.find_children("MidiClip").iter().enumerate() {
+                                let (clip_id, name, _color, _loop_on, _l_start, _l_end, cur_start, cur_end, pattern) =
+                                    parse_midi_clip_node(mc_node, (arrangement_clips.len() + 1) as u32, &format!("Midi {}", m_idx + 1), &color_hex);
+                                let dur = (cur_end - cur_start).max(0.0625);
+                                let arr_clip = ArrangementClip::new(clip_id, name, cur_start, dur, ClipPattern::Midi(pattern));
+                                arrangement_clips.push(arr_clip);
+                            }
+                        }
+                        if track_type == TrackType::Audio || arrangement_clips.is_empty() {
+                            for (a_idx, ac_node) in events.find_children("AudioClip").iter().enumerate() {
+                                let (clip_id, name, _color, _loop_on, _l_start, _l_end, cur_start, cur_end, audio_data) =
+                                    parse_audio_clip_node(ac_node, (arrangement_clips.len() + 1) as u32, &format!("Audio {}", a_idx + 1), &color_hex, base_dir, &mut sample_cache);
+                                let dur = (cur_end - cur_start).max(0.0625);
+                                let arr_clip = ArrangementClip::new(clip_id, name, cur_start, dur, ClipPattern::Audio(audio_data));
+                                arrangement_clips.push(arr_clip);
+                            }
+                        }
+                    }
+                }
+
+                // 3. If session_clips is empty (producer worked in Arrangement View),
+                // populate up to 8 session_clips from first distinct arrangement clips.
+                if session_clips.is_empty() && !arrangement_clips.is_empty() {
+                    let mut seen_keys = std::collections::HashSet::new();
+                    let mut auto_session = Vec::new();
+                    for arr_clip in &arrangement_clips {
+                        let key = match &arr_clip.pattern {
+                            ClipPattern::Midi(m) => format!("midi:{}:{}:{:.2}", arr_clip.name, m.notes.len(), m.length_beats),
+                            ClipPattern::Drum(d) => format!("drum:{}:{}", arr_clip.name, d.step_count),
+                            ClipPattern::Audio(a) => format!("audio:{}:{}:{:.2}", arr_clip.name, a.file_path, a.length_beats),
+                        };
+                        if seen_keys.insert(key) {
+                            let slot_idx = auto_session.len() as u32;
+                            let mut s_clip = SessionClip::new(slot_idx, arr_clip.name.clone(), arr_clip.pattern.clone());
+                            s_clip.loop_enabled = true;
+                            s_clip.loop_start_beat = 0.0;
+                            s_clip.loop_end_beat = arr_clip.duration_beats.max(4.0);
+                            s_clip.color_hex = color_hex.clone();
+                            auto_session.push(Some(s_clip));
+                            if auto_session.len() >= 8 {
+                                break;
+                            }
+                        }
+                    }
+                    session_clips = auto_session;
                 }
 
                 // Insert FX
@@ -1207,7 +1644,7 @@ impl DAWProject {
                     instrument,
                     insert_fx,
                     session_clips,
-                    arrangement_clips: Vec::new(),
+                    arrangement_clips,
                     automation_lanes: Vec::new(),
                 });
             }
@@ -1240,16 +1677,34 @@ impl DAWProject {
         })
     }
 
-    /// Load project from disk from a .als file.
+    /// Load project from disk from a .als file, resolving relative sample paths against the parent folder.
     pub fn load_als(path: impl AsRef<Path>) -> Result<DAWProject, DAWProjectError> {
-        let bytes = fs::read(path)?;
-        Self::from_als_bytes(&bytes)
+        let p = path.as_ref();
+        let base_dir = p.parent();
+        let bytes = fs::read(p)?;
+        Self::from_als_bytes_with_base_dir(&bytes, base_dir)
     }
 }
 
 /// Load an Ableton Live `.als` file from disk directly.
 pub fn load_als(path: impl AsRef<Path>) -> Result<DAWProject, DAWProjectError> {
     DAWProject::load_als(path)
+}
+
+/// Parse an Ableton Live XML string with an optional base directory for resolving relative sample paths.
+pub fn from_als_xml_with_base_dir(
+    xml: &str,
+    base_dir: Option<&Path>,
+) -> Result<DAWProject, DAWProjectError> {
+    DAWProject::from_als_xml_with_base_dir(xml, base_dir)
+}
+
+/// Parse Ableton Live bytes with an optional base directory for resolving relative sample paths.
+pub fn from_als_bytes_with_base_dir(
+    bytes: &[u8],
+    base_dir: Option<&Path>,
+) -> Result<DAWProject, DAWProjectError> {
+    DAWProject::from_als_bytes_with_base_dir(bytes, base_dir)
 }
 
 /// Save a `DAWProject` as an Ableton Live `.als` file to disk directly.

@@ -688,10 +688,20 @@ pub fn export_all_tracks_as_stems(
     Ok(exported_paths)
 }
 
-fn render_single_track(
+pub fn render_single_track(
     track: &TrackDefinition,
     sample_rate: f32,
     bpm: f64,
+    duration_seconds: f64,
+) -> (Vec<f32>, Vec<f32>) {
+    render_single_track_window(track, sample_rate, bpm, 0.0, duration_seconds)
+}
+
+pub fn render_single_track_window(
+    track: &TrackDefinition,
+    sample_rate: f32,
+    bpm: f64,
+    start_beat_offset: f64,
     duration_seconds: f64,
 ) -> (Vec<f32>, Vec<f32>) {
     let total_frames = (duration_seconds * sample_rate as f64).ceil() as usize;
@@ -704,7 +714,15 @@ fn render_single_track(
 
     match &track.instrument {
         InstrumentConfig::ElectronicDrumRack(_drum_def) => {
-            render_drum_track(track, sample_rate, bpm, total_frames, &mut out_l, &mut out_r);
+            render_drum_track(
+                track,
+                sample_rate,
+                bpm,
+                start_beat_offset,
+                total_frames,
+                &mut out_l,
+                &mut out_r,
+            );
         }
         InstrumentConfig::BuiltinSubtractiveSynth(params) => {
             render_synth_track(
@@ -712,6 +730,7 @@ fn render_single_track(
                 params,
                 sample_rate,
                 bpm,
+                start_beat_offset,
                 total_frames,
                 &mut out_l,
                 &mut out_r,
@@ -719,7 +738,15 @@ fn render_single_track(
         }
         _ => {
             if track.track_type == TrackType::DrumRack {
-                render_drum_track(track, sample_rate, bpm, total_frames, &mut out_l, &mut out_r);
+                render_drum_track(
+                    track,
+                    sample_rate,
+                    bpm,
+                    start_beat_offset,
+                    total_frames,
+                    &mut out_l,
+                    &mut out_r,
+                );
             } else if track.track_type == TrackType::MidiSynth {
                 let default_params = SynthPatchParameters::default();
                 render_synth_track(
@@ -727,12 +754,21 @@ fn render_single_track(
                     &default_params,
                     sample_rate,
                     bpm,
+                    start_beat_offset,
                     total_frames,
                     &mut out_l,
                     &mut out_r,
                 );
             } else {
-                render_audio_track(track, sample_rate, bpm, total_frames, &mut out_l, &mut out_r);
+                render_audio_track(
+                    track,
+                    sample_rate,
+                    bpm,
+                    start_beat_offset,
+                    total_frames,
+                    &mut out_l,
+                    &mut out_r,
+                );
             }
         }
     }
@@ -755,6 +791,7 @@ fn render_drum_track(
     track: &TrackDefinition,
     sample_rate: f32,
     bpm: f64,
+    start_beat_offset: f64,
     total_frames: usize,
     out_l: &mut [f32],
     out_r: &mut [f32],
@@ -783,13 +820,25 @@ fn render_drum_track(
     let frames_per_beat = (seconds_per_beat * sample_rate as f64) as usize;
     let frames_per_16th = (frames_per_beat / 4).max(1);
 
-    let mut has_drum_clip = false;
+    let mut has_arr_drum_clip = false;
     for clip in &track.arrangement_clips {
         if let ClipPattern::Drum(_) = &clip.pattern {
-            has_drum_clip = true;
+            has_arr_drum_clip = true;
             break;
         }
     }
+
+    let session_drum_pattern = if !has_arr_drum_clip {
+        track.session_clips.iter().flatten().find_map(|c| {
+            if let ClipPattern::Drum(dp) = &c.pattern {
+                Some(dp)
+            } else {
+                None
+            }
+        })
+    } else {
+        None
+    };
 
     const BLOCK_SIZE: usize = 128;
     let mut frame = 0;
@@ -803,16 +852,16 @@ fn render_drum_track(
 
         for b in 0..cur_len {
             let f = frame + b;
-            let current_beat = f as f64 / (frames_per_beat.max(1) as f64);
+            let current_beat = start_beat_offset + (f as f64 / (frames_per_beat.max(1) as f64));
 
-            if has_drum_clip {
+            if has_arr_drum_clip {
                 for clip in &track.arrangement_clips {
                     if clip.contains_beat(current_beat) {
                         if let ClipPattern::Drum(drum_pattern) = &clip.pattern {
                             let phase = clip.pattern_phase_at_beat(current_beat);
                             let step_dur = drum_pattern.step_duration_beats.max(0.01);
                             let step_idx =
-                                ((phase / step_dur).floor() as usize) % drum_pattern.step_count;
+                                ((phase / step_dur).floor() as usize) % drum_pattern.step_count.max(1);
                             let step_frame = (f % frames_per_16th.max(1)) == 0;
                             if step_frame {
                                 for (pad, step) in drum_pattern.active_steps_at(step_idx) {
@@ -820,6 +869,16 @@ fn render_drum_track(
                                 }
                             }
                         }
+                    }
+                }
+            } else if let Some(drum_pattern) = session_drum_pattern {
+                let step_dur = drum_pattern.step_duration_beats.max(0.01);
+                let step_idx =
+                    ((current_beat / step_dur).floor() as usize) % drum_pattern.step_count.max(1);
+                let step_frame = (f % frames_per_16th.max(1)) == 0;
+                if step_frame {
+                    for (pad, step) in drum_pattern.active_steps_at(step_idx) {
+                        drum_rack.trigger_pad(pad, step.velocity);
                     }
                 }
             } else {
@@ -861,57 +920,131 @@ fn render_synth_track(
     params: &SynthPatchParameters,
     sample_rate: f32,
     bpm: f64,
+    start_beat_offset: f64,
     total_frames: usize,
     out_l: &mut [f32],
     out_r: &mut [f32],
 ) {
     let mut synth = SynthEngine::new(sample_rate);
-    synth.set_parameter("oscillator_saw_amplitude", params.oscillator_saw_amplitude);
-    synth.set_parameter("oscillator_pulse_amplitude", params.oscillator_pulse_amplitude);
-    synth.set_parameter("filter_frequency", params.filter_frequency);
-    synth.set_parameter("filter_resonance", params.filter_resonance);
-    synth.set_parameter("amplitude_envelope_decay", params.amplitude_envelope_decay);
-    synth.set_parameter("amplitude_envelope_sustain", params.amplitude_envelope_sustain);
+    if let Some(preset) = &params.preset_name {
+        if !synth.load_preset(preset) {
+            let fallback = match preset.as_str() {
+                "analogsaw.preset" | "analogsaw" => Some("osc-shapes.preset"),
+                "aggro.preset" | "aggro" => Some("distortion.preset"),
+                "metallic.preset" | "metallic" => Some("laser.preset"),
+                "darkpad.preset" | "darkpad" => Some("strings.preset"),
+                _ => None,
+            };
+            if let Some(fb) = fallback {
+                let _ = synth.load_preset(fb);
+            }
+        }
+    } else {
+        synth.set_parameter("oscillator_saw_amplitude", params.oscillator_saw_amplitude);
+        synth.set_parameter("oscillator_pulse_amplitude", params.oscillator_pulse_amplitude);
+        synth.set_parameter("filter_frequency", params.filter_frequency);
+        synth.set_parameter("filter_resonance", params.filter_resonance);
+        synth.set_parameter("amplitude_envelope_decay", params.amplitude_envelope_decay);
+        synth.set_parameter("amplitude_envelope_sustain", params.amplitude_envelope_sustain);
+    }
 
     let seconds_per_beat = 60.0 / bpm;
     let frames_per_beat = (seconds_per_beat * sample_rate as f64) as usize;
     let frames_per_16th = (frames_per_beat / 4).max(1);
 
-    let mut has_midi_clip = false;
+    let mut has_arr_midi_clip = false;
+    let mut has_arr_midi_notes = false;
     for clip in &track.arrangement_clips {
-        if let ClipPattern::Midi(_) = &clip.pattern {
-            has_midi_clip = true;
-            break;
+        if let ClipPattern::Midi(mp) = &clip.pattern {
+            has_arr_midi_clip = true;
+            if !mp.notes.is_empty() {
+                has_arr_midi_notes = true;
+                break;
+            }
         }
     }
+
+    let session_midi_pattern = if !has_arr_midi_notes {
+        track.session_clips.iter().flatten().find_map(|c| {
+            if let ClipPattern::Midi(mp) = &c.pattern {
+                if !mp.notes.is_empty() {
+                    return Some(mp);
+                }
+            }
+            None
+        })
+    } else {
+        None
+    };
 
     let default_notes = [36u8, 38, 41, 43, 36, 48, 46, 43, 36, 39, 41, 44, 36, 43, 41, 38];
 
     for f in 0..total_frames {
-        let current_beat = f as f64 / (frames_per_beat.max(1) as f64);
+        let current_beat = start_beat_offset + (f as f64 / (frames_per_beat.max(1) as f64));
+        let prev_beat = start_beat_offset
+            + ((f.saturating_sub(1)) as f64 / (frames_per_beat.max(1) as f64));
 
-        if has_midi_clip {
+        if f % 64 == 0 {
+            for lane in &track.automation_lanes {
+                if !lane.points.is_empty()
+                    && (lane.parameter_name.eq_ignore_ascii_case("filter_frequency")
+                        || lane.parameter_name.eq_ignore_ascii_case("Filter Cutoff")
+                        || lane.parameter_name.eq_ignore_ascii_case("cutoff"))
+                {
+                    let val = lane.interpolate_at(current_beat, 0.5);
+                    if val <= 1.0 {
+                        synth.set_parameter_normalized("filter_frequency", val);
+                    } else {
+                        synth.set_parameter("filter_frequency", val);
+                    }
+                }
+            }
+        }
+
+        if has_arr_midi_notes {
             for clip in &track.arrangement_clips {
                 if clip.contains_beat(current_beat) {
                     if let ClipPattern::Midi(midi_pattern) = &clip.pattern {
                         let phase = clip.pattern_phase_at_beat(current_beat);
+                        let prev_phase = clip.pattern_phase_at_beat(prev_beat);
+                        let wrapped = f == 0 || !clip.contains_beat(prev_beat) || phase < prev_phase;
                         for note in &midi_pattern.notes {
                             let note_start = note.start_beat;
                             let note_end = note.end_beat();
-                            let prev_beat =
-                                (f.saturating_sub(1)) as f64 / (frames_per_beat.max(1) as f64);
-                            let prev_phase = clip.pattern_phase_at_beat(prev_beat);
 
-                            if prev_phase < note_start && phase >= note_start {
+                            if (wrapped && note_start <= phase && phase < note_end)
+                                || (!wrapped && prev_phase < note_start && phase >= note_start)
+                            {
                                 synth.note_on(note.pitch, note.velocity);
-                            } else if prev_phase < note_end && phase >= note_end {
+                            } else if (!wrapped && prev_phase < note_end && phase >= note_end)
+                                || (wrapped && prev_phase < note_end)
+                            {
                                 synth.note_off(note.pitch);
                             }
                         }
                     }
                 }
             }
-        } else {
+        } else if let Some(midi_pattern) = session_midi_pattern {
+            let pat_len = midi_pattern.length_beats.max(0.25);
+            let phase = current_beat % pat_len;
+            let prev_phase = prev_beat % pat_len;
+            let wrapped = f == 0 || phase < prev_phase;
+            for note in &midi_pattern.notes {
+                let note_start = note.start_beat;
+                let note_end = note.end_beat();
+
+                if (wrapped && note_start <= phase && phase < note_end)
+                    || (!wrapped && prev_phase < note_start && phase >= note_start)
+                {
+                    synth.note_on(note.pitch, note.velocity);
+                } else if (!wrapped && prev_phase < note_end && phase >= note_end)
+                    || (wrapped && prev_phase < note_end)
+                {
+                    synth.note_off(note.pitch);
+                }
+            }
+        } else if !has_arr_midi_clip || track.arrangement_clips.len() <= 1 {
             let step_idx = f / frames_per_16th;
             let step_frame = f % frames_per_16th;
             let gate_dur = (frames_per_16th * 3) / 4;
@@ -938,41 +1071,108 @@ fn render_synth_track(
 fn render_audio_track(
     track: &TrackDefinition,
     sample_rate: f32,
-    _bpm: f64,
+    bpm: f64,
+    start_beat_offset: f64,
     total_frames: usize,
     out_l: &mut [f32],
     out_r: &mut [f32],
 ) {
+    let mut rendered_any = false;
+    let seconds_per_beat = 60.0 / bpm.max(1.0);
+    let window_beats = (total_frames as f64 / sample_rate as f64) / seconds_per_beat;
+    let window_end_beat = start_beat_offset + window_beats;
+
+    // 1. Render arrangement clips placed on timeline
     for clip in &track.arrangement_clips {
         if let ClipPattern::Audio(data) = &clip.pattern {
-            if let Ok((_sr, ch, samples)) = read_wav_file(&data.file_path) {
+            let clip_start = clip.timeline_start_beat;
+            let clip_end = clip.timeline_end_beat();
+            if clip_end <= start_beat_offset || clip_start >= window_end_beat {
+                continue;
+            }
+            let overlap_start_beat = clip_start.max(start_beat_offset);
+            let overlap_end_beat = clip_end.min(window_end_beat);
+            let out_start_frame = ((overlap_start_beat - start_beat_offset) * seconds_per_beat * sample_rate as f64).round() as usize;
+            let src_start_frame = ((overlap_start_beat - clip_start) * seconds_per_beat * sample_rate as f64).round() as usize;
+            let dur_frames = (((overlap_end_beat - overlap_start_beat) * seconds_per_beat * sample_rate as f64).ceil() as usize)
+                .min(total_frames.saturating_sub(out_start_frame));
+
+            if !data.samples.is_empty() {
+                let avail_frames = (data.samples.len() / 2).saturating_sub(src_start_frame);
+                let copy_frames = dur_frames.min(avail_frames);
+                for i in 0..copy_frames {
+                    out_l[out_start_frame + i] += data.samples[(src_start_frame + i) * 2];
+                    out_r[out_start_frame + i] += data.samples[(src_start_frame + i) * 2 + 1];
+                }
+                if copy_frames > 0 {
+                    rendered_any = true;
+                }
+            } else if let Ok((_sr, ch, samples)) = read_wav_file(&data.file_path) {
                 if ch == 1 {
-                    let copy_len = samples.len().min(total_frames);
-                    for i in 0..copy_len {
-                        out_l[i] += samples[i];
-                        out_r[i] += samples[i];
+                    let avail_frames = samples.len().saturating_sub(src_start_frame);
+                    let copy_frames = dur_frames.min(avail_frames);
+                    for i in 0..copy_frames {
+                        out_l[out_start_frame + i] += samples[src_start_frame + i];
+                        out_r[out_start_frame + i] += samples[src_start_frame + i];
+                    }
+                    if copy_frames > 0 {
+                        rendered_any = true;
                     }
                 } else {
                     let ch_usize = (ch as usize).max(2);
-                    let frames = samples.len() / ch_usize;
-                    let copy_len = frames.min(total_frames);
-                    for i in 0..copy_len {
-                        out_l[i] += samples[i * ch_usize];
-                        out_r[i] += samples[i * ch_usize + 1];
+                    let avail_frames = (samples.len() / ch_usize).saturating_sub(src_start_frame);
+                    let copy_frames = dur_frames.min(avail_frames);
+                    for i in 0..copy_frames {
+                        out_l[out_start_frame + i] += samples[(src_start_frame + i) * ch_usize];
+                        out_r[out_start_frame + i] += samples[(src_start_frame + i) * ch_usize + 1];
+                    }
+                    if copy_frames > 0 {
+                        rendered_any = true;
                     }
                 }
             }
         }
     }
 
-    let mut has_samples = false;
-    for i in 0..total_frames.min(64) {
-        if out_l[i] != 0.0 || out_r[i] != 0.0 {
-            has_samples = true;
-            break;
+    // 2. If track has no arrangement clips at all, try looping session clips
+    if !rendered_any && track.arrangement_clips.is_empty() {
+        for s_clip in track.session_clips.iter().flatten() {
+            if let ClipPattern::Audio(data) = &s_clip.pattern {
+                if !data.samples.is_empty() {
+                    let avail_frames = data.samples.len() / 2;
+                    if avail_frames > 0 {
+                        for f in 0..total_frames {
+                            let idx = f % avail_frames;
+                            out_l[f] += data.samples[idx * 2];
+                            out_r[f] += data.samples[idx * 2 + 1];
+                        }
+                        rendered_any = true;
+                        break;
+                    }
+                } else if let Ok((_sr, ch, samples)) = read_wav_file(&data.file_path) {
+                    let ch_usize = (ch as usize).max(1);
+                    let avail_frames = samples.len() / ch_usize;
+                    if avail_frames > 0 {
+                        for f in 0..total_frames {
+                            let idx = f % avail_frames;
+                            if ch == 1 {
+                                out_l[f] += samples[idx];
+                                out_r[f] += samples[idx];
+                            } else {
+                                out_l[f] += samples[idx * ch_usize];
+                                out_r[f] += samples[idx * ch_usize + 1];
+                            }
+                        }
+                        rendered_any = true;
+                        break;
+                    }
+                }
+            }
         }
     }
-    if !has_samples {
+
+    // 3. Fallback subtle test tone only if track is completely empty (no arrangement or session clips)
+    if !rendered_any && track.arrangement_clips.is_empty() && track.session_clips.iter().all(|c| c.is_none()) {
         for f in 0..total_frames {
             let t = f as f32 / sample_rate;
             let tone = (2.0 * std::f32::consts::PI * 440.0 * t).sin() * 0.05;

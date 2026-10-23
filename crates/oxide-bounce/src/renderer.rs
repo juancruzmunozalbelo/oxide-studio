@@ -11,6 +11,10 @@ use std::path::Path;
 use oxide_dsp::SynthEngine;
 use oxide_drums::DrumRack;
 use oxide_fx::MasterLimiter;
+use oxide_project::DAWProject;
+
+use crate::stems::{render_single_track_window, BounceError};
+use crate::wav_writer::WavWriter;
 
 pub struct DemoArrangementRenderer {
     pub sample_rate: f32,
@@ -158,5 +162,187 @@ impl DemoArrangementRenderer {
         }
 
         interleaved
+    }
+}
+
+/// Renders an entire `DAWProject` (arrangement or session clips across all tracks) to a WAV file on disk.
+/// If `out_path` is empty (e.g. `""` or `Path::new("")`), audio is rendered and returned as interleaved stereo f32 without writing to disk.
+pub fn render_project_to_wav(
+    project: &DAWProject,
+    out_path: impl AsRef<Path>,
+) -> Result<Vec<f32>, BounceError> {
+    let bpm = if project.transport.bpm <= 0.0 {
+        120.0
+    } else {
+        project.transport.bpm
+    };
+
+    let mut max_beat = 0.0f64;
+    for track in &project.tracks {
+        for clip in &track.arrangement_clips {
+            let end = clip.timeline_end_beat();
+            if end > max_beat {
+                max_beat = end;
+            }
+        }
+    }
+
+    let duration_seconds = if max_beat > 0.0 {
+        (max_beat * 60.0 / bpm).clamp(4.0, 30.0)
+    } else if project.transport.loop_enabled && project.transport.loop_end_beat > 0.0 {
+        ((project.transport.loop_end_beat - project.transport.loop_start_beat) * 60.0 / bpm).clamp(4.0, 30.0)
+    } else {
+        4.0
+    };
+
+    render_project_window_to_wav(project, out_path, 0.0, duration_seconds, 16)
+}
+
+/// Renders a specific time/beat window of a `DAWProject` to a 16-bit or 32-bit float WAV file.
+pub fn render_project_window_to_wav(
+    project: &DAWProject,
+    out_path: impl AsRef<Path>,
+    start_beat_offset: f64,
+    duration_seconds: f64,
+    bit_depth: u16,
+) -> Result<Vec<f32>, BounceError> {
+    let sample_rate = 44100.0f32;
+    let bpm = if project.transport.bpm <= 0.0 {
+        120.0
+    } else {
+        project.transport.bpm
+    };
+    let duration_seconds = duration_seconds.clamp(0.5, 300.0);
+
+    let total_frames = (duration_seconds * sample_rate as f64).ceil() as usize;
+    let mut master_l = vec![0.0f32; total_frames];
+    let mut master_r = vec![0.0f32; total_frames];
+
+    if project.tracks.is_empty() {
+        let renderer = DemoArrangementRenderer::new(sample_rate, bpm);
+        let interleaved = renderer.render_demo_seconds(duration_seconds);
+        let frames = interleaved.len() / 2;
+        for i in 0..frames.min(total_frames) {
+            master_l[i] = interleaved[i * 2];
+            master_r[i] = interleaved[i * 2 + 1];
+        }
+    } else {
+        for track in &project.tracks {
+            if !track.mixer.mute {
+                let (trk_l, trk_r) = render_single_track_window(
+                    track,
+                    sample_rate,
+                    bpm,
+                    start_beat_offset,
+                    duration_seconds,
+                );
+                for i in 0..total_frames {
+                    master_l[i] += trk_l[i];
+                    master_r[i] += trk_r[i];
+                }
+            }
+        }
+    }
+
+    // Apply master volume
+    let master_gain = 10.0f32.powf(project.master_track.volume_db.clamp(-70.0, 24.0) / 20.0);
+    for i in 0..total_frames {
+        master_l[i] *= master_gain;
+        master_r[i] *= master_gain;
+    }
+
+    let mut limiter = MasterLimiter::new(sample_rate);
+    const BLOCK_SIZE: usize = 128;
+    let mut frame = 0;
+    while frame < total_frames {
+        let cur_block = (total_frames - frame).min(BLOCK_SIZE);
+        limiter.process_block(
+            &mut master_l[frame..frame + cur_block],
+            &mut master_r[frame..frame + cur_block],
+        );
+        frame += cur_block;
+    }
+
+    let mut interleaved = Vec::with_capacity(total_frames * 2);
+    for i in 0..total_frames {
+        interleaved.push(master_l[i]);
+        interleaved.push(master_r[i]);
+    }
+
+    let p = out_path.as_ref();
+    if !p.as_os_str().is_empty() {
+        if let Some(parent) = p.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        if bit_depth == 32 {
+            WavWriter::write_wav_32bit_float(p, sample_rate as u32, 2, &interleaved)
+                .map_err(BounceError::Render)?;
+        } else {
+            WavWriter::write_wav_16bit(p, sample_rate as u32, 2, &interleaved)
+                .map_err(BounceError::Render)?;
+        }
+    }
+
+    Ok(interleaved)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use oxide_project::TrackDefinition;
+    use oxide_timeline::{ArrangementClip, AudioClipData, ClipPattern, SessionClip};
+
+    #[test]
+    fn test_render_project_to_wav_with_audio_track_samples() {
+        let mut project = DAWProject::new("Audio Track Test");
+        project.transport.bpm = 120.0;
+
+        let mut audio_track = TrackDefinition::new_audio(1, "Vocal Track");
+        audio_track.mixer.volume_db = 0.0;
+
+        // Generate 1 second of 440 Hz test sine wave into AudioClipData.samples (interleaved stereo)
+        let sample_rate = 44100;
+        let num_frames = 44100;
+        let mut pcm_samples = Vec::with_capacity(num_frames * 2);
+        for f in 0..num_frames {
+            let t = f as f32 / sample_rate as f32;
+            let val = (2.0 * std::f32::consts::PI * 440.0 * t).sin() * 0.5;
+            pcm_samples.push(val); // Left
+            pcm_samples.push(val); // Right
+        }
+
+        let mut audio_data = AudioClipData::new("/samples/test.wav", sample_rate as u32, 2, 4.0);
+        audio_data.samples = pcm_samples;
+
+        let arr_clip = ArrangementClip::new(
+            10,
+            "Vocal Chorus",
+            0.0,
+            4.0,
+            ClipPattern::Audio(audio_data.clone()),
+        );
+        audio_track.arrangement_clips.push(arr_clip);
+
+        let sess_clip = SessionClip::new(1, "Vocal Slot 1", ClipPattern::Audio(audio_data));
+        audio_track.session_clips.push(Some(sess_clip));
+
+        project.tracks.push(audio_track);
+
+        let tmp_wav = std::env::temp_dir().join("oxide_test_audio_track_render.wav");
+        let samples = render_project_to_wav(&project, &tmp_wav).expect("render_project_to_wav must succeed");
+
+        assert!(tmp_wav.exists());
+        assert!(!samples.is_empty());
+
+        // Verify non-zero RMS
+        let mut sum_sq = 0.0f64;
+        for &s in &samples {
+            assert!(s.is_finite());
+            sum_sq += (s * s) as f64;
+        }
+        let rms = (sum_sq / samples.len() as f64).sqrt();
+        assert!(rms > 0.05, "RMS must be > 0.05 from audio samples, got {}", rms);
+
+        let _ = std::fs::remove_file(tmp_wav);
     }
 }

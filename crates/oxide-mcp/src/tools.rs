@@ -4,17 +4,17 @@ use std::fs;
 use std::path::Path;
 use serde_json::{json, Value};
 
-use oxide_bounce::{DemoArrangementRenderer, WavWriter};
+use oxide_bounce::{render_project_window_to_wav, DemoArrangementRenderer, WavWriter};
 use oxide_core::device::DeviceChain;
 use oxide_core::scale::{GlobalScale, ScaleMode};
 use oxide_dsp::presets::{load_mapping_catalog, load_preset_catalog};
 use oxide_plugin_scanner::PluginScannerSupervisor;
-use oxide_project::{DAWProject, TrackDefinition};
+use oxide_project::{DAWProject, InstrumentConfig, SynthPatchParameters, TrackDefinition};
 use oxide_timeline::{
     generate_euclidean, generate_rhythm, generate_seed, generate_shape, generate_stacks,
     transform_arpeggiate, transform_connect, transform_ornament, transform_quantize,
     transform_recombine, transform_span, transform_strum, transform_time_warp,
-    ArrangementClip, AutomationLane, AutomationPoint, ClipPattern, ContourShape,
+    ArrangementClip, AudioClipData, AutomationLane, AutomationPoint, ClipPattern, ContourShape,
     DrumStep, DrumStepPattern, MidiNote, MidiPattern, QuantizeMode, RhythmStyle, ScaleLock,
     SessionClip, SpanMode, StacksChordType, StacksVoicing, StrumDirection, WarpedAudioClip,
     WarpMode,
@@ -1117,6 +1117,11 @@ pub fn get_tool_definitions() -> Vec<Tool> {
 }
 
 /// Dispatch a tool call by name with argument payload.
+pub fn dispatch_tool_call(state: &mut DawState, name: &str, args: &Value) -> ToolCallResult {
+    call_tool(state, name, args)
+}
+
+/// Dispatch a tool call by name with argument payload.
 pub fn call_tool(state: &mut DawState, name: &str, args: &Value) -> ToolCallResult {
     match name {
         // --- Project & Transport ---
@@ -1271,7 +1276,16 @@ pub fn call_tool(state: &mut DawState, name: &str, args: &Value) -> ToolCallResu
         "track_create_synth" => {
             let name = args.get("name").and_then(|v| v.as_str()).unwrap_or("New Synth");
             let id = state.project.tracks.len() as u32;
-            let track = TrackDefinition::new_synth(id, name);
+            let mut track = TrackDefinition::new_synth(id, name);
+            if let Some(preset) = args
+                .get("preset")
+                .or_else(|| args.get("preset_name"))
+                .and_then(|v| v.as_str())
+            {
+                let mut params = SynthPatchParameters::default();
+                params.preset_name = Some(preset.to_string());
+                track.instrument = InstrumentConfig::BuiltinSubtractiveSynth(params);
+            }
             state.project.tracks.push(track);
             ToolCallResult::json(&json!({
                 "status": "created",
@@ -1325,8 +1339,37 @@ pub fn call_tool(state: &mut DawState, name: &str, args: &Value) -> ToolCallResu
                 Some(p) => p,
                 None => return ToolCallResult::error("Missing 'preset_name' parameter"),
             };
-            let success = state.synth.load_preset(preset_name);
+            let mut success = state.synth.load_preset(preset_name);
+            if !success {
+                let fallback = match preset_name {
+                    "analogsaw.preset" | "analogsaw" => Some("osc-shapes.preset"),
+                    "aggro.preset" | "aggro" => Some("distortion.preset"),
+                    "metallic.preset" | "metallic" => Some("laser.preset"),
+                    "darkpad.preset" | "darkpad" => Some("strings.preset"),
+                    _ => None,
+                };
+                if let Some(fb) = fallback {
+                    success = state.synth.load_preset(fb);
+                }
+            }
             if success {
+                if let Some(tid) = args.get("track_id").and_then(|v| v.as_u64()) {
+                    if let Some(trk) = state.project.tracks.get_mut(tid as usize) {
+                        if let InstrumentConfig::BuiltinSubtractiveSynth(ref mut p) = trk.instrument {
+                            p.preset_name = Some(preset_name.to_string());
+                        }
+                    }
+                } else if let Some(trk) = state
+                    .project
+                    .tracks
+                    .iter_mut()
+                    .rev()
+                    .find(|t| matches!(t.instrument, InstrumentConfig::BuiltinSubtractiveSynth(_)))
+                {
+                    if let InstrumentConfig::BuiltinSubtractiveSynth(ref mut p) = trk.instrument {
+                        p.preset_name = Some(preset_name.to_string());
+                    }
+                }
                 ToolCallResult::json(&json!({
                     "status": "loaded",
                     "preset": preset_name,
@@ -1673,6 +1716,7 @@ pub fn call_tool(state: &mut DawState, name: &str, args: &Value) -> ToolCallResu
                 None => return ToolCallResult::error("Missing 'track_id'"),
             };
             let clip_id = args.get("clip_id").and_then(|v| v.as_u64()).unwrap_or(1) as u32;
+            let slot_id = args.get("slot_id").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
             let start = match args.get("start_beat").and_then(|v| v.as_f64()) {
                 Some(b) => b,
                 None => return ToolCallResult::error("Missing 'start_beat'"),
@@ -1683,7 +1727,46 @@ pub fn call_tool(state: &mut DawState, name: &str, args: &Value) -> ToolCallResu
             };
             let name = args.get("name").and_then(|v| v.as_str()).unwrap_or("Arrangement Clip");
 
-            let clip = ArrangementClip::new(clip_id, name, start, dur, ClipPattern::Midi(MidiPattern::new(dur)));
+            let pattern = if let Some(m_trk) = state.matrix.tracks.get(track_id) {
+                m_trk
+                    .slots
+                    .get(slot_id)
+                    .and_then(|s| s.clip.as_ref().map(|c| c.pattern.clone()))
+                    .or_else(|| {
+                        m_trk
+                            .slots
+                            .iter()
+                            .find_map(|s| s.clip.as_ref().map(|c| c.pattern.clone()))
+                    })
+            } else {
+                None
+            }
+            .or_else(|| {
+                state
+                    .audio_clips
+                    .get(&(track_id as u32, slot_id as u32))
+                    .map(|w| {
+                        ClipPattern::Audio(AudioClipData {
+                            file_path: w.name.clone(),
+                            sample_rate: w.sample_rate,
+                            channels: w.channels,
+                            length_beats: w.length_beats,
+                            gain_db: 0.0,
+                            warp_mode: format!("{:?}", w.warper.config.mode),
+                            samples: w.raw_samples.clone(),
+                        })
+                    })
+            })
+            .or_else(|| {
+                state
+                    .project
+                    .tracks
+                    .get(track_id)
+                    .and_then(|t| t.session_clips.get(slot_id).and_then(|c| c.as_ref().map(|sc| sc.pattern.clone())))
+            })
+            .unwrap_or_else(|| ClipPattern::Midi(MidiPattern::new(dur)));
+
+            let clip = ArrangementClip::new(clip_id, name, start, dur, pattern);
 
             while state.timeline.tracks.len() <= track_id {
                 let tid = state.timeline.tracks.len() as u32;
@@ -1737,28 +1820,57 @@ pub fn call_tool(state: &mut DawState, name: &str, args: &Value) -> ToolCallResu
                 Some(id) => id as usize,
                 None => return ToolCallResult::error("Missing 'track_id'"),
             };
-            if track_id >= state.mixer.tracks.len() {
+            if track_id >= state.mixer.tracks.len() && track_id >= state.project.tracks.len() {
                 return ToolCallResult::error(format!("Track {} out of mixer range", track_id));
             }
-            let trk = &mut state.mixer.tracks[track_id];
-            if let Some(vol) = args.get("volume_db").and_then(|v| v.as_f64()) {
-                trk.set_volume_db(vol as f32);
+            let mut vol_out = 0.0f32;
+            let mut pan_out = 0.0f32;
+            let mut mute_out = false;
+            let mut solo_out = false;
+
+            if track_id < state.mixer.tracks.len() {
+                let trk = &mut state.mixer.tracks[track_id];
+                if let Some(vol) = args.get("volume_db").and_then(|v| v.as_f64()) {
+                    trk.set_volume_db(vol as f32);
+                }
+                if let Some(pan) = args.get("pan").and_then(|v| v.as_f64()) {
+                    trk.set_pan(pan as f32);
+                }
+                if let Some(mute) = args.get("mute").and_then(|v| v.as_bool()) {
+                    trk.mute = mute;
+                }
+                if let Some(solo) = args.get("solo").and_then(|v| v.as_bool()) {
+                    trk.solo = solo;
+                }
+                vol_out = trk.volume_db;
+                pan_out = trk.pan;
+                mute_out = trk.mute;
+                solo_out = trk.solo;
             }
-            if let Some(pan) = args.get("pan").and_then(|v| v.as_f64()) {
-                trk.set_pan(pan as f32);
-            }
-            if let Some(mute) = args.get("mute").and_then(|v| v.as_bool()) {
-                trk.mute = mute;
-            }
-            if let Some(solo) = args.get("solo").and_then(|v| v.as_bool()) {
-                trk.solo = solo;
+            if let Some(p_trk) = state.project.tracks.get_mut(track_id) {
+                if let Some(vol) = args.get("volume_db").and_then(|v| v.as_f64()) {
+                    p_trk.mixer.volume_db = vol as f32;
+                }
+                if let Some(pan) = args.get("pan").and_then(|v| v.as_f64()) {
+                    p_trk.mixer.pan = pan as f32;
+                }
+                if let Some(mute) = args.get("mute").and_then(|v| v.as_bool()) {
+                    p_trk.mixer.mute = mute;
+                }
+                if let Some(solo) = args.get("solo").and_then(|v| v.as_bool()) {
+                    p_trk.mixer.solo = solo;
+                }
+                vol_out = p_trk.mixer.volume_db;
+                pan_out = p_trk.mixer.pan;
+                mute_out = p_trk.mixer.mute;
+                solo_out = p_trk.mixer.solo;
             }
             ToolCallResult::json(&json!({
                 "track_id": track_id,
-                "volume_db": trk.volume_db,
-                "pan": trk.pan,
-                "mute": trk.mute,
-                "solo": trk.solo
+                "volume_db": vol_out,
+                "pan": pan_out,
+                "mute": mute_out,
+                "solo": solo_out
             }))
         }
         "fx_set_saturator" => {
@@ -1855,34 +1967,49 @@ pub fn call_tool(state: &mut DawState, name: &str, args: &Value) -> ToolCallResu
         }
         "bounce_wav" | "render_bounce_wav" => {
             let dur = args.get("duration_seconds").and_then(|v| v.as_f64()).unwrap_or(4.5).clamp(1.0, 300.0);
+            let start_beat = args.get("start_beat").and_then(|v| v.as_f64()).unwrap_or(0.0).max(0.0);
             let out_path_str = args
                 .get("output_path")
                 .and_then(|v| v.as_str())
                 .unwrap_or("/tmp/oxide_bounce.wav");
             let bit_depth = args.get("bit_depth").and_then(|v| v.as_u64()).unwrap_or(16) as u16;
 
-            let renderer = DemoArrangementRenderer::new(state.sample_rate, state.bpm.max(60.0));
-            let interleaved = renderer.render_demo_seconds(dur);
+            state.sync_project_from_state();
+
+            let has_real_clips = state.project.tracks.iter().any(|t| {
+                !t.arrangement_clips.is_empty()
+                    || t.session_clips.iter().any(|c| c.is_some())
+            });
 
             let out_path = Path::new(out_path_str);
             if let Some(parent) = out_path.parent() {
                 let _ = fs::create_dir_all(parent);
             }
 
-            let write_res = if bit_depth == 32 {
-                WavWriter::write_wav_32bit_float(out_path, state.sample_rate as u32, 2, &interleaved)
+            let interleaved = if has_real_clips {
+                match render_project_window_to_wav(&state.project, out_path, start_beat, dur, bit_depth) {
+                    Ok(samples) => samples,
+                    Err(e) => return ToolCallResult::error(format!("Failed rendering project WAV: {}", e)),
+                }
             } else {
-                WavWriter::write_wav_16bit(out_path, state.sample_rate as u32, 2, &interleaved)
+                let renderer = DemoArrangementRenderer::new(state.sample_rate, state.bpm.max(60.0));
+                let samples = renderer.render_demo_seconds(dur);
+                let write_res = if bit_depth == 32 {
+                    WavWriter::write_wav_32bit_float(out_path, state.sample_rate as u32, 2, &samples)
+                } else {
+                    WavWriter::write_wav_16bit(out_path, state.sample_rate as u32, 2, &samples)
+                };
+                if let Err(e) = write_res {
+                    return ToolCallResult::error(format!("Failed to write WAV: {}", e));
+                }
+                samples
             };
-
-            if let Err(e) = write_res {
-                return ToolCallResult::error(format!("Failed to write WAV: {}", e));
-            }
 
             let metrics = AudioAnalysisMetrics::analyze_interleaved(&interleaved, state.sample_rate as u32, 2);
             ToolCallResult::json(&json!({
                 "status": "rendered",
                 "output_path": out_path_str,
+                "start_beat": start_beat,
                 "duration_seconds": metrics.duration_seconds,
                 "peak_dbfs": metrics.peak_dbfs,
                 "rms_dbfs": metrics.rms_dbfs,
@@ -2337,7 +2464,22 @@ pub fn call_tool(state: &mut DawState, name: &str, args: &Value) -> ToolCallResu
         "analyze_rendered_audio" => {
             if let Some(wav_path_str) = args.get("wav_path").and_then(|v| v.as_str()) {
                 match AudioAnalysisMetrics::analyze_wav_file(wav_path_str) {
-                    Ok(metrics) => ToolCallResult::json(&metrics),
+                    Ok(metrics) => {
+                        let mut val = serde_json::to_value(&metrics).unwrap_or_default();
+                        if let Some(obj) = val.as_object_mut() {
+                            obj.insert("peak_dbfs".to_string(), json!(metrics.peak_dbfs));
+                            obj.insert("rms_dbfs".to_string(), json!(metrics.rms_dbfs));
+                            obj.insert("crest_factor_db".to_string(), json!(metrics.crest_factor_db));
+                            obj.insert("spectral_centroid_hz".to_string(), json!(metrics.spectral_centroid_hz));
+                            obj.insert("spectral_bands".to_string(), json!({
+                                "sub_bass_energy": metrics.spectral_bands.sub_bass_energy_pct,
+                                "low_mid_energy": metrics.spectral_bands.low_mid_energy_pct,
+                                "high_mid_energy": metrics.spectral_bands.high_mid_energy_pct,
+                                "high_energy": metrics.spectral_bands.high_energy_pct,
+                            }));
+                        }
+                        ToolCallResult::json(&val)
+                    }
                     Err(e) => ToolCallResult::error(format!("Failed to analyze WAV: {}", e)),
                 }
             } else {
@@ -2345,7 +2487,20 @@ pub fn call_tool(state: &mut DawState, name: &str, args: &Value) -> ToolCallResu
                 let renderer = DemoArrangementRenderer::new(state.sample_rate, state.bpm.max(60.0));
                 let samples = renderer.render_demo_seconds(dur);
                 let metrics = AudioAnalysisMetrics::analyze_interleaved(&samples, state.sample_rate as u32, 2);
-                ToolCallResult::json(&metrics)
+                let mut val = serde_json::to_value(&metrics).unwrap_or_default();
+                if let Some(obj) = val.as_object_mut() {
+                    obj.insert("peak_dbfs".to_string(), json!(metrics.peak_dbfs));
+                    obj.insert("rms_dbfs".to_string(), json!(metrics.rms_dbfs));
+                    obj.insert("crest_factor_db".to_string(), json!(metrics.crest_factor_db));
+                    obj.insert("spectral_centroid_hz".to_string(), json!(metrics.spectral_centroid_hz));
+                    obj.insert("spectral_bands".to_string(), json!({
+                        "sub_bass_energy": metrics.spectral_bands.sub_bass_energy_pct,
+                        "low_mid_energy": metrics.spectral_bands.low_mid_energy_pct,
+                        "high_mid_energy": metrics.spectral_bands.high_mid_energy_pct,
+                        "high_energy": metrics.spectral_bands.high_energy_pct,
+                    }));
+                }
+                ToolCallResult::json(&val)
             }
         }
         "preview_synth_patch" => {
@@ -2784,6 +2939,7 @@ pub fn call_tool(state: &mut DawState, name: &str, args: &Value) -> ToolCallResu
             };
 
             let mut clip = clip;
+            clip.name = sample_path.to_string();
             clip.warper.config.mode = mode;
             let len_beats = clip.length_beats;
             state.audio_clips.insert((track_id, slot_id), clip);
@@ -3023,6 +3179,13 @@ pub fn call_tool(state: &mut DawState, name: &str, args: &Value) -> ToolCallResu
                     trk.sends[send_index].level_db = level_db.clamp(-70.0, 6.0);
                 }
             }
+            if let Some(p_trk) = state.project.tracks.get_mut(track_id as usize) {
+                if send_index == 0 {
+                    p_trk.mixer.send_a_db = level_db.clamp(-70.0, 6.0);
+                } else if send_index == 1 {
+                    p_trk.mixer.send_b_db = level_db.clamp(-70.0, 6.0);
+                }
+            }
 
             ToolCallResult::json(&json!({
                 "status": "send_updated",
@@ -3039,7 +3202,12 @@ pub fn call_tool(state: &mut DawState, name: &str, args: &Value) -> ToolCallResu
                 _ => 0,
             };
 
-            let scale_str = match args.get("scale_name").and_then(|v| v.as_str()) {
+            let scale_str = match args
+                .get("scale_name")
+                .or_else(|| args.get("mode"))
+                .or_else(|| args.get("scale"))
+                .and_then(|v| v.as_str())
+            {
                 Some(s) => s.to_lowercase(),
                 None => return ToolCallResult::error("Missing 'scale_name' parameter"),
             };

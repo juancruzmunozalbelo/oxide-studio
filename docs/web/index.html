@@ -6,6 +6,22 @@
   <title>Oxide Studio Web — Native Electronic Music Workstation (v1.0.0)</title>
   <meta name="description" content="Oxide Studio Web Edition: Full single-window in-browser electronic music DAW. 16-voice TR-909 synthesizer, polyphonic Suite synth, 5 audio FX, studio mixer with VU meters, 60 FPS visualizers, bilingual OKF copilot, and .wav / .als export.">
   <link rel="stylesheet" href="daw.css">
+  <style>
+    .preset-pill {
+      background: var(--surface-sunken);
+      border: 1px solid var(--surface-border);
+      color: var(--text-secondary);
+      font-size: 10px;
+      font-family: var(--font-mono);
+      padding: 3px 8px;
+      border-radius: 1px;
+      cursor: pointer;
+    }
+    .preset-pill:hover {
+      color: var(--text-primary);
+      border-color: var(--surface-border-highlight);
+    }
+  </style>
   <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><rect width='100' height='100' rx='8' fill='%23ffbe00'/><text x='50' y='68' font-family='monospace' font-weight='900' font-size='60' text-anchor='middle' fill='%2307080a'>O</text></svg>">
 </head>
 <body class="daw-body">
@@ -83,7 +99,7 @@
         <!-- Groove Pool Swing -->
         <div class="swing-box" title="Groove Pool Swing (50% = Straight, 75% = Hard Shuffle)">
           <span class="ctrl-label">SWING</span>
-          <input type="range" id="swing-slider" class="range-slider" min="50" max="75" value="56">
+          <input type="range" id="swing-slider" class="range-slider" min="0" max="75" value="56">
           <span id="swing-val" class="tabular">56%</span>
         </div>
 
@@ -509,6 +525,8 @@
 
             <div class="preset-group">
               <span class="ctrl-label">PRESETS:</span>
+              <button class="preset-pill" id="btn-preset-peak" title="Load Peak-Time Techno Session (135 BPM G Minor)">Peak 135 (Gm)</button>
+              <button class="preset-pill" id="btn-preset-holo" title="Load Melodic Techno Session (126 BPM F# Minor)">Melodic 126 (F#m)</button>
               <button class="btn-preset" data-preset="techno">Peak Techno (136)</button>
               <button class="btn-preset" data-preset="house">House 909 (128)</button>
               <button class="btn-preset" data-preset="rkt">RKT Turreo (105)</button>
