@@ -28,10 +28,10 @@
 
 ## 1. Vision & Workstation Architecture
 
-**Oxide Studio** is a production-grade, real-time digital audio workstation (DAW) written in modern, memory-safe Rust. It is architected from a clean-room **Clean-Room Engineering** structural and algorithmic audit of two foundational audio systems:
+**Oxide Studio** is a production-grade, real-time digital audio workstation (DAW) written in modern, memory-safe Rust. It is architected from mathematical DSP first principles around two core foundations:
 
-1. **Ableton Learning Synths Playground** (`rnbomatic.wasm`, Cycling '74 Max RNBO `0.14.0` runtime, WebAssembly `code[817]`, Loop #84): Complete extraction and mathematical reconstruction of the 8-voice polyphonic synthesizer engine, 23 normalized RNBO parameter curves, 38 factory sound presets, 17 XY macro breakpoint modulations, and Mystran's 2x-oversampled zero-delay feedback (ZDF) 4-pole transistor ladder filter featuring a rational $[4/4]$ Padé approximation for $\tanh(x)/x$.
-2. **Ableton Live 12.4.6 Suite** (`OEngine`, `ableton::dsp`, `ableton::devices`, and the Live Object Model): Systematic reconstruction of Live 12's single-window modular workstation UX, dynamic per-track device chains, 10 flagship instruments, 6-mode audio warping engine (`OWarper`), global groove pool with `.agr` timing extraction, multi-lane comping with automatic micro-crossfades, generative and transformative MIDI algorithms, microtonal tuning systems, and a bidirectional dual-target Model Context Protocol (MCP) server.
+1. **Polyphonic Subtractive & FM Synthesis Engine**: An 8-voice polyphonic synthesizer architecture featuring 23 normalized parameter curves, 38 factory sound presets, 17 XY macro breakpoint modulations, and Mystran's 2x-oversampled zero-delay feedback (ZDF) 4-pole transistor ladder filter with a rational $[4/4]$ Padé approximation for $\tanh(x)/x$.
+2. **Single-Window Electronic Workstation & Dual-Target MCP Server**: A unified Session/Arrangement workstation UX with dynamic per-track device chains, 10 flagship instruments, a 6-mode audio warping engine (`OWarper`), a global groove pool with `.agr` timing support, multi-lane comping with automatic micro-crossfades, generative and transformative MIDI algorithms, microtonal tuning systems, and a bidirectional 76-tool Model Context Protocol (MCP) server.
 
 Oxide Studio operates in two distinct execution modes:
 - **Autonomous Native DAW**: In-process real-time CoreAudio streaming (`cpal`) or headless, deterministic 24-bit WAV rendering with lock-free parameter ring buffers and 60 FPS Metal GPU UI.
@@ -61,41 +61,41 @@ Oxide Studio is structured as a modular workspace containing 11 specialized Rust
 ```mermaid
 flowchart TD
     subgraph Host["Host Environment & AI Agents"]
-        Agent["Autonomous Agent / LLM Client<br/>(Claude Desktop / Antigravity / Cursor)"]
+        Agent["Autonomous Agent / LLM Client<br/>Claude Desktop / Antigravity / Cursor"]
         User["Human Musician / Sound Designer"]
     end
 
     subgraph MCP["MCP Control Layer"]
-        StdioMCP["crates/oxide-mcp<br/>(76 Tools, JSON-RPC 2.0 stdio)"]
+        StdioMCP["crates/oxide-mcp<br/>76 Tools, JSON-RPC 2.0 stdio"]
     end
 
     subgraph NativeEngine["Native Rust DAW Engine"]
-        Core["crates/oxide-core<br/>(Buffers, SPSC Command Ring, Telemetry, Scales, Tunings)"]
-        DSP["crates/oxide-dsp<br/>(Playground, Wavetable, Operator, Drift, Meld, Physical Suite)"]
-        Drums["crates/oxide-drums<br/>(Simpler Sampler, DrumRack128, 808/909 Physical Synth)"]
-        FX["crates/oxide-fx<br/>(DeviceChain, EQ Eight, Roar ADAA, Glue, Auto Filter ZDF, OTT)"]
-        Timeline["crates/oxide-timeline<br/>(Session Matrix, Timeline, 6-Mode OWarper, Comping, Grooves)"]
-        Audio["crates/oxide-audio<br/>(Real-Time cpal CoreAudio Engine, Zero-Alloc Callbacks)"]
-        Bounce["crates/oxide-bounce<br/>(Offline 24-bit WAV Bounce, FFT Spectral Analyzer, Remix Stems)"]
-        Scanner["crates/oxide-plugin-scanner<br/>(Out-of-Process macOS AUv2 / VST3 / CLAP Supervisor)"]
-        Project["crates/oxide-project<br/>(.oxide.json / .als Ableton Live Set I/O)"]
-        GUI["crates/oxide-gui<br/>(5-Zone 60 FPS eframe/egui Studio UI on Metal & AI Copilot)"]
+        Core["crates/oxide-core<br/>Buffers, SPSC Command Ring, Telemetry, Scales, Tunings"]
+        DSP["crates/oxide-dsp<br/>Playground, Wavetable, Operator, Drift, Meld, Physical Suite"]
+        Drums["crates/oxide-drums<br/>Simpler Sampler, DrumRack128, 808/909 Physical Synth"]
+        FX["crates/oxide-fx<br/>DeviceChain, EQ Eight, Roar ADAA, Glue, Auto Filter ZDF, OTT"]
+        Timeline["crates/oxide-timeline<br/>Session Matrix, Timeline, 6-Mode OWarper, Comping, Grooves"]
+        Audio["crates/oxide-audio<br/>Real-Time cpal CoreAudio Engine, Zero-Alloc Callbacks"]
+        Bounce["crates/oxide-bounce<br/>Offline 24-bit WAV Bounce, FFT Spectral Analyzer, Remix Stems"]
+        Scanner["crates/oxide-plugin-scanner<br/>Out-of-Process macOS AUv2 / VST3 / CLAP Supervisor"]
+        Project["crates/oxide-project<br/>.oxide.json & Open .als Project I/O"]
+        GUI["crates/oxide-gui<br/>5-Zone 60 FPS eframe/egui Studio UI on Metal & AI Copilot"]
     end
 
     subgraph LiveRpcBridge["Native Live GUI RPC Bridge"]
         LOMSocket["TCP JSON-RPC 2.0 Server<br/>127.0.0.1:9877"]
-        LiveGui["crates/oxide-gui/src/live_rpc.rs<br/>(Native Live GUI RPC Server)"]
+        LiveGui["crates/oxide-gui/src/live_rpc.rs<br/>Native Live GUI RPC Server"]
     end
 
-    Agent <-->|stdio JSON-RPC| StdioMCP
-    User <-->|GUI / Metal| GUI
+    Agent <-->|"stdio JSON-RPC"| StdioMCP
+    User <-->|"GUI / Metal"| GUI
 
-    StdioMCP <-->|In-Process Dispatch| Core
-    StdioMCP <-->|TCP JSON-RPC 2.0 (127.0.0.1:9877)| LOMSocket
+    StdioMCP <-->|"In-Process Dispatch"| Core
+    StdioMCP <-->|"TCP JSON-RPC 2.0 on 127.0.0.1:9877"| LOMSocket
     LOMSocket <--> LiveGui
     LiveGui <--> GUI
 
-    GUI <-->|Lock-Free Command Ring / SPSC Telemetry| Audio
+    GUI <-->|"Lock-Free Command Ring / SPSC Telemetry"| Audio
     Audio <--> Core
     Audio --> DSP
     Audio --> Drums
@@ -112,15 +112,15 @@ flowchart TD
 ### Workspace Crates Summary
 
 - `crates/oxide-core`: Lock-free single-producer single-consumer (SPSC) command rings, real-time `AudioTelemetry` snapshots (RMS, peak dBFS, 64-bin FFT, 256-sample oscilloscope), `AudioBuffer` fixed-size stereo audio structures, 14 `ScaleMode` definitions, and 4 microtonal `TuningSystem` models.
-- `crates/oxide-dsp`: Polyphonic synthesis engines (Learning Synths Playground, Wavetable, Operator FM, Drift, Meld bi-timbral, Analog, Collision, Tension, Electric), Mystran 2x-oversampled ZDF ladder filter with Padé saturator, and Cytomic state-variable filters.
+- `crates/oxide-dsp`: Polyphonic synthesis engines (Playground Synth, Wavetable, Operator FM, Drift, Meld bi-timbral, Analog, Collision, Tension, Electric), Mystran 2x-oversampled ZDF ladder filter with Padé saturator, and Cytomic state-variable filters.
 - `crates/oxide-drums`: Physical modeling percussion (808 kick/snare, 909 open/closed hi-hats, FM cowbell/rimshot, Karplus-Strong claps), 3-mode `SimplerSampler`, and 128-pad `DrumRack128` with choke groups and return sends.
-- `crates/oxide-fx`: Dynamic serial/parallel `DeviceChain` pipeline, `EQ Eight` with real-time Bode response, `Roar` multi-stage saturator with 1st-order ADAA antialiasing, `Glue Compressor`, Cytomic `Auto Filter` with 5 circuit drive models, `OTT` multiband dynamics, `Hybrid Reverb`, `Spectral Resonator`, and standard Live 12 MIDI effects.
-- `crates/oxide-timeline`: Dual-paradigm Session Matrix and Arrangement Timeline, 6-mode `OWarper` audio warping engine, multi-lane comping with equal-power micro-crossfades, `.agr` Groove Pool, and Live 12 algorithmic MIDI Generators and Transformers.
+- `crates/oxide-fx`: Dynamic serial/parallel `DeviceChain` pipeline, `EQ Eight` with real-time Bode response, `Roar` multi-stage saturator with 1st-order ADAA antialiasing, `Glue Compressor`, Cytomic `Auto Filter` with 5 circuit drive models, `OTT` multiband dynamics, `Hybrid Reverb`, `Spectral Resonator`, and MIDI effects.
+- `crates/oxide-timeline`: Dual-paradigm Session Matrix and Arrangement Timeline, 6-mode `OWarper` audio warping engine, multi-lane comping with equal-power micro-crossfades, `.agr` Groove Pool, and algorithmic MIDI Generators and Transformers.
 - `crates/oxide-audio`: Zero-allocation CoreAudio integration via `cpal`, running bounded real-time audio threads with priority scheduling and sub-millisecond telemetry feedback.
 - `crates/oxide-bounce`: Deterministic headless offline 24-bit WAV bounce renderer and 8D spectral audio analysis engine.
 - `crates/oxide-plugin-scanner`: Out-of-process isolation worker and supervisor scanning AUv2, VST3, and CLAP plugins without crashing the workstation host.
-- `crates/oxide-project`: JSON `.oxide.json` and Ableton Live Gzip XML `.als` project parser, stem exporter, and cosine similarity browser index.
-- `crates/oxide-gui`: Single-window 60 FPS workstation interface rendered natively on macOS Metal using `egui` and `eframe`, themed in Live 12 Dark Carbon (`#07080a` / `#111318` / `#ffbe00` / `#00d2ff`).
+- `crates/oxide-project`: JSON `.oxide.json` and open Gzip XML `.als` project parser, stem exporter, and cosine similarity browser index.
+- `crates/oxide-gui`: Single-window 60 FPS workstation interface rendered natively on macOS Metal using `egui` and `eframe`, themed in Studio Dark Carbon (`#07080a` / `#111318` / `#ffbe00` / `#00d2ff`).
 - `crates/oxide-mcp`: Dual-target Model Context Protocol server exposing 76 JSON-RPC 2.0 tools over `stdio`.
 
 ---
@@ -129,8 +129,8 @@ flowchart TD
 
 Oxide Studio implements 10 full-featured instrument devices directly inside the native Rust DSP layer:
 
-### 1. Learning Synths Playground Synth (`SynthEngine`)
-- **Origin**: Exact clean-room decompilation of Cycling '74 Max RNBO `0.14.0` (`rnbomatic.wasm`).
+### 1. Playground Polyphonic Synth (`SynthEngine`)
+- **Architecture**: Clean-room 8-voice polyphonic subtractive synthesizer built from published ZDF filter and PolyBLEP oscillator mathematics.
 - **Polyphony**: 8-voice polyphonic architecture with dynamic voice allocation and voice-stealing algorithms.
 - **Architecture**: Dual multi-shape oscillators with variable pulse width, saw detuning (coarse $\pm 48$ semitones, fine $\pm 100$ cents), sub-oscillator, and analog white noise generator.
 - **Parameters**: 23 canonical parameters across pitch, filter, amplitude ADSR, modulation ADSR, and multi-shape LFO.
