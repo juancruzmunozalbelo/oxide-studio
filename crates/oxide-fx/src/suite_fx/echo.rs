@@ -101,7 +101,7 @@ impl AudioEffectDevice for Echo {
             return;
         }
 
-        let count = buffer.frame_count.min(1024);
+        let count = buffer.frame_count.min(oxide_core::MAX_BUFFER_SIZE);
         if count == 0 {
             return;
         }
@@ -156,6 +156,37 @@ impl AudioEffectDevice for Echo {
 
             buffer.left[i] = dry_l * (1.0 - self.dry_wet) + wet_l * self.dry_wet;
             buffer.right[i] = dry_r * (1.0 - self.dry_wet) + wet_r * self.dry_wet;
+        }
+    }
+
+    fn set_parameter(&mut self, param_id: u32, value: f32) {
+        if !value.is_finite() {
+            return;
+        }
+        match param_id {
+            0 => self.dry_wet = value.clamp(0.0, 1.0),
+            1 => self.delay_time_l_ms = value.clamp(1.0, 2400.0),
+            2 => self.delay_time_r_ms = value.clamp(1.0, 2400.0),
+            3 => self.feedback = value.clamp(0.0, 0.99),
+            4 => self.cross_feed = value.clamp(0.0, 1.0),
+            5 => self.wow = value.clamp(0.0, 1.0),
+            6 => self.flutter = value.clamp(0.0, 1.0),
+            7 => self.ducking_db = value.clamp(-30.0, 0.0),
+            _ => {}
+        }
+    }
+
+    fn get_parameter(&self, param_id: u32) -> f32 {
+        match param_id {
+            0 => self.dry_wet,
+            1 => self.delay_time_l_ms,
+            2 => self.delay_time_r_ms,
+            3 => self.feedback,
+            4 => self.cross_feed,
+            5 => self.wow,
+            6 => self.flutter,
+            7 => self.ducking_db,
+            _ => 0.0,
         }
     }
 }

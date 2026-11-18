@@ -12,6 +12,8 @@ pub enum TrackType {
     MidiSynth,
     DrumRack,
     Audio,
+    Return,
+    Group,
 }
 
 /// Instrument engine loaded on a track.
@@ -80,6 +82,36 @@ impl TrackDefinition {
             name: name.into(),
             color_hex: "#00e676".to_string(),
             track_type: TrackType::Audio,
+            mixer: MixerState::default(),
+            instrument: InstrumentConfig::None,
+            insert_fx: Vec::new(),
+            session_clips: Vec::new(),
+            arrangement_clips: Vec::new(),
+            automation_lanes: Vec::new(),
+        }
+    }
+
+    pub fn new_return(id: u32, name: impl Into<String>) -> Self {
+        Self {
+            id,
+            name: name.into(),
+            color_hex: "#00d2ff".to_string(),
+            track_type: TrackType::Return,
+            mixer: MixerState::default(),
+            instrument: InstrumentConfig::None,
+            insert_fx: Vec::new(),
+            session_clips: Vec::new(),
+            arrangement_clips: Vec::new(),
+            automation_lanes: Vec::new(),
+        }
+    }
+
+    pub fn new_group(id: u32, name: impl Into<String>) -> Self {
+        Self {
+            id,
+            name: name.into(),
+            color_hex: "#b388ff".to_string(),
+            track_type: TrackType::Group,
             mixer: MixerState::default(),
             instrument: InstrumentConfig::None,
             insert_fx: Vec::new(),

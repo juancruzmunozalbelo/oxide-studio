@@ -347,7 +347,7 @@ mod tests {
                             }
                             DeckVariant::Drums(bank) => {
                                 app.deck_tab = DeckTab::DrumSequencer;
-                                let seq_id = egui::Id::new("aruston_909_sequencer_state");
+                                let seq_id = egui::Id::new("oxide_909_sequencer_state");
                                 ctx.data_mut(|d| {
                                     let mut s = DrumSequencerState::default();
                                     s.bank = *bank;

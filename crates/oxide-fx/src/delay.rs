@@ -27,8 +27,8 @@ impl DelaySubdivision {
 }
 
 pub struct TempoDelay {
-    buffer_left: Box<[f32; MAX_DELAY_SAMPLES]>,
-    buffer_right: Box<[f32; MAX_DELAY_SAMPLES]>,
+    buffer_left: Box<[f32]>,
+    buffer_right: Box<[f32]>,
     write_pos: usize,
     sample_rate: f32,
     bpm: f64,
@@ -54,8 +54,8 @@ impl TempoDelay {
     pub fn new(sample_rate: f32, bpm: f64) -> Self {
         let sr = if sample_rate <= 0.0 { 44100.0 } else { sample_rate };
         let mut delay = Self {
-            buffer_left: Box::new([0.0; MAX_DELAY_SAMPLES]),
-            buffer_right: Box::new([0.0; MAX_DELAY_SAMPLES]),
+            buffer_left: vec![0.0; MAX_DELAY_SAMPLES].into_boxed_slice(),
+            buffer_right: vec![0.0; MAX_DELAY_SAMPLES].into_boxed_slice(),
             write_pos: 0,
             sample_rate: sr,
             bpm: if bpm <= 0.0 { 120.0 } else { bpm },

@@ -40,12 +40,9 @@ pub fn extract_bundle_info(bundle_path: &Path, format: PluginFormat) -> BundleIn
     let mut identifier = format!("local.{}.{}", format.as_str().to_lowercase(), default_name);
     let mut vendor = "Unknown".to_string();
     let mut version = "1.0.0".to_string();
-    let mut category = match format {
-        PluginFormat::AudioUnit => PluginCategory::Effect,
-        PluginFormat::Vst3 => PluginCategory::Instrument,
-    };
+    let mut category = PluginCategory::Effect;
+    let mut category_determined = format == PluginFormat::AudioUnit;
     let mut executable_name = None;
-
 
     if let Some(ref plist_file) = actual_plist {
         let mut acc = PlistAccumulator {
@@ -55,6 +52,7 @@ pub fn extract_bundle_info(bundle_path: &Path, format: PluginFormat) -> BundleIn
             vendor: &mut vendor,
             version: &mut version,
             category: &mut category,
+            category_determined: &mut category_determined,
             executable_name: &mut executable_name,
         };
 
@@ -62,6 +60,63 @@ pub fn extract_bundle_info(bundle_path: &Path, format: PluginFormat) -> BundleIn
             apply_plist_json(&parsed, &mut acc);
         } else if let Ok(content) = fs::read_to_string(plist_file) {
             apply_plist_xml(&content, &mut acc);
+        }
+    }
+
+    // For VST3 bundles, inspect moduleinfo.json if present for accurate Effect vs Instrument classification
+    if format == PluginFormat::Vst3 {
+        let moduleinfo_path = bundle_path.join("Contents/Resources/moduleinfo.json");
+        let alt_moduleinfo_path = bundle_path.join("moduleinfo.json");
+        let actual_moduleinfo = if moduleinfo_path.exists() {
+            Some(moduleinfo_path)
+        } else if alt_moduleinfo_path.exists() {
+            Some(alt_moduleinfo_path)
+        } else {
+            None
+        };
+
+        if let Some(ref mi_path) = actual_moduleinfo {
+            if let Ok(mi_content) = fs::read_to_string(mi_path) {
+                if let Ok(mi_json) = serde_json::from_str::<serde_json::Value>(&mi_content) {
+                    apply_vst3_moduleinfo(
+                        &mi_json,
+                        &mut name,
+                        &mut vendor,
+                        &mut version,
+                        &mut category,
+                        &mut category_determined,
+                    );
+                }
+            }
+        }
+
+        // Heuristic fallback when neither Info.plist nor moduleinfo.json specified category
+        if !category_determined {
+            let lower_name = name.to_lowercase();
+            let looks_like_fx = lower_name.contains("eq")
+                || lower_name.contains("comp")
+                || lower_name.contains("reverb")
+                || lower_name.contains("delay")
+                || lower_name.contains("filter")
+                || lower_name.contains("limiter")
+                || lower_name.contains("saturat")
+                || lower_name.contains("chorus")
+                || lower_name.contains("phaser")
+                || lower_name.contains("flanger")
+                || lower_name.contains("distort")
+                || lower_name.contains("effect")
+                || lower_name.contains("fx");
+            let looks_like_inst = lower_name.contains("synth")
+                || lower_name.contains("sampler")
+                || lower_name.contains("instrument")
+                || lower_name.contains("piano")
+                || lower_name.contains("organ")
+                || lower_name.contains("drum");
+            if looks_like_inst && !looks_like_fx {
+                category = PluginCategory::Instrument;
+            } else {
+                category = PluginCategory::Effect;
+            }
         }
     }
 
@@ -116,7 +171,63 @@ struct PlistAccumulator<'a> {
     vendor: &'a mut String,
     version: &'a mut String,
     category: &'a mut PluginCategory,
+    category_determined: &'a mut bool,
     executable_name: &'a mut Option<String>,
+}
+
+fn apply_vst3_moduleinfo(
+    val: &serde_json::Value,
+    name: &mut String,
+    vendor: &mut String,
+    version: &mut String,
+    category: &mut PluginCategory,
+    category_determined: &mut bool,
+) {
+    if let Some(classes) = val.get("Classes").and_then(|v| v.as_array()) {
+        for cls in classes {
+            let cls_cat = cls.get("Category").and_then(|v| v.as_str()).unwrap_or("");
+            if !cls_cat.is_empty() && cls_cat != "Audio Module Class" {
+                continue;
+            }
+            if let Some(cls_name) = cls.get("Name").and_then(|v| v.as_str()) {
+                if !cls_name.trim().is_empty() {
+                    *name = cls_name.trim().to_string();
+                }
+            }
+            if let Some(cls_vendor) = cls.get("Vendor").and_then(|v| v.as_str()) {
+                if *vendor == "Unknown" && !cls_vendor.trim().is_empty() {
+                    *vendor = cls_vendor.trim().to_string();
+                }
+            }
+            if let Some(cls_ver) = cls.get("Version").and_then(|v| v.as_str()) {
+                if !cls_ver.trim().is_empty() {
+                    *version = cls_ver.trim().to_string();
+                }
+            }
+            if let Some(sub_cats) = cls.get("Sub Categories").and_then(|v| v.as_array()) {
+                for sc in sub_cats {
+                    if let Some(s) = sc.as_str() {
+                        let lower = s.to_lowercase();
+                        if lower.contains("instrument") || lower.contains("synth") {
+                            *category = PluginCategory::Instrument;
+                            *category_determined = true;
+                            return;
+                        } else if lower.contains("fx")
+                            || lower.contains("effect")
+                            || lower.contains("dynamics")
+                            || lower.contains("spatial")
+                            || lower.contains("analyzer")
+                            || lower.contains("mastering")
+                        {
+                            *category = PluginCategory::Effect;
+                            *category_determined = true;
+                            return;
+                        }
+                    }
+                }
+            }
+        }
+    }
 }
 
 fn apply_plist_json(val: &serde_json::Value, acc: &mut PlistAccumulator<'_>) {
@@ -164,8 +275,14 @@ fn apply_plist_json(val: &serde_json::Value, acc: &mut PlistAccumulator<'_>) {
 
             if let Some(comp_type) = first_comp.get("type").and_then(|v| v.as_str()) {
                 match comp_type {
-                    "aumu" | "aumi" | "augn" => *acc.category = PluginCategory::Instrument,
-                    "aufx" | "aumf" | "auol" => *acc.category = PluginCategory::Effect,
+                    "aumu" | "aumi" | "augn" => {
+                        *acc.category = PluginCategory::Instrument;
+                        *acc.category_determined = true;
+                    }
+                    "aufx" | "aumf" | "auol" => {
+                        *acc.category = PluginCategory::Effect;
+                        *acc.category_determined = true;
+                    }
                     _ => {}
                 }
             }
@@ -202,8 +319,10 @@ fn apply_plist_xml(xml: &str, acc: &mut PlistAccumulator<'_>) {
 
     if xml.contains("aumu") || xml.contains("aumi") {
         *acc.category = PluginCategory::Instrument;
+        *acc.category_determined = true;
     } else if xml.contains("aufx") || xml.contains("aumf") {
         *acc.category = PluginCategory::Effect;
+        *acc.category_determined = true;
     }
 }
 
@@ -346,5 +465,39 @@ mod tests {
             assert!(info.architectures.contains(&"arm64".to_string()));
             assert!(info.parameters.len() >= 4);
         }
+    }
+
+    #[test]
+    fn test_vst3_effect_vs_instrument_classification() {
+        let base = std::env::temp_dir().join("oxide_vst3_classify_test");
+        let _ = fs::remove_dir_all(&base);
+
+        let fx_bundle = base.join("ValhallaVintageVerb.vst3");
+        fs::create_dir_all(fx_bundle.join("Contents/Resources")).unwrap();
+        fs::write(
+            fx_bundle.join("Contents/Resources/moduleinfo.json"),
+            r#"{"Classes":[{"Category":"Audio Module Class","Name":"ValhallaVintageVerb","Vendor":"Valhalla DSP","Version":"4.0.0","Sub Categories":["Fx|Reverb"]}]}"#,
+        )
+        .unwrap();
+        let fx_info = extract_bundle_info(&fx_bundle, PluginFormat::Vst3);
+        assert_eq!(fx_info.category, PluginCategory::Effect);
+        assert_eq!(fx_info.vendor, "Valhalla DSP");
+
+        let bare_fx_bundle = base.join("CustomProcessor.vst3");
+        fs::create_dir_all(&bare_fx_bundle).unwrap();
+        let bare_info = extract_bundle_info(&bare_fx_bundle, PluginFormat::Vst3);
+        assert_eq!(bare_info.category, PluginCategory::Effect);
+
+        let inst_bundle = base.join("Vital.vst3");
+        fs::create_dir_all(inst_bundle.join("Contents/Resources")).unwrap();
+        fs::write(
+            inst_bundle.join("Contents/Resources/moduleinfo.json"),
+            r#"{"Classes":[{"Category":"Audio Module Class","Name":"Vital","Vendor":"Matt Tytel","Version":"1.5.5","Sub Categories":["Instrument|Synth"]}]}"#,
+        )
+        .unwrap();
+        let inst_info = extract_bundle_info(&inst_bundle, PluginFormat::Vst3);
+        assert_eq!(inst_info.category, PluginCategory::Instrument);
+
+        let _ = fs::remove_dir_all(&base);
     }
 }

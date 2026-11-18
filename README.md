@@ -7,7 +7,7 @@
 [![Tests](https://img.shields.io/badge/tests-674%20passing-00f758.svg)](https://github.com/juancruzmunozalbelo/oxide-studio/actions)
 [![Layout Guard](https://img.shields.io/badge/layout%20guard-576%20frames%20clean-954eb2.svg)](crates/oxide-gui/tests/adversarial_acoustic_layout_stress_test.rs)
 
-> **Native Rust Electronic Music DAW, Oxide Studio Workstation Architecture & DSP Specification with Open .als Interop & 76-Tool Dual-Target Model Context Protocol (MCP) Server.**  
+> **Native Rust Electronic Music DAW, Oxide Studio Workstation Architecture & DSP Specification with Open .als Interop & 80-Tool Dual-Target Model Context Protocol (MCP) Server.**  
 > *Repository:* [https://github.com/juancruzmunozalbelo/oxide-studio](https://github.com/juancruzmunozalbelo/oxide-studio)  
 > *Interactive Web Workstation:* [https://juancruzmunozalbelo.github.io/oxide-studio/web/](https://juancruzmunozalbelo.github.io/oxide-studio/web/)  
 > *Showcase & Download Hub:* [https://juancruzmunozalbelo.github.io/oxide-studio/](https://juancruzmunozalbelo.github.io/oxide-studio/)  
@@ -31,11 +31,11 @@
 **Oxide Studio** is a production-grade, real-time digital audio workstation (DAW) written in modern, memory-safe Rust. It is architected from mathematical DSP first principles around two core foundations:
 
 1. **Polyphonic Subtractive & FM Synthesis Engine**: An 8-voice polyphonic synthesizer architecture featuring 23 normalized parameter curves, 38 factory sound presets, 17 XY macro breakpoint modulations, and Mystran's 2x-oversampled zero-delay feedback (ZDF) 4-pole transistor ladder filter with a rational $[4/4]$ Padé approximation for $\tanh(x)/x$.
-2. **Single-Window Electronic Workstation & Dual-Target MCP Server**: A unified Session/Arrangement workstation UX with dynamic per-track device chains, 10 flagship instruments, a 6-mode audio warping engine (`OWarper`), a global groove pool with `.agr` timing support, multi-lane comping with automatic micro-crossfades, generative and transformative MIDI algorithms, microtonal tuning systems, and a bidirectional 76-tool Model Context Protocol (MCP) server.
+2. **Single-Window Electronic Workstation & Dual-Target MCP Server**: A unified Session/Arrangement workstation UX with dynamic per-track device chains, 10 flagship instruments, a 6-mode audio warping engine (`OWarper`), a global groove pool with `.agr` timing support, multi-lane comping with automatic micro-crossfades, generative and transformative MIDI algorithms, microtonal tuning systems, and a bidirectional 80-tool Model Context Protocol (MCP) server.
 
 Oxide Studio operates in two distinct execution modes:
 - **Autonomous Native DAW**: In-process real-time CoreAudio streaming (`cpal`) or headless, deterministic 24-bit WAV rendering with lock-free parameter ring buffers and 60 FPS Metal GPU UI.
-- **Live Studio Copilot & Autonomous Assistant**: A 76-tool Model Context Protocol server exposing comprehensive composition, mixing, synthesis, and analysis capabilities across both the internal native Rust engine and running workstation sessions via an internal JSON-RPC 2.0 TCP bridge (`127.0.0.1:9877`).
+- **Live Studio Copilot & Autonomous Assistant**: An 80-tool Model Context Protocol server (`65` native tools when `OXIDE_DISABLE_LEGACY_LIVE12_TOOLS=1` is set) exposing comprehensive composition, mixing, synthesis, `.als` interop, stem export, and analysis capabilities across both the internal native Rust engine and running workstation sessions via an internal JSON-RPC 2.0 TCP bridge (`127.0.0.1:9877`).
 
 ---
 
@@ -66,7 +66,7 @@ flowchart TD
     end
 
     subgraph MCP["MCP Control Layer"]
-        StdioMCP["crates/oxide-mcp<br/>76 Tools, JSON-RPC 2.0 stdio"]
+        StdioMCP["crates/oxide-mcp<br/>80 Tools, JSON-RPC 2.0 stdio"]
     end
 
     subgraph NativeEngine["Native Rust DAW Engine"]
@@ -121,7 +121,7 @@ flowchart TD
 - `crates/oxide-plugin-scanner`: Out-of-process isolation worker and supervisor scanning AUv2, VST3, and CLAP plugins without crashing the workstation host.
 - `crates/oxide-project`: JSON `.oxide.json` and open Gzip XML `.als` project parser, stem exporter, and cosine similarity browser index.
 - `crates/oxide-gui`: Single-window 60 FPS workstation interface rendered natively on macOS Metal using `egui` and `eframe`, themed in Studio Dark Carbon (`#07080a` / `#111318` / `#ffbe00` / `#00d2ff`).
-- `crates/oxide-mcp`: Dual-target Model Context Protocol server exposing 76 JSON-RPC 2.0 tools over `stdio`.
+- `crates/oxide-mcp`: Dual-target Model Context Protocol server exposing 80 JSON-RPC 2.0 tools over `stdio` (or 65 native tools with `OXIDE_DISABLE_LEGACY_LIVE12_TOOLS=1`).
 
 ---
 
@@ -289,16 +289,18 @@ Oxide Studio provides a native single-window workstation interface rendered dire
 
 ---
 
-## 7. 76-Tool Dual-Target MCP Server (`oxide-mcp`)
+## 7. 80-Tool Dual-Target MCP Server (`oxide-mcp`)
 
-The Model Context Protocol (MCP) server enables autonomous AI agents to inspect, control, compose, synthesize, and analyze music programmatically. It operates over standard `stdio` JSON-RPC 2.0.
+The Model Context Protocol (MCP) server enables autonomous AI agents to inspect, control, compose, synthesize, and analyze music programmatically. It operates over standard `stdio` JSON-RPC 2.0 (supporting both newline-delimited JSON and `Content-Length:` framing). Setting `OXIDE_DISABLE_LEGACY_LIVE12_TOOLS=1` exposes only the 65 native Oxide Studio tools without the 15 `live12_*` RPC wrapper tools.
 
 ### Tool Catalogue by Functional Domain
 
-#### Domain 1: Project & Transport (8 Tools)
+#### Domain 1: Project, .als Interop & Transport (10 Tools)
 - `project_new`: Initialize a new project with default lead synthesizer and 909 drum kit.
-- `project_load`: Load complete project from a JSON state file.
+- `project_load`: Load complete project from a `.oxide.json` state file.
 - `project_save`: Save complete project state to disk.
+- `project_import_als`: Import an Ableton Live `.als` (Gzip XML) project into Oxide Studio state.
+- `project_export_als`: Export the active Oxide Studio project to an Ableton Live `.als` (Gzip XML) file.
 - `transport_play`: Start sequencer playback.
 - `transport_stop`: Stop playback and reset playhead.
 - `transport_set_bpm`: Set project tempo ($20.0 \dots 999.0\text{ BPM}$).
@@ -333,10 +335,12 @@ The Model Context Protocol (MCP) server enables autonomous AI agents to inspect,
 - `fx_set_reverb`: Configure room size, decay time, damping, and mix.
 - `fx_set_limiter`: Set master brickwall limiter ceiling and lookahead.
 
-#### Domain 5: Plugin Scanner & Offline Bounce (3 Tools)
+#### Domain 5: Plugin Scanner, Offline Bounce & Stem Export (5 Tools)
 - `plugin_scan`: Scan system AUv2, VST3, and CLAP plugins out-of-process.
 - `bounce_wav`: Render the current arrangement to an offline 24-bit stereo WAV file.
 - `render_bounce_wav`: Render arrangement with specified sample rate, bit depth, and duration.
+- `bounce_export_stems`: Render each individual track cleanly to its own stereo WAV stem file.
+- `stems_separate_remix`: Separate rendered audio stems and prepare remix splits in a target folder.
 
 #### Domain 6: High-Level Agentic Music Composition Generators (5 Tools)
 - `generate_chord_progression_clip`: Synthesize functional diatonic chord progressions from Roman numeral degrees (e.g. `["ii7", "V7", "Imaj7"]`).
@@ -406,31 +410,25 @@ The Model Context Protocol (MCP) server enables autonomous AI agents to inspect,
 
 ---
 
-## 8. Beyond Stock Ableton: Purpose-Built for Electronic Producers
+## 8. Purpose-Built Capabilities Implemented Across the Workspace
 
-While official Ableton Live 12 introduced landmark updates, electronic producers across Techno, Melodic House, DnB, and RKT remain heavily reliant on expensive third-party utility plugins (Kickstart 2, ShaperBox 3, StandardCLIP, Psyscope, Vision 4X, Metric AB).
+Oxide Studio ships native DSP, project interchange, offline stem bouncing, and real-time visualization directly inside its modular Rust crates:
 
-Oxide Studio directly integrates the **top 5 community-requested electronic production features** natively into the zero-allocation Rust engine:
+### 1. Deterministic 24-Bit Offline Bounce & Stem Export (`oxide-bounce`)
+- **Offline Renderer**: Renders multi-track arrangements (synth voices, drum racks, warped audio clips, return buses, and master FX) directly to 16-bit or 24-bit WAV files without waiting for real-time playback.
+- **Per-Track Stems & Remix Separation**: Export isolated per-track WAV stems via `bounce_export_stems` or split rendered stems via `stems_separate_remix` for mastering and live stems workflows.
 
-### 1. One-Click Bounce-in-Place (`Freeze & Flatten in 1 Click` / `Cmd+B`)
-- **Producer Problem in Stock Live**: Ableton's "Freeze & Flatten" is destructive—it permanently overwrites MIDI note sequences, synth patch states, and automation envelopes unless manually cloned beforehand. Furthermore, Live cannot freeze Group tracks or tracks with sidechain routings.
-- **Oxide Studio Solution**: Pressing `Cmd+B` renders selected clips or time selections offline via `oxide-bounce` in-process. The original MIDI/synth chain is automatically preserved in an underlying, zero-CPU "Source Take Lane" with an interactive header button: `[Audio Bounced] -> (Click to Revert to MIDI)`. Non-destructive, instant, and supports Group stem bouncing.
+### 2. Multi-Stage ADAA Saturation & Warmth (`RoarSaturator` & `Saturator`)
+- **Antialiased Nonlinear Shaping**: `RoarSaturator` implements 6 routing topologies (`Single`, `Serial`, `Parallel`, `Mid/Side`, `Multiband`, `Feedback`) with 1st-order Antiderivative Antialiasing (ADAA) alongside a track/master analog `Saturator` to curb aliasing foldback under heavy drive.
 
-### 2. Native Ducking / Sidechain Envelope Shaper (`Pump / LFO Shaper` / `DuckShaper`)
-- **Producer Problem in Stock Live**: Traditional compressor sidechain routing suffers from detector lag, non-linear release tails, and clicky transient distortion under fast attack times (<1 ms). Electronic producers universally buy Cableguys ShaperBox ($99) or Kickstart 2 ($19).
-- **Oxide Studio Solution**: Native `DuckShaper` in `oxide-fx` evaluates a sample-accurate 2048-point bezier ducking curve per sample on the audio thread with zero latency. Triggered by tempo sync ($1/4, 1/8, 1/16$, dotted/triplet), ghost MIDI note re-triggers, or audio transient peak detection. Features a 4th-order Linkwitz-Riley $120\text{ Hz}$ crossover to duck low-end rumble while preserving transient attack grit.
+### 3. Cytomic G-Bus Dynamics, Multiband OTT & Master Limiter (`oxide-fx`)
+- **Dynamics Suite**: Combines `GlueCompressor` (SSL G-Bus style attack/release/ratio and soft-clip circuit), `MultibandDynamicsDevice` (3-band upward/downward OTT compression), and a lookahead brickwall `MasterLimiter` on the master bus for controlled transient peak limiting.
 
-### 3. Hard/Soft Clipper with Oversampling (`Club Clipper` / `MasterClipper`)
-- **Producer Problem in Stock Live**: Achieving modern club loudness ($-6$ to $-4\text{ LUFS}$) in Techno, Bass House, and DnB requires shaving transient crest factor before the master limiter. Stock Saturator lacks adjustable polynomial knees and ceiling gain staging; non-oversampled clipping generates harsh high-frequency aliasing foldback across hi-hats.
-- **Oxide Studio Solution**: Dedicated `MasterClipper` with continuously adjustable polynomial knee ($K \in [0.0, 1.0]$) and $2\times, 4\times, 8\times$ linear-phase half-band FIR polyphase oversampling. A live shave-meter highlights clipped peaks in bright crimson red and displays instantaneous crest factor (Peak-to-RMS ratio in dB).
+### 4. 8-Band Bode EQ, 64-Bin FFT & Audio Telemetry (`oxide-fx` + `oxide-bounce`)
+- **Closed-Loop Spectral Inspection**: `Eq8Device` computes live Bode magnitude curves alongside a 64-bin FFT display in `oxide-gui`, while `analyze_rendered_audio` extracts peak dBFS, RMS, spectral centroid, flux, zero-crossing rate, and attack sharpness for programmatic mixing feedback.
 
-### 4. Kick + Sub-Bass Phase & Collision Scope (`PhaseScope`)
-- **Producer Problem in Stock Live**: Kick fundamentals and sub-bass share the critical $30\text{ Hz} \dots 100\text{ Hz}$ band. When phase is opposed, acoustic low-end cancels out completely on club sound systems (Funktion-One, Void). Ableton provides only single-track tuners or FFT spectrum analyzers—no dual-waveform time-domain phase comparison.
-- **Oxide Studio Solution**: `PhaseScope` captures 512 samples from Track A (Bass) and Sidechain Track B (Kick) via dual ring buffers. It computes real-time Pearson correlation index $\rho \in [-1.0, +1.0]$, superimposes phosphor waveforms (Kick in neon pink `#ff007f`, Bass in laser cyan `#00d2ff`), issues visual cancellation warnings (`LOW-END PHASE CANCELLATION: -X.X dB`), and provides an on-device $0^\circ..360^\circ$ Hilbert phase rotator and $\pm 25\text{ ms}$ micro-delay slider.
-
-### 5. Club Readiness & Target LUFS / Crest Factor Analyzer (`ClubDeck`)
-- **Producer Problem in Stock Live**: Live's master channel provides only basic peak and RMS meters. Measuring ITU-R BS.1770 / EBU R128 integrated LUFS, short-term drop impact, true-peak inter-sample overs, and A/B reference switching requires third-party suites like ADPTR Metric AB ($199) or iZotope Insight ($199).
-- **Oxide Studio Solution**: Master `ClubDeck` provides real-time integrated and short-term (3s) LUFS with selectable target markers ($-8\text{ LUFS}$ Club, $-14\text{ LUFS}$ Streaming), $4\times$ oversampled sinc true-peak detection, a sub-bass mono audition switch ($<90\text{ Hz}$), sum-to-mono phase cancellation check, and a 1-click A/B reference track player with loudness auto-matching.
+### 5. Open `.als` Interop & Bilingual AI Copilot (`oxide-project` + `oxide-gui`)
+- **Lossless Workspace Interchange**: Read and write `.oxide.json` sessions alongside Ableton Live `.als` (Gzip XML) import/export from CLI, GUI, Web Workstation, and MCP tools, paired with an offline/online bilingual (EN / ES-AR) AI Copilot backed by `OKF-01..OKF-10`.
 
 ---
 

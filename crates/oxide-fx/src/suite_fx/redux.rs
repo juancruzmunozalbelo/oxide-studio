@@ -67,7 +67,7 @@ impl AudioEffectDevice for Redux {
             return;
         }
 
-        let count = buffer.frame_count.min(1024);
+        let count = buffer.frame_count.min(oxide_core::MAX_BUFFER_SIZE);
         if count == 0 {
             return;
         }
@@ -98,6 +98,29 @@ impl AudioEffectDevice for Redux {
 
             buffer.left[i] = dry_l * (1.0 - self.dry_wet) + self.held_l * self.dry_wet;
             buffer.right[i] = dry_r * (1.0 - self.dry_wet) + self.held_r * self.dry_wet;
+        }
+    }
+
+    fn set_parameter(&mut self, param_id: u32, value: f32) {
+        if !value.is_finite() {
+            return;
+        }
+        match param_id {
+            0 => self.dry_wet = value.clamp(0.0, 1.0),
+            1 => self.downsample = value.round().clamp(1.0, 256.0) as usize,
+            2 => self.bit_depth = value.round().clamp(1.0, 16.0) as u8,
+            3 => self.jitter = value.clamp(0.0, 1.0),
+            _ => {}
+        }
+    }
+
+    fn get_parameter(&self, param_id: u32) -> f32 {
+        match param_id {
+            0 => self.dry_wet,
+            1 => self.downsample as f32,
+            2 => self.bit_depth as f32,
+            3 => self.jitter,
+            _ => 0.0,
         }
     }
 }

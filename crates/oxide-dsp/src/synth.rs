@@ -311,7 +311,7 @@ impl SynthEngine {
 
     /// Render a block of stereo frames into an `AudioBuffer`.
     pub fn process_buffer(&mut self, buffer: &mut AudioBuffer) {
-        let count = buffer.frame_count.min(1024);
+        let count = buffer.frame_count.min(oxide_core::MAX_BUFFER_SIZE);
         for i in 0..count {
             let sample = self.process_sample();
             buffer.left[i] = sample;
@@ -369,7 +369,7 @@ impl InstrumentDevice for SynthEngine {
             }
         }
 
-        let frames = audio_out.frame_count.min(1024);
+        let frames = audio_out.frame_count.min(oxide_core::MAX_BUFFER_SIZE);
         for i in 0..frames {
             let sample = self.process_sample();
             audio_out.left[i] += sample;
@@ -387,6 +387,23 @@ impl InstrumentDevice for SynthEngine {
 
     fn all_notes_off(&mut self) {
         self.all_notes_off();
+    }
+
+    fn set_parameter(&mut self, param_id: u32, value: f32) {
+        if !value.is_finite() {
+            return;
+        }
+        if let Some(desc) = crate::parameters::PARAMETER_DESCRIPTORS.get(param_id as usize) {
+            self.set_parameter(desc.name, value);
+        }
+    }
+
+    fn get_parameter(&self, param_id: u32) -> f32 {
+        self.params
+            .values
+            .get(param_id as usize)
+            .copied()
+            .unwrap_or(0.0)
     }
 }
 

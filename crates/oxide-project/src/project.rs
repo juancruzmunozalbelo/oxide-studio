@@ -203,4 +203,90 @@ mod tests {
         let res2 = DAWProject::from_json_str(missing_fields_json);
         assert!(res2.is_err(), "Missing required fields must return Err");
     }
+
+    #[test]
+    fn test_backwards_compat_legacy_oxide_json_deserializes() {
+        let legacy_json = r##"{
+            "metadata": {
+                "name": "Legacy Session",
+                "version": "1.0.0",
+                "author": "Producer",
+                "created_at_utc": "2026-10-20T00:00:00Z",
+                "modified_at_utc": "2026-10-20T00:00:00Z"
+            },
+            "transport": {
+                "bpm": 128.0,
+                "time_signature_numerator": 4,
+                "time_signature_denominator": 4,
+                "swing_16th_ratio": 0.0,
+                "loop_enabled": false,
+                "loop_start_beat": 0.0,
+                "loop_end_beat": 16.0
+            },
+            "master_track": {
+                "volume_db": 0.0,
+                "pan": 0.0,
+                "limiter_threshold_db": 0.0,
+                "limiter_ceiling_db": -0.3,
+                "limiter_release_ms": 100.0
+            },
+            "tracks": [
+                {
+                    "id": 0,
+                    "name": "909 Kit",
+                    "color_hex": "#00d2ff",
+                    "track_type": "DrumRack",
+                    "mixer": {
+                        "volume_db": -1.5,
+                        "pan": 0.0,
+                        "mute": false,
+                        "solo": false,
+                        "arm": false,
+                        "send_a_db": -12.0,
+                        "send_b_db": -60.0
+                    },
+                    "instrument": {
+                        "ElectronicDrumRack": {
+                            "pads": [
+                                {
+                                    "pad_index": 0,
+                                    "name": "Bass Drum",
+                                    "sample_path": "assets/kick.wav",
+                                    "root_pitch": 36,
+                                    "choke_group": null,
+                                    "volume_db": 0.0,
+                                    "pan": 0.0,
+                                    "pitch_offset_semitones": 0.0,
+                                    "decay_ms": 500.0
+                                }
+                            ]
+                        }
+                    },
+                    "insert_fx": [],
+                    "session_clips": [],
+                    "arrangement_clips": [],
+                    "automation_lanes": []
+                }
+            ],
+            "scenes": [],
+            "presets": [],
+            "macros": []
+        }"##;
+
+        let mut loaded = DAWProject::from_json_str(legacy_json).expect("Legacy JSON must deserialize");
+        assert!(!loaded.master_track.saturator_enabled);
+        assert_eq!(loaded.master_track.delay_mix, 0.0);
+        assert_eq!(loaded.master_track.reverb_mix, 0.0);
+        assert_eq!(loaded.tracks[0].mixer.get_send_db(0), -12.0);
+        assert_eq!(loaded.tracks[0].mixer.get_send_db(1), -60.0);
+        loaded.tracks[0].mixer.set_send_db(2, -9.0);
+        assert_eq!(loaded.tracks[0].mixer.get_send_db(0), -12.0);
+        assert_eq!(loaded.tracks[0].mixer.get_send_db(2), -9.0);
+        if let crate::InstrumentConfig::ElectronicDrumRack(dr) = &loaded.tracks[0].instrument {
+            assert!(!dr.pads[0].mute);
+            assert!(!dr.pads[0].solo);
+        } else {
+            panic!("Expected DrumRack");
+        }
+    }
 }

@@ -350,7 +350,7 @@ impl InstrumentDevice for CollisionDevice {
             }
         }
 
-        let frames = audio_out.frame_count.min(1024);
+        let frames = audio_out.frame_count.min(oxide_core::MAX_BUFFER_SIZE);
         for i in 0..frames {
             let (l, r) = self.process_stereo_sample();
             audio_out.left[i] += l;
@@ -368,6 +368,29 @@ impl InstrumentDevice for CollisionDevice {
 
     fn all_notes_off(&mut self) {
         self.silence_all();
+    }
+
+    fn set_parameter(&mut self, param_id: u32, value: f32) {
+        if !value.is_finite() {
+            return;
+        }
+        match param_id {
+            0 => self.master_volume = value.clamp(0.0, 2.0),
+            1 => self.mallet_stiffness = value.clamp(0.0, 1.0),
+            2 => self.mallet_noise = value.clamp(0.0, 1.0),
+            3 => self.coupling_gain = value.clamp(0.0, 1.0),
+            _ => {}
+        }
+    }
+
+    fn get_parameter(&self, param_id: u32) -> f32 {
+        match param_id {
+            0 => self.master_volume,
+            1 => self.mallet_stiffness,
+            2 => self.mallet_noise,
+            3 => self.coupling_gain,
+            _ => 0.0,
+        }
     }
 }
 

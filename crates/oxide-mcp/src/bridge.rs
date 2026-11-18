@@ -1,9 +1,9 @@
-//! Aruston Native Live GUI RPC Bridge (`127.0.0.1:9877`).
+//! Oxide Studio Native Live GUI RPC Bridge (`127.0.0.1:9877`).
 //!
-//! Synchronizes MCP tool calls directly with the live open Aruston Studio GUI window
+//! Synchronizes MCP tool calls directly with the live open Oxide Studio GUI window
 //! and audio engine over newline-delimited JSON-RPC 2.0 with a 500ms timeout.
-//! When Aruston Studio Live GUI is online, forwards requests and returns live responses.
-//! When Aruston Studio Live GUI is offline (e.g. headless tests / GUI window closed),
+//! When Oxide Studio Live GUI is online, forwards requests and returns live responses.
+//! When Oxide Studio Live GUI is offline (e.g. headless tests / GUI window closed),
 //! seamlessly falls back to the in-process Rust engine state.
 
 use std::io::{BufRead, BufReader, Write};
@@ -43,12 +43,12 @@ impl TcpLomClient {
         }
     }
 
-    /// Check whether Aruston Live Studio GUI RPC server is actively listening.
+    /// Check whether Oxide Studio Live GUI RPC server is actively listening.
     pub fn is_online(&self) -> bool {
         match self.send_request("ping", json!({})) {
             Ok(res) => {
                 res.get("status").and_then(|s| s.as_str()) == Some("ok")
-                    || res.get("app").and_then(|s| s.as_str()) == Some("Aruston Studio")
+                    || res.get("app").and_then(|s| s.as_str()) == Some("Oxide Studio")
             }
             Err(_) => false,
         }
@@ -59,7 +59,7 @@ impl TcpLomClient {
         self.send_request(method, params)
     }
 
-    /// Send a JSON-RPC 2.0 command over TCP to the Aruston Native Live GUI RPC server.
+    /// Send a JSON-RPC 2.0 command over TCP to the Oxide Studio Native Live GUI RPC server.
     pub fn send_request(&self, method: &str, params: Value) -> Result<Value, String> {
         let addr_str = format!("{}:{}", self.host, self.port);
         let addr: SocketAddr = addr_str
@@ -67,7 +67,7 @@ impl TcpLomClient {
             .map_err(|e| format!("Invalid socket address {}: {}", addr_str, e))?;
 
         let stream = TcpStream::connect_timeout(&addr, Duration::from_millis(CONNECT_TIMEOUT_MS))
-            .map_err(|e| format!("Failed to connect to Aruston GUI on {}: {}", addr_str, e))?;
+            .map_err(|e| format!("Failed to connect to Oxide Studio GUI on {}: {}", addr_str, e))?;
 
         stream
             .set_read_timeout(Some(self.timeout))
@@ -101,7 +101,7 @@ impl TcpLomClient {
             .map_err(|e| format!("Failed to read response line: {}", e))?;
 
         if response_line.trim().is_empty() {
-            return Err("Empty response received from Aruston GUI RPC server".into());
+            return Err("Empty response received from Oxide Studio GUI RPC server".into());
         }
 
         let resp: Value = serde_json::from_str(&response_line)
@@ -129,8 +129,8 @@ impl TcpLomClient {
         match self.send_request(method, params) {
             Ok(live_result) => json!({
                 "connected": true,
-                "target": "real_ableton_live_12",
-                "engine": "aruston_native_gui",
+                "target": "oxide_studio_gui_rpc",
+                "engine": "oxide_native_gui",
                 "mode": "live12_lom_tcp",
                 "result": live_result,
             }),
@@ -138,10 +138,10 @@ impl TcpLomClient {
                 let fallback = fallback_fn();
                 json!({
                     "connected": false,
-                    "target": "real_ableton_live_12",
-                    "engine": "aruston_native_gui",
+                    "target": "oxide_studio_gui_rpc",
+                    "engine": "oxide_native_gui",
                     "mode": "live12_lom_tcp",
-                    "message": "Aruston Studio Live GUI is not running or RPC is not active on 127.0.0.1:9877. Falling back to in-process Rust engine state.",
+                    "message": format!("Oxide Studio Live GUI is not running or RPC is not active on {}:{}. Falling back to in-process Rust engine state.", self.host, self.port),
                     "fallback_executed": true,
                     "result": fallback,
                 })

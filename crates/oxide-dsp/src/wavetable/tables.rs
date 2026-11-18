@@ -17,13 +17,14 @@ pub enum WavetableCategory {
 /// A wavetable set holding NUM_FRAMES single-cycle waveforms of TABLE_SIZE samples.
 #[derive(Debug, Clone)]
 pub struct WavetableSet {
-    pub frames: [[f32; TABLE_SIZE]; NUM_FRAMES],
+    pub frames: [Box<[f32]>; NUM_FRAMES],
 }
 
 impl WavetableSet {
     /// Generate a factory wavetable set by category.
     pub fn generate(category: WavetableCategory) -> Self {
-        let mut frames = [[0.0f32; TABLE_SIZE]; NUM_FRAMES];
+        let mut frames: [Box<[f32]>; NUM_FRAMES] =
+            std::array::from_fn(|_| vec![0.0f32; TABLE_SIZE].into_boxed_slice());
 
         for frame_idx in 0..NUM_FRAMES {
             let morph = frame_idx as f32 / (NUM_FRAMES - 1) as f32; // 0.0 .. 1.0

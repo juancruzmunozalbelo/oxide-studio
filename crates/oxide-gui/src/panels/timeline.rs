@@ -175,7 +175,7 @@ pub fn render_arrangement_timeline(
                         if pos.y >= check_y && pos.y < lane_bottom {
                             gui_state.selected_track = t_idx;
                             action.track_selected = Some(t_idx);
-                            ui.data_mut(|d| d.insert_temp(egui::Id::new("aruston_selected_track"), t_idx));
+                            ui.data_mut(|d| d.insert_temp(egui::Id::new("oxide_selected_track"), t_idx));
 
                             if pos.x >= track_start_x {
                                 for (c_idx, clip) in track.clips.iter().enumerate() {

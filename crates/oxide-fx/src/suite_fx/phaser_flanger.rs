@@ -110,7 +110,7 @@ impl AudioEffectDevice for PhaserFlanger {
             return;
         }
 
-        let count = buffer.frame_count.min(1024);
+        let count = buffer.frame_count.min(oxide_core::MAX_BUFFER_SIZE);
         if count == 0 {
             return;
         }
@@ -186,6 +186,33 @@ impl AudioEffectDevice for PhaserFlanger {
 
             buffer.left[i] = dry_l * (1.0 - self.dry_wet) + wet_l * self.dry_wet;
             buffer.right[i] = dry_r * (1.0 - self.dry_wet) + wet_r * self.dry_wet;
+        }
+    }
+
+    fn set_parameter(&mut self, param_id: u32, value: f32) {
+        if !value.is_finite() {
+            return;
+        }
+        match param_id {
+            0 => self.dry_wet = value.clamp(0.0, 1.0),
+            1 => self.rate_hz = value.clamp(0.01, 20.0),
+            2 => self.depth = value.clamp(0.0, 1.0),
+            3 => self.feedback = value.clamp(-0.95, 0.95),
+            4 => self.base_freq_hz = value.clamp(50.0, 10000.0),
+            5 => self.poles = value.round().clamp(2.0, 32.0) as usize,
+            _ => {}
+        }
+    }
+
+    fn get_parameter(&self, param_id: u32) -> f32 {
+        match param_id {
+            0 => self.dry_wet,
+            1 => self.rate_hz,
+            2 => self.depth,
+            3 => self.feedback,
+            4 => self.base_freq_hz,
+            5 => self.poles as f32,
+            _ => 0.0,
         }
     }
 }

@@ -1542,7 +1542,7 @@
       const straightStepSec = secondsPerBeat / 4.0;
 
       let swingOffset = 0.0;
-      const swingPct = STATE.swing > 50 ? (STATE.swing - 50) : (STATE.swing <= 50 && STATE.swing > 0 ? STATE.swing : 0);
+      const swingPct = STATE.swing > 50 ? (STATE.swing - 50) : 0;
       if (isOddStep && swingPct > 0) {
         swingOffset = straightStepSec * (swingPct / 50.0) * 0.66;
       }
@@ -1726,9 +1726,15 @@
         ctx.arc(cx, cy, radius, -Math.PI * 0.75, -Math.PI * 0.25);
         ctx.stroke();
 
-        // Target angle based on Master Peak
+        // Target angle driven by Glue Compressor Gain Reduction (falling back to Master Peak)
         let targetAngle = -Math.PI * 0.75;
-        if (NODES.masterAnalyser) {
+        if (NODES.glueCompressor && STATE.fx.glue && STATE.fx.glue.active) {
+          const grDb = Math.max(-20, Math.min(0, NODES.glueCompressor.reduction || 0));
+          STATE.fx.glue.gainReduction = grDb;
+          const norm = Math.max(0, Math.min(1, Math.abs(grDb) / 12.0));
+          targetAngle = -Math.PI * 0.75 + norm * (Math.PI * 0.5);
+        } else if (NODES.masterAnalyser) {
+          STATE.fx.glue.gainReduction = 0;
           const p = STATE.tracks[6].peakDb;
           const norm = Math.max(0, Math.min(1, (p + 36) / 36));
           targetAngle = -Math.PI * 0.75 + norm * (Math.PI * 0.5);
@@ -2321,17 +2327,105 @@
 
   function buildAlsXml() {
     const now = new Date().toISOString();
+    const escXml = (s) => String(s)
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;');
+    const DRUM_NOTE_MAP = {
+      kick: 36, rim: 37, snare: 38, clap: 39, lowTom: 41, ch: 42,
+      midTom: 45, oh: 46, hiTom: 48, crash: 49, ride: 51, tamb: 54,
+      cowbell: 56, percHigh: 60, percLow: 61, shaker: 70
+    };
+    const swingAmount = STATE.swing > 50 ? ((STATE.swing - 50) / 50) * 0.66 : 0;
+    const stepBeat = (s) => {
+      const base = s * 0.25;
+      return (s % 2 === 1 && swingAmount > 0) ? (base + 0.25 * swingAmount) : base;
+    };
+
+    const toAlsLinear = (gain) => {
+      if (!Number.isFinite(gain) || gain <= 0.00031622776) return 0.00031622776;
+      if (gain <= 1.0) return Math.max(0.00031622776, gain * 0.85);
+      return Math.min(1.0, 0.85 + (gain - 1.0) * 0.15);
+    };
+
+    const renderMixerXml = (track) => `
+        <Mixer>
+          <Volume><Manual Value="${toAlsLinear(track.volume).toFixed(6)}"/></Volume>
+          <Pan><Manual Value="${track.pan.toFixed(4)}"/></Pan>
+          <Speaker><Manual Value="${track.mute ? 'false' : 'true'}"/></Speaker>
+          <SoloSink Value="${track.solo ? 'true' : 'false'}"/>
+          <Sends>
+            <TrackSendHolder Id="0"><Send><Manual Value="${toAlsLinear(track.sendA || 0).toFixed(6)}"/></Send></TrackSendHolder>
+            <TrackSendHolder Id="1"><Send><Manual Value="${toAlsLinear(track.sendB || 0).toFixed(6)}"/></Send></TrackSendHolder>
+          </Sends>
+        </Mixer>`;
+
+    let noteId = 1;
+    let keyTrackId = 1;
+    const renderKeyTracksXml = (notesByPitch) => {
+      const entries = Object.keys(notesByPitch)
+        .map(k => parseInt(k, 10))
+        .sort((a, b) => a - b)
+        .map(pitch => {
+          const evs = notesByPitch[pitch]
+            .map(ev => `                  <MidiNoteEvent Time="${ev.time.toFixed(4)}" Duration="${ev.dur.toFixed(4)}" Velocity="${ev.vel}" NoteId="${noteId++}"/>`)
+            .join('\n');
+          return `                <KeyTrack Id="${keyTrackId++}">
+                  <Notes>
+${evs}
+                  </Notes>
+                  <MidiKey Value="${pitch}"/>
+                </KeyTrack>`;
+        });
+      return entries.join('\n');
+    };
+
+    const drumNotesByPitch = {};
+    STATE.drumVoices.forEach(voice => {
+      const pitch = DRUM_NOTE_MAP[voice.id] || 36;
+      voice.steps.forEach((val, s) => {
+        if (val > 0) {
+          if (!drumNotesByPitch[pitch]) drumNotesByPitch[pitch] = [];
+          drumNotesByPitch[pitch].push({ time: stepBeat(s), dur: 0.125, vel: val === 2 ? 127 : 96 });
+        }
+      });
+    });
+
+    const activeBassIdx = Math.max(0, getActiveClipIndex(1));
+    const bassPattern = BASS_PATTERNS[activeBassIdx] || BASS_PATTERNS[2];
+    const bassNotesByPitch = {};
+    bassPattern.forEach((deg, s) => {
+      if (deg >= 0) {
+        const pitch = getScalePitch(deg, activeBassIdx === 1 ? 2 : 1);
+        if (!bassNotesByPitch[pitch]) bassNotesByPitch[pitch] = [];
+        bassNotesByPitch[pitch].push({ time: stepBeat(s), dur: activeBassIdx === 3 ? 0.5 : 0.2, vel: 112 });
+      }
+    });
+
+    const activeLeadIdx = Math.max(0, getActiveClipIndex(2));
+    const leadPattern = LEAD_PATTERNS[activeLeadIdx] || LEAD_PATTERNS[2];
+    const leadNotesByPitch = {};
+    leadPattern.forEach((deg, s) => {
+      if (deg >= 0) {
+        const pitch = getScalePitch(deg, 3);
+        if (!leadNotesByPitch[pitch]) leadNotesByPitch[pitch] = [];
+        leadNotesByPitch[pitch].push({ time: stepBeat(s), dur: activeLeadIdx === 3 ? 0.75 : 0.25, vel: 108 });
+      }
+    });
+
+    const activeDrumIdx = Math.max(0, getActiveClipIndex(0));
+    const activeKeysIdx = Math.max(0, getActiveClipIndex(3));
+    const drumClipName = (STATE.sessionClips[0][activeDrumIdx] || {}).name || '1 DRUMS Clip';
+    const bassClipName = (STATE.sessionClips[1][activeBassIdx] || {}).name || '2 BASS Clip';
+    const leadClipName = (STATE.sessionClips[2][activeLeadIdx] || {}).name || '3 LEAD Clip';
+    const keysClipName = (STATE.sessionClips[3][activeKeysIdx] || {}).name || '4 STEMS Clip';
+
     return `<?xml version="1.0" encoding="UTF-8"?>
 <Ableton MajorVersion="5" MinorVersion="12.0_12049" SchemaChangeCount="3" Creator="Oxide Studio" Revision="oxide-12.0">
   <LiveSet>
     <Annotation Value="Oxide Studio Web Session v1.0.0"/>
-    <Metadata>
-      <Name Value="Oxide Studio Web Export"/>
-      <Author Value="Oxide Web Station"/>
-      <Version Value="1.0.0"/>
-      <CreatedAt Value="${now}"/>
-      <ModifiedAt Value="${now}"/>
-    </Metadata>
+    <!-- oxide-metadata: {"name":"Oxide Studio Web Export","author":"Oxide Web Station","version":"1.0.0","modified_at_utc":"${now}"} -->
     <Tempo>
       <Manual Value="${STATE.tempo.toFixed(4)}"/>
     </Tempo>
@@ -2344,33 +2438,118 @@
       </TimeSignatures>
     </TimeSignature>
     <Transport>
-      <LoopOn Value="true"/>
+      <LoopOn Value="${STATE.loopEnabled ? 'true' : 'false'}"/>
       <LoopStart Value="0.0000"/>
-      <LoopLength Value="16.0000"/>
+      <LoopLength Value="4.0000"/>
     </Transport>
     <Tracks>
       <MidiTrack Id="1">
-        <Name Value="1 DRUMS (909)"/>
-        <DeviceChain>
+        <Name><EffectiveName Value="${escXml(STATE.tracks[0].name || '1 DRUMS (909)')}"/></Name>
+        <DeviceChain>${renderMixerXml(STATE.tracks[0])}
           <MainSequencer>
             <GroovePoolSwing Value="${STATE.swing}"/>
+            <ClipTimeable>
+              <ArrangerAutomation>
+                <Events>
+                  <MidiClip Id="1" Time="0.0000">
+                    <Name Value="${escXml(drumClipName)}"/>
+                    <CurrentEnd Value="4.0000"/>
+                    <Notes>
+                      <KeyTracks>
+${renderKeyTracksXml(drumNotesByPitch)}
+                      </KeyTracks>
+                    </Notes>
+                  </MidiClip>
+                </Events>
+              </ArrangerAutomation>
+            </ClipTimeable>
           </MainSequencer>
         </DeviceChain>
       </MidiTrack>
       <MidiTrack Id="2">
-        <Name Value="2 BASS (DRIFT)"/>
+        <Name><EffectiveName Value="${escXml(STATE.tracks[1].name || '2 BASS (DRIFT)')}"/></Name>
+        <DeviceChain>${renderMixerXml(STATE.tracks[1])}
+          <MainSequencer>
+            <ClipTimeable>
+              <ArrangerAutomation>
+                <Events>
+                  <MidiClip Id="2" Time="0.0000">
+                    <Name Value="${escXml(bassClipName)}"/>
+                    <CurrentEnd Value="4.0000"/>
+                    <Notes>
+                      <KeyTracks>
+${renderKeyTracksXml(bassNotesByPitch)}
+                      </KeyTracks>
+                    </Notes>
+                  </MidiClip>
+                </Events>
+              </ArrangerAutomation>
+            </ClipTimeable>
+          </MainSequencer>
+        </DeviceChain>
       </MidiTrack>
       <MidiTrack Id="3">
-        <Name Value="3 LEAD (SUITE)"/>
+        <Name><EffectiveName Value="${escXml(STATE.tracks[2].name || '3 LEAD (SUITE)')}"/></Name>
+        <DeviceChain>${renderMixerXml(STATE.tracks[2])}
+          <MainSequencer>
+            <ClipTimeable>
+              <ArrangerAutomation>
+                <Events>
+                  <MidiClip Id="3" Time="0.0000">
+                    <Name Value="${escXml(leadClipName)}"/>
+                    <CurrentEnd Value="4.0000"/>
+                    <Notes>
+                      <KeyTracks>
+${renderKeyTracksXml(leadNotesByPitch)}
+                      </KeyTracks>
+                    </Notes>
+                  </MidiClip>
+                </Events>
+              </ArrangerAutomation>
+            </ClipTimeable>
+          </MainSequencer>
+        </DeviceChain>
       </MidiTrack>
       <AudioTrack Id="4">
-        <Name Value="4 KEYS / STEMS"/>
+        <Name><EffectiveName Value="${escXml(STATE.tracks[3].name || '4 KEYS / STEMS')}"/></Name>
+        <DeviceChain>${renderMixerXml(STATE.tracks[3])}
+          <MainSequencer>
+            <Sample>
+              <ArrangerAutomation>
+                <Events>
+                  <AudioClip Id="4" Time="0.0000">
+                    <Name Value="${escXml(keysClipName)}"/>
+                    <CurrentEnd Value="4.0000"/>
+                  </AudioClip>
+                </Events>
+              </ArrangerAutomation>
+            </Sample>
+          </MainSequencer>
+        </DeviceChain>
       </AudioTrack>
+      <ReturnTrack Id="5">
+        <Name><EffectiveName Value="${escXml(STATE.tracks[4].name || 'A REV')}"/></Name>
+        <DeviceChain>${renderMixerXml(STATE.tracks[4])}
+        </DeviceChain>
+      </ReturnTrack>
+      <ReturnTrack Id="6">
+        <Name><EffectiveName Value="${escXml(STATE.tracks[5].name || 'B DLY')}"/></Name>
+        <DeviceChain>${renderMixerXml(STATE.tracks[5])}
+        </DeviceChain>
+      </ReturnTrack>
     </Tracks>
     <MasterTrack>
+      <Name><EffectiveName Value="MASTER"/></Name>
       <DeviceChain>
-        <GlueCompressor Threshold="${STATE.fx.glue.threshold}" Ratio="${STATE.fx.glue.ratio}"/>
-        <TruePeakLimiter Ceiling="-0.3"/>
+        <Mixer>
+          <Volume><Manual Value="${toAlsLinear(STATE.tracks[6].volume).toFixed(6)}"/></Volume>
+          <Pan><Manual Value="${STATE.tracks[6].pan.toFixed(4)}"/></Pan>
+          <Speaker><Manual Value="${STATE.tracks[6].mute ? 'false' : 'true'}"/></Speaker>
+        </Mixer>
+        <GlueCompressor Threshold="${STATE.fx.glue.threshold}" Ratio="${STATE.fx.glue.ratio}" Makeup="${STATE.fx.glue.makeup}"/>
+        <Roar Drive="${STATE.fx.roar.drive}" Tone="${STATE.fx.roar.tone}"/>
+        <Reverb Decay="${STATE.fx.reverb.decay}" Mix="${STATE.fx.reverb.mix}"/>
+        <TruePeakLimiter Ceiling="${STATE.fx.limiter.ceiling}"/>
       </DeviceChain>
     </MasterTrack>
   </LiveSet>
@@ -2444,7 +2623,7 @@
       if (srP) srP.value = '7';
       const stP = document.getElementById('scale-type');
       if (stP) stP.value = 'minor';
-      STATE.swing = 0;
+      STATE.swing = 50; // 50% = straight 16th techno pulse
 
       // Peak-Time Techno 135 BPM drum pattern in drumGrid
       drumGrid = [
@@ -2509,6 +2688,12 @@
 
       BASS_PATTERNS[2] = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
       LEAD_PATTERNS[2] = [0, -1, 5, -1, 0, -1, 5, -1, 4, -1, 3, -1, 4, -1, 5, -1];
+      for (let t = 0; t < 4; t++) {
+        STATE.sessionClips[t].forEach((clip, idx) => {
+          clip.state = idx === 2 ? 'playing' : 'stopped';
+        });
+      }
+      STATE.activeScene = 2;
 
     } else if (presetName === 'holo') {
       currentGenre = 'holo';
@@ -2520,7 +2705,7 @@
       if (srH) srH.value = '6';
       const stH = document.getElementById('scale-type');
       if (stH) stH.value = 'minor';
-      STATE.swing = 22;
+      STATE.swing = 56; // 50% = straight; 56% = subtle melodic swing
 
       // Melodic Techno 126 BPM drum pattern in drumGrid
       drumGrid = [
@@ -2592,6 +2777,12 @@
 
       BASS_PATTERNS[2] = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
       LEAD_PATTERNS[2] = [0, -1, 1, -1, 2, -1, 4, -1, 5, -1, 3, -1, 4, -1, 0, -1];
+      for (let t = 0; t < 4; t++) {
+        STATE.sessionClips[t].forEach((clip, idx) => {
+          clip.state = idx === 2 ? 'playing' : 'stopped';
+        });
+      }
+      STATE.activeScene = 2;
 
     } else if (presetName === 'techno') {
       currentGenre = 'techno';
@@ -2633,6 +2824,11 @@
     }
 
     renderDrumGrid();
+    updateSessionClipUI();
+    syncMixerTrackGains();
+    if (NODES.delayNode && STATE.audioCtx) {
+      NODES.delayNode.delayTime.setTargetAtTime((60 / STATE.tempo) * 0.75, STATE.audioCtx.currentTime, 0.015);
+    }
     const ti = document.getElementById('tempo-input');
     if (ti) ti.value = STATE.tempo.toFixed(2);
     const ss = document.getElementById('swing-slider');

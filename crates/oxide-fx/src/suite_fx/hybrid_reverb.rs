@@ -147,7 +147,7 @@ impl AudioEffectDevice for HybridReverb {
             return;
         }
 
-        let count = buffer.frame_count.min(1024);
+        let count = buffer.frame_count.min(oxide_core::MAX_BUFFER_SIZE);
         if count == 0 {
             return;
         }
@@ -238,6 +238,33 @@ impl AudioEffectDevice for HybridReverb {
 
             buffer.left[i] = dry_l * (1.0 - self.dry_wet) + wet_l * self.dry_wet;
             buffer.right[i] = dry_r * (1.0 - self.dry_wet) + wet_r * self.dry_wet;
+        }
+    }
+
+    fn set_parameter(&mut self, param_id: u32, value: f32) {
+        if !value.is_finite() {
+            return;
+        }
+        match param_id {
+            0 => self.dry_wet = value.clamp(0.0, 1.0),
+            1 => self.decay_s = value.clamp(0.1, 20.0),
+            2 => self.predelay_ms = value.clamp(0.0, 500.0),
+            3 => self.size = value.clamp(0.2, 2.0),
+            4 => self.damping = value.clamp(0.0, 1.0),
+            5 => self.conv_algo_blend = value.clamp(0.0, 1.0),
+            _ => {}
+        }
+    }
+
+    fn get_parameter(&self, param_id: u32) -> f32 {
+        match param_id {
+            0 => self.dry_wet,
+            1 => self.decay_s,
+            2 => self.predelay_ms,
+            3 => self.size,
+            4 => self.damping,
+            5 => self.conv_algo_blend,
+            _ => 0.0,
         }
     }
 }

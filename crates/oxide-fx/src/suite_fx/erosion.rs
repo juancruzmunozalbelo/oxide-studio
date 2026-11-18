@@ -84,7 +84,7 @@ impl AudioEffectDevice for Erosion {
             return;
         }
 
-        let count = buffer.frame_count.min(1024);
+        let count = buffer.frame_count.min(oxide_core::MAX_BUFFER_SIZE);
         if count == 0 {
             return;
         }
@@ -121,6 +121,27 @@ impl AudioEffectDevice for Erosion {
 
             buffer.left[i] = mod_l.clamp(-2.0, 2.0);
             buffer.right[i] = mod_r.clamp(-2.0, 2.0);
+        }
+    }
+
+    fn set_parameter(&mut self, param_id: u32, value: f32) {
+        if !value.is_finite() {
+            return;
+        }
+        match param_id {
+            0 => self.amount = value.clamp(0.0, 1.0),
+            1 => self.frequency_hz = value.clamp(20.0, 20000.0),
+            2 => self.width = value.clamp(0.0, 1.0),
+            _ => {}
+        }
+    }
+
+    fn get_parameter(&self, param_id: u32) -> f32 {
+        match param_id {
+            0 => self.amount,
+            1 => self.frequency_hz,
+            2 => self.width,
+            _ => 0.0,
         }
     }
 }

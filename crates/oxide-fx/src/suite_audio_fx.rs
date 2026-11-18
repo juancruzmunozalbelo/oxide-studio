@@ -872,6 +872,12 @@ impl TruePeakLimiterEffect {
 
     #[inline(always)]
     pub fn process_sample(&mut self, in_l: f32, in_r: f32) -> (f32, f32) {
+        let in_l = if in_l.is_finite() { in_l } else { 0.0 };
+        let in_r = if in_r.is_finite() { in_r } else { 0.0 };
+        if !self.gain_reduction.is_finite() {
+            self.gain_reduction = 1.0;
+        }
+
         // Update 8-sample history for 4x ISP detection
         for i in 0..7 {
             self.history_l[i] = self.history_l[i + 1];
@@ -903,8 +909,16 @@ impl TruePeakLimiterEffect {
         self.delay_r[self.write_idx] = in_r;
 
         let read_idx = (self.write_idx + 1) % LIMITER_LOOKAHEAD;
-        let delayed_l = self.delay_l[read_idx];
-        let delayed_r = self.delay_r[read_idx];
+        let delayed_l = if self.delay_l[read_idx].is_finite() {
+            self.delay_l[read_idx]
+        } else {
+            0.0
+        };
+        let delayed_r = if self.delay_r[read_idx].is_finite() {
+            self.delay_r[read_idx]
+        } else {
+            0.0
+        };
         self.write_idx = read_idx;
 
         let limited_l = (delayed_l * self.gain_reduction).clamp(-self.ceiling, self.ceiling);
@@ -1032,11 +1046,133 @@ impl AudioEffectDevice for SuiteAudioEffect {
         if !self.enabled {
             return;
         }
-        let count = buffer.frame_count.min(1024);
+        let count = buffer.frame_count.min(oxide_core::MAX_BUFFER_SIZE);
         for i in 0..count {
             let (l, r) = self.process_stereo_sample(buffer.left[i], buffer.right[i]);
             buffer.left[i] = l;
             buffer.right[i] = r;
+        }
+    }
+
+    fn set_parameter(&mut self, param_id: u32, value: f32) {
+        if !value.is_finite() {
+            return;
+        }
+        match self.kind {
+            SuiteAudioEffectKind::HybridReverb => match param_id {
+                0 => self.hybrid_reverb.dry_wet = value.clamp(0.0, 1.0),
+                1 => self.hybrid_reverb.decay_s = value.clamp(0.1, 20.0),
+                2 => self.hybrid_reverb.shimmer = value.clamp(0.0, 1.0),
+                3 => self.hybrid_reverb.blend = value.clamp(0.0, 1.0),
+                _ => {}
+            },
+            SuiteAudioEffectKind::SpectralResonator => match param_id {
+                0 => self.spectral_resonator.dry_wet = value.clamp(0.0, 1.0),
+                1 => self.spectral_resonator.root_hz = value.clamp(20.0, 2000.0),
+                2 => self.spectral_resonator.decay_s = value.clamp(0.05, 10.0),
+                3 => self.spectral_resonator.harmonic_stretch = value.clamp(0.5, 2.0),
+                4 => self.spectral_resonator.freq_shift = value.clamp(-500.0, 500.0),
+                _ => {}
+            },
+            SuiteAudioEffectKind::SpectralTime => match param_id {
+                0 => self.spectral_time.dry_wet = value.clamp(0.0, 1.0),
+                1 => self.spectral_time.delay_ms = value.clamp(1.0, 1000.0),
+                2 => self.spectral_time.feedback = value.clamp(0.0, 0.98),
+                3 => self.spectral_time.tilt = value.clamp(-1.0, 1.0),
+                4 => self.spectral_time.freeze = value > 0.5,
+                _ => {}
+            },
+            SuiteAudioEffectKind::Echo => match param_id {
+                0 => self.echo.dry_wet = value.clamp(0.0, 1.0),
+                1 => self.echo.delay_time_ms = value.clamp(1.0, 1000.0),
+                2 => self.echo.feedback = value.clamp(0.0, 0.98),
+                3 => self.echo.wow_flutter = value.clamp(0.0, 1.0),
+                4 => self.echo.saturation = value.clamp(0.0, 1.0),
+                5 => self.echo.ducking = value.clamp(0.0, 1.0),
+                _ => {}
+            },
+            SuiteAudioEffectKind::Vocoder => match param_id {
+                0 => self.vocoder.dry_wet = value.clamp(0.0, 1.0),
+                1 => self.vocoder.carrier_freq = value.clamp(20.0, 2000.0),
+                2 => self.vocoder.unvoiced_threshold = value.clamp(0.0, 1.0),
+                _ => {}
+            },
+            SuiteAudioEffectKind::Corpus => match param_id {
+                0 => self.corpus.dry_wet = value.clamp(0.0, 1.0),
+                1 => {
+                    self.corpus.tune_hz = value.clamp(20.0, 2000.0);
+                    self.corpus.update_modes();
+                }
+                2 => {
+                    self.corpus.decay_s = value.clamp(0.05, 10.0);
+                    self.corpus.update_modes();
+                }
+                3 => {
+                    self.corpus.material = value.clamp(-1.0, 1.0);
+                    self.corpus.update_modes();
+                }
+                _ => {}
+            },
+            SuiteAudioEffectKind::TruePeakLimiter => match param_id {
+                0 => self.true_peak_limiter.ceiling = value.clamp(0.05, 1.0),
+                1 => self.true_peak_limiter.release_ms = value.clamp(1.0, 1000.0),
+                _ => {}
+            },
+        }
+    }
+
+    fn get_parameter(&self, param_id: u32) -> f32 {
+        match self.kind {
+            SuiteAudioEffectKind::HybridReverb => match param_id {
+                0 => self.hybrid_reverb.dry_wet,
+                1 => self.hybrid_reverb.decay_s,
+                2 => self.hybrid_reverb.shimmer,
+                3 => self.hybrid_reverb.blend,
+                _ => 0.0,
+            },
+            SuiteAudioEffectKind::SpectralResonator => match param_id {
+                0 => self.spectral_resonator.dry_wet,
+                1 => self.spectral_resonator.root_hz,
+                2 => self.spectral_resonator.decay_s,
+                3 => self.spectral_resonator.harmonic_stretch,
+                4 => self.spectral_resonator.freq_shift,
+                _ => 0.0,
+            },
+            SuiteAudioEffectKind::SpectralTime => match param_id {
+                0 => self.spectral_time.dry_wet,
+                1 => self.spectral_time.delay_ms,
+                2 => self.spectral_time.feedback,
+                3 => self.spectral_time.tilt,
+                4 => if self.spectral_time.freeze { 1.0 } else { 0.0 },
+                _ => 0.0,
+            },
+            SuiteAudioEffectKind::Echo => match param_id {
+                0 => self.echo.dry_wet,
+                1 => self.echo.delay_time_ms,
+                2 => self.echo.feedback,
+                3 => self.echo.wow_flutter,
+                4 => self.echo.saturation,
+                5 => self.echo.ducking,
+                _ => 0.0,
+            },
+            SuiteAudioEffectKind::Vocoder => match param_id {
+                0 => self.vocoder.dry_wet,
+                1 => self.vocoder.carrier_freq,
+                2 => self.vocoder.unvoiced_threshold,
+                _ => 0.0,
+            },
+            SuiteAudioEffectKind::Corpus => match param_id {
+                0 => self.corpus.dry_wet,
+                1 => self.corpus.tune_hz,
+                2 => self.corpus.decay_s,
+                3 => self.corpus.material,
+                _ => 0.0,
+            },
+            SuiteAudioEffectKind::TruePeakLimiter => match param_id {
+                0 => self.true_peak_limiter.ceiling,
+                1 => self.true_peak_limiter.release_ms,
+                _ => 0.0,
+            },
         }
     }
 }

@@ -34,12 +34,14 @@ pub use music_theory::{bjorklund, build_chord_notes, generate_drum_groove, get_s
 pub use protocol::{
     InitializeResult, JsonRpcError, JsonRpcRequest, JsonRpcResponse, Resource, ResourceContent,
     ResourceReadResult, ServerCapabilities, ServerInfo, Tool, ToolCallResult, ToolContent,
-    ToolInputSchema, MCP_PROTOCOL_VERSION, SERVER_NAME, SERVER_VERSION,
+    ToolInputSchema, MCP_PROTOCOL_VERSION, RESOURCE_NOT_FOUND, SERVER_NAME, SERVER_VERSION,
 };
 pub use resources::{get_resource_definitions, read_resource};
 pub use server::McpServer;
 pub use state::DawState;
-pub use tools::{call_tool, dispatch_tool_call, get_tool_definitions};
+pub use tools::{
+    call_tool, dispatch_tool_call, get_tool_definitions, get_tool_definitions_filtered,
+};
 
 /// Entry point to run line-delimited JSON-RPC 2.0 MCP server over standard I/O.
 pub fn run_mcp_server_stdio() {

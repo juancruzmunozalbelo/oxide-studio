@@ -196,7 +196,7 @@ fn test_raw_xml_auto_detection() {
         </Name>
         <DeviceChain>
           <Mixer>
-            <Volume><Manual Value="-2.0"/></Volume>
+            <Volume><Manual Value="0.6783214"/></Volume>
             <Pan><Manual Value="0.0"/></Pan>
             <On><Manual Value="true"/></On>
           </Mixer>

@@ -18,6 +18,7 @@ use egui::{
 };
 use oxide_audio::{
     AudioEngine, AudioEngineProcessor, AudioStreamHandle, PARAM_BPM,
+    PARAM_ID_SYNTH_CUTOFF, PARAM_ID_SYNTH_PULSE_PW, PARAM_ID_SYNTH_RESONANCE,
     PARAM_MASTER_VOL, PARAM_SYNTH_MACRO_X, PARAM_SYNTH_MACRO_Y,
     PARAM_TRACK_PAN_BASE, PARAM_TRACK_VOL_BASE,
 };
@@ -114,6 +115,7 @@ pub struct OxideStudioApp {
     pub current_time_seconds: f64,
     pub last_triggered_step: Option<i64>,
     pub active_synth_note: Option<u8>,
+    pub active_synth_notes: Vec<(u8, f64)>, // (midi_pitch, release_beat)
     pub tap_times: Vec<f64>,
     pub copilot_open: bool,
     pub ai_copilot: crate::panels::ai_chat::AiCopilotState,
@@ -359,6 +361,7 @@ impl OxideStudioApp {
             current_time_seconds: 0.0,
             last_triggered_step: None,
             active_synth_note: None,
+            active_synth_notes: Vec::new(),
             tap_times: Vec::new(),
             copilot_open: true,
             ai_copilot: crate::panels::ai_chat::AiCopilotState::new(),
@@ -523,7 +526,7 @@ impl OxideStudioApp {
         }
     }
 
-    /// Poll Aruston Live GUI RPC Server and apply pending agent/MCP mutations.
+    /// Poll Oxide Studio Live GUI RPC Server and apply pending agent/MCP mutations.
     pub fn poll_rpc(&mut self) -> usize {
         let mut rpc = std::mem::replace(
             &mut self.rpc_server,
@@ -541,6 +544,7 @@ impl OxideStudioApp {
             processor.process_interleaved(&mut out_buffer);
         }
 
+        let prev_beat = self.current_beat;
         if let Some(ref mut handle) = self.audio_handle {
             if let Some(telem) = handle.poll_telemetry() {
                 self.telemetry = telem;
@@ -548,73 +552,105 @@ impl OxideStudioApp {
             }
         }
 
-        // Real-time 16th-note step sequencer driver for live GUI playback
-        if self.is_playing {
-            let global_step = (self.current_beat * 4.0).floor() as i64;
-            if self.last_triggered_step != Some(global_step) {
-                self.last_triggered_step = Some(global_step);
-                let step_16 = (global_step.rem_euclid(16)) as usize;
-
-                // Release previous synth note
-                if let Some(prev_note) = self.active_synth_note.take() {
+        if !self.is_playing {
+            if !self.active_synth_notes.is_empty() {
+                let to_release: Vec<u8> =
+                    self.active_synth_notes.drain(..).map(|(p, _)| p).collect();
+                for pitch in to_release {
                     self.send_command(AudioCommand::NoteOff {
                         track_id: 0,
-                        note: prev_note,
+                        note: pitch,
                     });
                 }
+                self.active_synth_note = None;
+            }
+            return;
+        }
 
-                // Trigger active 909 drum pads on this 16th step
-                let mut drum_hits = Vec::new();
-                for (pad_idx, track) in self.drum_pattern.tracks.iter().enumerate() {
-                    if !self.drum_sequencer.is_pad_audible(pad_idx) {
-                        continue;
-                    }
-                    if let Some(step) = track.steps.get(step_16) {
-                        if step.active {
-                            let midi_note = 36 + (pad_idx as u8).min(15);
-                            drum_hits.push((midi_note, step.velocity.max(95)));
-                        }
-                    }
-                }
-                for (note, velocity) in drum_hits {
-                    self.send_command(AudioCommand::NoteOn {
-                        track_id: 1,
-                        note,
-                        velocity,
-                    });
-                }
+        // Release notes whose duration_beats elapsed (or all notes if playhead rewound)
+        let playhead_rewound = self.current_beat + 0.25 < prev_beat;
+        let mut expired = Vec::new();
+        let cur_beat = self.current_beat;
+        self.active_synth_notes.retain(|&(pitch, release_beat)| {
+            if playhead_rewound || cur_beat >= release_beat {
+                expired.push(pitch);
+                false
+            } else {
+                true
+            }
+        });
+        for pitch in expired {
+            self.send_command(AudioCommand::NoteOff {
+                track_id: 0,
+                note: pitch,
+            });
+        }
+        self.active_synth_note = self.active_synth_notes.last().map(|(p, _)| *p);
 
-                // Trigger House synth notes whose 16th step matches step_16
-                let mut next_synth_note = None;
-                for n in &self.midi_pattern.notes {
-                    let note_step = ((n.start_beat * 4.0).round() as usize) % 16;
-                    if note_step == step_16 {
-                        // Apply Live 12 Scale-Lock quantization if enabled
-                        let pitch = if self.global_scale.scale_lock {
-                            self.global_scale.quantize(n.pitch)
-                        } else {
-                            n.pitch
-                        };
-                        next_synth_note = Some((pitch, n.velocity));
-                        break;
+        // Real-time 16th-note step sequencer driver for live GUI playback
+        let global_step = (self.current_beat * 4.0).floor() as i64;
+        if self.last_triggered_step != Some(global_step) {
+            self.last_triggered_step = Some(global_step);
+            let step_16 = (global_step.rem_euclid(16)) as usize;
+
+            // Trigger active 909 drum pads on this 16th step
+            let mut drum_hits = Vec::new();
+            for (pad_idx, track) in self.drum_pattern.tracks.iter().enumerate() {
+                if !self.drum_sequencer.is_pad_audible(pad_idx) {
+                    continue;
+                }
+                if let Some(step) = track.steps.get(step_16) {
+                    if step.active {
+                        let midi_note = 36 + (pad_idx as u8).min(15);
+                        drum_hits.push((midi_note, step.velocity.max(95)));
                     }
                 }
-                if let Some((pitch, vel)) = next_synth_note {
-                    self.active_synth_note = Some(pitch);
-                    self.send_command(AudioCommand::NoteOn {
+            }
+            for (note, velocity) in drum_hits {
+                self.send_command(AudioCommand::NoteOn {
+                    track_id: 1,
+                    note,
+                    velocity,
+                });
+            }
+
+            // Trigger all matching synth notes polyphonically on this 16th step, honoring duration_beats
+            let mut next_synth_notes = Vec::new();
+            for n in &self.midi_pattern.notes {
+                let note_step = ((n.start_beat * 4.0).round() as usize) % 16;
+                if note_step == step_16 {
+                    let pitch = if self.global_scale.scale_lock {
+                        self.global_scale.quantize(n.pitch)
+                    } else {
+                        n.pitch
+                    };
+                    let dur_beats = n.duration_beats.max(0.05);
+                    next_synth_notes.push((pitch, n.velocity, dur_beats));
+                }
+            }
+            for (pitch, vel, dur_beats) in next_synth_notes {
+                // Re-trigger cleanly if the exact pitch is still active
+                if let Some(pos) = self.active_synth_notes.iter().position(|(p, _)| *p == pitch) {
+                    self.active_synth_notes.remove(pos);
+                    self.send_command(AudioCommand::NoteOff {
                         track_id: 0,
                         note: pitch,
-                        velocity: vel,
                     });
                 }
-
-                // Smoothly sweep filter cutoff & XY macro
-                let bar_phase = ((self.current_beat % 32.0) / 32.0) as f32;
-                let sweep_fc = 420.0 + (bar_phase * bar_phase) * 5800.0;
-                self.synth_state.cutoff_hz = sweep_fc;
-                self.xy_state.x = 0.25 + 0.65 * bar_phase;
-                self.xy_state.y = 0.35 + 0.45 * (self.current_beat as f32 * 0.5).sin().abs();
+                self.active_synth_notes
+                    .push((pitch, self.current_beat + dur_beats));
+                self.active_synth_note = Some(pitch);
+                self.send_command(AudioCommand::NoteOn {
+                    track_id: 0,
+                    note: pitch,
+                    velocity: vel,
+                });
             }
+
+            // Update XY pad telemetry modulation indicator without clobbering user/MCP cutoff_hz
+            let bar_phase = ((self.current_beat % 32.0) / 32.0) as f32;
+            self.xy_state.x = 0.25 + 0.65 * bar_phase;
+            self.xy_state.y = 0.35 + 0.45 * (self.current_beat as f32 * 0.5).sin().abs();
         }
     }
 
@@ -739,10 +775,10 @@ impl OxideStudioApp {
                         }
                     }
                 }
-                self.send_command(AudioCommand::SetParameter {
+                self.send_command(AudioCommand::NoteOn {
                     track_id: 1,
-                    param_id: pad_idx as u32,
-                    value: 1.0,
+                    note: 36 + pad_idx as u8,
+                    velocity: 110,
                 });
                 self.status_message =
                     format!("Loaded Drum Sound: {} (Pad {})", item.name, pad_idx + 1);
@@ -820,13 +856,18 @@ impl OxideStudioApp {
                 }
                 self.send_command(AudioCommand::SetParameter {
                     track_id: 0,
-                    param_id: 0,
+                    param_id: PARAM_ID_SYNTH_CUTOFF,
                     value: self.synth_state.cutoff_hz,
                 });
                 self.send_command(AudioCommand::SetParameter {
                     track_id: 0,
-                    param_id: 1,
+                    param_id: PARAM_ID_SYNTH_RESONANCE,
                     value: self.synth_state.resonance,
+                });
+                self.send_command(AudioCommand::SetParameter {
+                    track_id: 0,
+                    param_id: PARAM_ID_SYNTH_PULSE_PW,
+                    value: self.synth_state.pulse_pw,
                 });
                 self.status_message = format!("Loaded Sound Preset: {}", item.name);
             }
@@ -845,8 +886,8 @@ impl OxideStudioApp {
         self.current_time_seconds = ctx.input(|i| i.time);
 
         ctx.data_mut(|d| {
-            d.insert_temp(egui::Id::new("aruston_selected_track"), self.selected_track);
-            d.insert_temp(egui::Id::new("aruston_selected_slot"), self.selected_clip_slot);
+            d.insert_temp(egui::Id::new("oxide_selected_track"), self.selected_track);
+            d.insert_temp(egui::Id::new("oxide_selected_slot"), self.selected_clip_slot);
         });
 
         // 1. Poll real-time audio telemetry & live GUI RPC
@@ -1328,7 +1369,7 @@ impl OxideStudioApp {
                                 &mut self.drum_sequencer,
                             );
                             ui.data_mut(|d| {
-                                d.insert_temp(egui::Id::new("aruston_909_sequencer_state"), self.drum_sequencer.clone())
+                                d.insert_temp(egui::Id::new("oxide_909_sequencer_state"), self.drum_sequencer.clone())
                             });
 
                             if let Some(pad_idx) = seq_action.pad_triggered {
@@ -1410,7 +1451,7 @@ impl OxideStudioApp {
 
         // 6. Right AI Copilot Panel (260-320px width)
         if self.copilot_open {
-            SidePanel::right("aruston_ai_copilot_panel")
+            SidePanel::right("oxide_ai_copilot_panel")
                 .exact_width(budget.right_copilot_width)
                 .resizable(false)
                 .show(ctx, |ui| {
@@ -1605,7 +1646,7 @@ impl OxideStudioApp {
                         self.select_track(trk);
                     }
                     if let Some(sel) = ui.data_mut(|d| {
-                        d.get_temp::<usize>(egui::Id::new("aruston_selected_track"))
+                        d.get_temp::<usize>(egui::Id::new("oxide_selected_track"))
                     }) {
                         if sel < self.tracks_gui.len() {
                             self.device_chain.selected_device_idx = self

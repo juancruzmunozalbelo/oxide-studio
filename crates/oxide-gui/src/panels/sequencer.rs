@@ -431,7 +431,7 @@ pub fn render_drum_sequencer(
     drum_pattern: &mut DrumStepPattern,
     current_step: usize,
 ) -> SequencerAction {
-    let state_id = egui::Id::new("aruston_909_sequencer_state");
+    let state_id = egui::Id::new("oxide_909_sequencer_state");
     let mut state: DrumSequencerState = ui.data_mut(|d| d.get_temp(state_id).unwrap_or_default());
     let action = render_drum_sequencer_with_state(ui, drum_pattern, current_step, &mut state);
     ui.data_mut(|d| d.insert_temp(state_id, state));

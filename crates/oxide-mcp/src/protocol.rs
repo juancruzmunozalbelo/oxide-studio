@@ -13,11 +13,20 @@ pub const INVALID_REQUEST: i64 = -32600;
 pub const METHOD_NOT_FOUND: i64 = -32601;
 pub const INVALID_PARAMS: i64 = -32602;
 pub const INTERNAL_ERROR: i64 = -32603;
+pub const RESOURCE_NOT_FOUND: i64 = -32002;
+
+/// Distinguish omitted `"id"` (JSON-RPC notification -> `None`) from explicit `"id": null` (`Some(Value::Null)`).
+fn deserialize_optional_id<'de, D>(deserializer: D) -> Result<Option<Value>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Value::deserialize(deserializer).map(Some)
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct JsonRpcRequest {
     pub jsonrpc: String,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_optional_id")]
     pub id: Option<Value>,
     pub method: String,
     #[serde(default)]

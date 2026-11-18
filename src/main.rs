@@ -3,7 +3,7 @@
 //! Subcommands:
 //! - `--render-demo <output_path>`: Offline 4.5s multi-track demo WAV bounce with signal verification.
 //! - `--import-als <in.als> [out.json]`: Import Ableton Live 12 .als set and optionally save as JSON.
-//! - `--export-als <out.als>`: Export project to Ableton Live 12 .als gzip format.
+//! - `[--project <in.oxide.json> | --import-als <in.als>] --export-als <out.als>`: Export a project (or default session) to Ableton Live 12 .als gzip format.
 //! - `--split-stems <in.wav> <out_dir>`: 1-click 4-stem remix separation (drums, bass, vocals, other).
 //! - `--scan-plugins [--output <path>]`: Out-of-process AU/VST3 plugin scanner.
 //! - `--mcp`: Model Context Protocol stdio server.
@@ -31,6 +31,35 @@ fn main() {
         return;
     }
 
+    // Check for --export-als (optionally paired with --project <in.oxide.json> or --import-als <in.als>)
+    if let Some(pos) = args.iter().position(|a| a == "--export-als") {
+        if pos + 1 >= args.len() || args[pos + 1].starts_with("--") {
+            eprintln!("Error: --export-als requires an output ALS file path (e.g. --export-als session.als)");
+            exit(1);
+        }
+        let out_als = PathBuf::from(&args[pos + 1]);
+        let in_project = if let Some(p_pos) = args.iter().position(|a| a == "--project") {
+            if p_pos + 1 >= args.len() || args[p_pos + 1].starts_with("--") {
+                eprintln!("Error: --project requires a path to a .oxide.json file");
+                exit(1);
+            }
+            Some(PathBuf::from(&args[p_pos + 1]))
+        } else {
+            None
+        };
+        let in_als = if let Some(a_pos) = args.iter().position(|a| a == "--import-als") {
+            if a_pos + 1 >= args.len() || args[a_pos + 1].starts_with("--") {
+                eprintln!("Error: --import-als requires an input .als file path");
+                exit(1);
+            }
+            Some(PathBuf::from(&args[a_pos + 1]))
+        } else {
+            None
+        };
+        export_als_cli(in_project.as_deref(), in_als.as_deref(), &out_als);
+        return;
+    }
+
     // Check for --import-als
     if let Some(pos) = args.iter().position(|a| a == "--import-als") {
         if pos + 1 >= args.len() {
@@ -44,17 +73,6 @@ fn main() {
             None
         };
         import_als_cli(&in_als, out_json.as_deref());
-        return;
-    }
-
-    // Check for --export-als
-    if let Some(pos) = args.iter().position(|a| a == "--export-als") {
-        if pos + 1 >= args.len() {
-            eprintln!("Error: --export-als requires an output ALS file path (e.g. --export-als session.als)");
-            exit(1);
-        }
-        let out_als = PathBuf::from(&args[pos + 1]);
-        export_als_cli(&out_als);
         return;
     }
 
@@ -113,6 +131,7 @@ fn print_usage() {
             --render-demo <OUTPUT_PATH>         Render 4.5s multi-track demo WAV and verify signal metrics\n\
             --import-als <IN_ALS> [OUT_JSON]    Import Ableton Live 12 .als set, inspect, and optionally save JSON\n\
             --export-als <OUT_ALS>              Export project to Ableton Live 12 gzip .als format\n\
+            --project <IN_JSON>                 Source .oxide.json project path for --export-als\n\
             --split-stems <IN_WAV> <OUT_DIR>    Separate WAV file into 4 remix stems (drums, bass, vocals, other)\n\
             --scan-plugins [--output PATH]      Run out-of-process AU/VST3 plugin scanner\n\
             --mcp                               Run Model Context Protocol (MCP) server over stdio JSON-RPC 2.0\n\
@@ -267,23 +286,48 @@ fn import_als_cli(in_als: &Path, out_json: Option<&Path>) {
 }
 
 /// Export project to Ableton Live 12 gzip-compressed .als format.
-fn export_als_cli(out_als: &Path) {
+fn export_als_cli(in_project: Option<&Path>, in_als: Option<&Path>, out_als: &Path) {
     println!("============================================================");
     println!("  Oxide Studio Ableton Live 12 Set (.als) Exporter");
     println!("============================================================");
     println!("• Target ALS:     {}", out_als.display());
 
-    let mut project = DAWProject::new("Oxide Studio Session");
-    project.transport.bpm = 126.0;
+    let project = if let Some(proj_path) = in_project {
+        println!("• Source Project: {}", proj_path.display());
+        match DAWProject::load_from_file(proj_path) {
+            Ok(p) => p,
+            Err(e) => {
+                eprintln!("Error loading project JSON '{}': {}", proj_path.display(), e);
+                exit(1);
+            }
+        }
+    } else if let Some(als_path) = in_als {
+        println!("• Source ALS:     {}", als_path.display());
+        match DAWProject::load_als(als_path) {
+            Ok(p) => p,
+            Err(e) => {
+                eprintln!("Error importing ALS '{}': {}", als_path.display(), e);
+                exit(1);
+            }
+        }
+    } else {
+        let mut p = DAWProject::new("Oxide Studio Session");
+        p.transport.bpm = 126.0;
 
-    let mut lead_synth = oxide_project::TrackDefinition::new_synth(1, "Lead Synth");
-    lead_synth.mixer.volume_db = -2.5;
-    lead_synth.mixer.pan = 0.0;
-    project.tracks.push(lead_synth);
+        let mut lead_synth = oxide_project::TrackDefinition::new_synth(1, "Lead Synth");
+        lead_synth.mixer.volume_db = -2.5;
+        lead_synth.mixer.pan = 0.0;
+        p.tracks.push(lead_synth);
 
-    let mut drums = oxide_project::TrackDefinition::new_drum_rack(2, "909 Drums");
-    drums.mixer.volume_db = -1.0;
-    project.tracks.push(drums);
+        let mut drums = oxide_project::TrackDefinition::new_drum_rack(2, "909 Drums");
+        drums.mixer.volume_db = -1.0;
+        p.tracks.push(drums);
+        p
+    };
+
+    println!("• Project Name:   {}", project.metadata.name);
+    println!("• Tracks:         {}", project.tracks.len());
+    println!("• BPM:            {:.1}", project.transport.bpm);
 
     match project.save_als(out_als) {
         Ok(()) => {

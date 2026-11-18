@@ -1,11 +1,11 @@
 //! Adversarial Empirical Stress Test Suite for Milestone M12:
-//! Dual-Target 76-Tool MCP Server and Ableton Live 12 LOM Bridge.
+//! Dual-Target 80-Tool MCP Server and Oxide Studio RPC Bridge.
 //!
 //! Stress-tests:
-//! 1. Tool dispatch with empty parameters across all 76 tools.
-//! 2. Inverted and hostile JSON parameter types across all 76 tools.
+//! 1. Tool dispatch with empty parameters across all 80 tools.
+//! 2. Inverted and hostile JSON parameter types across all 80 tools.
 //! 3. Unknown and malformed tool names.
-//! 4. MCP Server protocol parser fault injection (malformed JSON, broken RPC).
+//! 4. MCP Server protocol parser fault injection (malformed JSON, broken RPC, JSON-RPC 2.0 batch/`id: null`).
 //! 5. `TcpLomClient` offline unbound port behavior & connect timeout.
 //! 6. `TcpLomClient` dropped connection / immediate RST without response.
 //! 7. `TcpLomClient` malformed / non-JSON response from server.
@@ -30,13 +30,13 @@ use oxide_mcp::tools::{call_tool, get_tool_definitions};
 use oxide_mcp::McpServer;
 
 // ============================================================================
-// 1. TOOL DISPATCH STRESS: EMPTY PARAMETERS ACROSS ALL 76 TOOLS
+// 1. TOOL DISPATCH STRESS: EMPTY PARAMETERS ACROSS ALL 80 TOOLS
 // ============================================================================
 
 #[test]
-fn test_adv_all_76_tools_empty_parameters() {
+fn test_adv_all_80_tools_empty_parameters() {
     let tools = get_tool_definitions();
-    assert_eq!(tools.len(), 76, "Tool catalog must contain exactly 76 tools");
+    assert_eq!(tools.len(), 80, "Tool catalog must contain exactly 80 tools");
 
     let mut state = DawState::new();
     // Use unbound port for LOM client during empty param tests
@@ -71,7 +71,7 @@ fn test_adv_all_76_tools_empty_parameters() {
 // ============================================================================
 
 #[test]
-fn test_adv_all_76_tools_hostile_and_inverted_parameters() {
+fn test_adv_all_80_tools_hostile_and_inverted_parameters() {
     let tools = get_tool_definitions();
     let mut state = DawState::new();
     state.lom_client.port = 28902;
@@ -183,18 +183,38 @@ fn test_adv_mcp_server_protocol_parser_fault_injection() {
     let val1: Value = serde_json::from_str(&err_resp1).unwrap();
     assert_eq!(val1["error"]["code"], PARSE_ERROR);
 
-    // 3. JSON array instead of request object
-    let err_resp2 = server.handle_line("[1, 2, 3]").expect("error response");
+    // 3. JSON-RPC 2.0 batch of invalid request elements -> array of INVALID_REQUEST (-32600)
+    let err_resp2 = server.handle_line("[1, 2, 3]").expect("error batch response");
     let val2: Value = serde_json::from_str(&err_resp2).unwrap();
-    assert_eq!(val2["error"]["code"], PARSE_ERROR);
+    let batch_arr = val2.as_array().expect("expected batch response array");
+    assert_eq!(batch_arr.len(), 3);
+    for item in batch_arr {
+        assert_eq!(item["error"]["code"], INVALID_REQUEST);
+    }
 
-    // 4. Request without id (Notification)
+    // 3b. Empty JSON-RPC batch [] -> single INVALID_REQUEST (-32600)
+    let err_empty_batch = server.handle_line("[]").expect("error response");
+    let val_empty: Value = serde_json::from_str(&err_empty_batch).unwrap();
+    assert_eq!(val_empty["error"]["code"], INVALID_REQUEST);
+
+    // 4. Request without id (Notification) -> None
     let notif = json!({
         "jsonrpc": "2.0",
         "method": "notifications/initialized"
     });
     assert_eq!(server.handle_line(&notif.to_string()), None);
     assert!(server.is_initialized);
+
+    // 4b. Request with explicit "id": null MUST return a response with "id": null
+    let null_id_req = json!({
+        "jsonrpc": "2.0",
+        "id": null,
+        "method": "non_existent_method_null_id"
+    });
+    let null_id_resp = server.handle_line(&null_id_req.to_string()).expect("id: null must return response");
+    let val_null_id: Value = serde_json::from_str(&null_id_resp).unwrap();
+    assert!(val_null_id["id"].is_null());
+    assert_eq!(val_null_id["error"]["code"], METHOD_NOT_FOUND);
 
     // 5. Unknown method
     let unk_method = json!({
@@ -248,7 +268,7 @@ fn test_adv_mcp_server_protocol_parser_fault_injection() {
     });
     let err_resp7 = server.handle_line(&read_unk_uri.to_string()).expect("error response");
     let val7: Value = serde_json::from_str(&err_resp7).unwrap();
-    assert_eq!(val7["error"]["code"], INTERNAL_ERROR);
+    assert_eq!(val7["error"]["code"], RESOURCE_NOT_FOUND);
 }
 
 // ============================================================================
@@ -601,8 +621,8 @@ fn test_adv_all_15_live12_tools_offline_matrix() {
             name
         );
         assert_eq!(
-            envelope["target"], "real_ableton_live_12",
-            "Tool {} must specify target real_ableton_live_12",
+            envelope["target"], "oxide_studio_gui_rpc",
+            "Tool {} must specify target oxide_studio_gui_rpc",
             name
         );
 

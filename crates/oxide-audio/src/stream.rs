@@ -83,7 +83,7 @@ impl AudioEngine {
             .build_output_stream(
                 config,
                 move |data: &mut [f32], _: &cpal::OutputCallbackInfo| {
-                    processor.process_interleaved(data);
+                    processor.process_interleaved_with_channels(data, channels as usize);
                 },
                 err_fn,
                 None,

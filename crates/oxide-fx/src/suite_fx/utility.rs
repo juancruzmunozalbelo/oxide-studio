@@ -101,7 +101,7 @@ impl AudioEffectDevice for Utility {
             return;
         }
 
-        let count = buffer.frame_count.min(1024);
+        let count = buffer.frame_count.min(oxide_core::MAX_BUFFER_SIZE);
         if count == 0 {
             return;
         }
@@ -160,6 +160,33 @@ impl AudioEffectDevice for Utility {
             // 5. Gain & Pan
             buffer.left[i] = l * linear_gain * pan_l;
             buffer.right[i] = r * linear_gain * pan_r;
+        }
+    }
+
+    fn set_parameter(&mut self, param_id: u32, value: f32) {
+        if !value.is_finite() {
+            return;
+        }
+        match param_id {
+            0 => self.gain_db = value.clamp(-60.0, 35.0),
+            1 => self.pan = value.clamp(-1.0, 1.0),
+            2 => self.width = value.clamp(0.0, 4.0),
+            3 => self.bass_mono = value > 0.5,
+            4 => self.bass_mono_freq_hz = value.clamp(20.0, 500.0),
+            5 => self.mute = value > 0.5,
+            _ => {}
+        }
+    }
+
+    fn get_parameter(&self, param_id: u32) -> f32 {
+        match param_id {
+            0 => self.gain_db,
+            1 => self.pan,
+            2 => self.width,
+            3 => if self.bass_mono { 1.0 } else { 0.0 },
+            4 => self.bass_mono_freq_hz,
+            5 => if self.mute { 1.0 } else { 0.0 },
+            _ => 0.0,
         }
     }
 }

@@ -123,7 +123,7 @@ impl PluginInstance for HostedPluginInstance {
             }
         }
 
-        let frames = buffer.frame_count.min(1024);
+        let frames = buffer.frame_count.min(oxide_core::MAX_BUFFER_SIZE);
 
         match self.descriptor.category {
             PluginCategory::Instrument => {
@@ -298,6 +298,14 @@ impl AudioEffectDevice for HostedPluginDevice {
         if self.enabled {
             self.instance.process(buffer, &[]);
         }
+    }
+
+    fn set_parameter(&mut self, param_id: u32, value: f32) {
+        let _ = self.instance.set_parameter(param_id, value);
+    }
+
+    fn get_parameter(&self, param_id: u32) -> f32 {
+        self.instance.get_parameter(param_id).unwrap_or(0.0)
     }
 }
 

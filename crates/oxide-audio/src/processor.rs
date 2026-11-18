@@ -6,7 +6,8 @@ use oxide_drums::DrumRack;
 use oxide_fx::{Mixer, Saturator, TempoDelay, FdnReverb};
 
 use crate::parameters::{
-    AtomicParameters, PARAM_BPM, PARAM_MASTER_VOL, PARAM_TRACK_PAN_BASE, PARAM_TRACK_VOL_BASE,
+    AtomicParameters, PARAM_BPM, PARAM_FX_DRIVE, PARAM_MASTER_VOL, PARAM_TRACK_PAN_BASE,
+    PARAM_TRACK_VOL_BASE,
 };
 use crate::queues::AudioThreadHandles;
 
@@ -17,6 +18,10 @@ pub const PARAM_ID_MASTER_VOL: u32 = 1;
 pub const PARAM_ID_TEST_TONE_ENABLE: u32 = 2;
 pub const PARAM_ID_TEST_TONE_FREQ: u32 = 3;
 pub const PARAM_ID_TEST_TONE_VOL: u32 = 4;
+pub const PARAM_ID_SYNTH_CUTOFF: u32 = 10;
+pub const PARAM_ID_SYNTH_RESONANCE: u32 = 11;
+pub const PARAM_ID_SYNTH_PULSE_PW: u32 = 12;
+pub const PARAM_ID_SYNTH_ENV_MOD: u32 = 13;
 pub const PARAM_ID_TRACK_VOL_BASE: u32 = 1000;
 pub const PARAM_ID_TRACK_PAN_BASE: u32 = 1100;
 pub const PARAM_ID_TRACK_MUTE_BASE: u32 = 1200;
@@ -46,16 +51,27 @@ pub struct AudioEngineProcessor {
     handles: AudioThreadHandles,
 
     // Pre-allocated zero-allocation planar scratch buffers
-    scratch_l: [f32; MAX_BLOCK_FRAMES],
-    scratch_r: [f32; MAX_BLOCK_FRAMES],
-    synth_buf_l: [f32; MAX_BLOCK_FRAMES],
-    synth_buf_r: [f32; MAX_BLOCK_FRAMES],
-    drum_buf_l: [f32; MAX_BLOCK_FRAMES],
-    drum_buf_r: [f32; MAX_BLOCK_FRAMES],
+    scratch_l: Box<[f32]>,
+    scratch_r: Box<[f32]>,
+    synth_buf_l: Box<[f32]>,
+    synth_buf_r: Box<[f32]>,
+    drum_buf_l: Box<[f32]>,
+    drum_buf_r: Box<[f32]>,
+    send_a_l: Box<[f32]>,
+    send_a_r: Box<[f32]>,
+    send_b_l: Box<[f32]>,
+    send_b_r: Box<[f32]>,
+    send_a_active_tail: bool,
+    send_b_active_tail: bool,
 
-    // Oscilloscope ring buffer
+    // Oscilloscope ring buffer & precomputed 64-band Goertzel analyzer
     osc_buffer: [f32; 256],
     osc_write_pos: usize,
+    spec_hann: [f32; 256],
+    spec_coeff: [f32; 64],
+    spec_cos: [f32; 64],
+    spec_sin: [f32; 64],
+    spec_norm: f32,
 }
 
 impl AudioEngineProcessor {
@@ -67,6 +83,30 @@ impl AudioEngineProcessor {
         let sr = if sample_rate <= 0.0 { 44100.0 } else { sample_rate };
         let mut transport = MusicalTime::default();
         transport.bpm = params.get(PARAM_BPM) as f64;
+
+        let mut spec_hann = [0.0f32; 256];
+        let mut hann_sum = 0.0f32;
+        for n in 0..256 {
+            let w = 0.5 * (1.0 - (2.0 * std::f32::consts::PI * (n as f32) / 256.0).cos());
+            spec_hann[n] = w;
+            hann_sum += w;
+        }
+        let spec_norm = if hann_sum > 0.0 { 2.0 / hann_sum } else { 1.0 / 128.0 };
+
+        let min_freq = 20.0f32;
+        let max_freq = (sr * 0.45).min(18000.0).max(min_freq * 2.0);
+        let mut spec_coeff = [0.0f32; 64];
+        let mut spec_cos = [0.0f32; 64];
+        let mut spec_sin = [0.0f32; 64];
+        for b in 0..64 {
+            let t = b as f32 / 63.0;
+            let freq = min_freq * (max_freq / min_freq).powf(t);
+            let omega = 2.0 * std::f32::consts::PI * freq / sr;
+            let c = omega.cos();
+            spec_coeff[b] = 2.0 * c;
+            spec_cos[b] = c;
+            spec_sin[b] = omega.sin();
+        }
 
         Self {
             sample_rate: sr,
@@ -87,14 +127,25 @@ impl AudioEngineProcessor {
             test_tone_phase: 0.0,
             cpu_meter: crate::engine::CpuLoadMeter::new(),
             handles,
-            scratch_l: [0.0; MAX_BLOCK_FRAMES],
-            scratch_r: [0.0; MAX_BLOCK_FRAMES],
-            synth_buf_l: [0.0; MAX_BLOCK_FRAMES],
-            synth_buf_r: [0.0; MAX_BLOCK_FRAMES],
-            drum_buf_l: [0.0; MAX_BLOCK_FRAMES],
-            drum_buf_r: [0.0; MAX_BLOCK_FRAMES],
+            scratch_l: vec![0.0; MAX_BLOCK_FRAMES].into_boxed_slice(),
+            scratch_r: vec![0.0; MAX_BLOCK_FRAMES].into_boxed_slice(),
+            synth_buf_l: vec![0.0; MAX_BLOCK_FRAMES].into_boxed_slice(),
+            synth_buf_r: vec![0.0; MAX_BLOCK_FRAMES].into_boxed_slice(),
+            drum_buf_l: vec![0.0; MAX_BLOCK_FRAMES].into_boxed_slice(),
+            drum_buf_r: vec![0.0; MAX_BLOCK_FRAMES].into_boxed_slice(),
+            send_a_l: vec![0.0; MAX_BLOCK_FRAMES].into_boxed_slice(),
+            send_a_r: vec![0.0; MAX_BLOCK_FRAMES].into_boxed_slice(),
+            send_b_l: vec![0.0; MAX_BLOCK_FRAMES].into_boxed_slice(),
+            send_b_r: vec![0.0; MAX_BLOCK_FRAMES].into_boxed_slice(),
+            send_a_active_tail: false,
+            send_b_active_tail: false,
             osc_buffer: [0.0; 256],
             osc_write_pos: 0,
+            spec_hann,
+            spec_coeff,
+            spec_cos,
+            spec_sin,
+            spec_norm,
         }
     }
 
@@ -111,6 +162,7 @@ impl AudioEngineProcessor {
         let synth = &mut self.synth;
         let drum_rack = &mut self.drum_rack;
         let transport = &mut self.transport;
+        let saturator = &mut self.saturator;
         let delay = &mut self.delay;
         let mixer = &mut self.mixer;
         let params = &self.params;
@@ -156,8 +208,42 @@ impl AudioEngineProcessor {
                 } else if param_id == 101 {
                     synth.set_macro_y(value);
                 } else if param_id == 0 || param_id == PARAM_ID_MASTER_VOL {
-                    mixer.master_volume_linear = value;
-                    params.set(PARAM_MASTER_VOL, value);
+                    let safe_vol = if value.is_finite() {
+                        value.clamp(0.0, 2.0)
+                    } else {
+                        0.0
+                    };
+                    mixer.master_volume_linear = safe_vol;
+                    params.set(PARAM_MASTER_VOL, safe_vol);
+                } else if param_id == PARAM_ID_SYNTH_CUTOFF {
+                    if value.is_finite() {
+                        synth.set_parameter("filter_frequency", value.clamp(20.0, 20000.0));
+                    }
+                } else if param_id == PARAM_ID_SYNTH_RESONANCE {
+                    if value.is_finite() {
+                        // Accept either normalized [0.0..=1.0] or GUI Q-scale [>1.0..=5.0]
+                        let norm = if value > 1.0 {
+                            (value / 5.0).clamp(0.0, 1.0)
+                        } else {
+                            value.clamp(0.0, 1.0)
+                        };
+                        synth.set_parameter("filter_resonance", norm);
+                    }
+                } else if param_id == PARAM_ID_SYNTH_PULSE_PW {
+                    if value.is_finite() {
+                        let pw_norm = ((value.clamp(0.05, 0.95) - 0.5) / 0.45).clamp(-1.0, 1.0);
+                        synth.set_parameter("oscillator_pulse_width", pw_norm);
+                    }
+                } else if param_id == PARAM_ID_SYNTH_ENV_MOD {
+                    if value.is_finite() {
+                        synth.set_parameter("filter_envelope_amount", value.clamp(-1.0, 1.0));
+                    }
+                } else if param_id == PARAM_FX_DRIVE as u32 {
+                    if value.is_finite() {
+                        let drive_norm = value.clamp(0.0, 2.0);
+                        params.set(PARAM_FX_DRIVE, drive_norm);
+                        saturator.set_drive_db(drive_norm * 12.0);
+                    }
                 } else if (PARAM_ID_TRACK_VOL_BASE..=PARAM_ID_TRACK_VOL_BASE + 15).contains(&param_id)
                     || (PARAM_TRACK_VOL_BASE as u32..=(PARAM_TRACK_VOL_BASE + 15) as u32).contains(&param_id)
                 {
@@ -173,7 +259,8 @@ impl AudioEngineProcessor {
                         track_id
                     };
                     if tid < 16 {
-                        let lin = if value <= 0.001 { 0.0 } else { value };
+                        let safe_val = if value.is_finite() { value } else { 0.0 };
+                        let lin = if safe_val <= 0.001 { 0.0 } else { safe_val.clamp(0.0, 4.0) };
                         mixer.tracks[tid].volume_linear = lin;
                         if lin <= 0.001 {
                             mixer.tracks[tid].volume_db = -60.0;
@@ -199,7 +286,7 @@ impl AudioEngineProcessor {
                         track_id
                     };
                     if tid < 16 {
-                        let clamped = value.clamp(-1.0, 1.0);
+                        let clamped = if value.is_finite() { value.clamp(-1.0, 1.0) } else { 0.0 };
                         mixer.tracks[tid].pan = clamped;
                         params.set(PARAM_TRACK_PAN_BASE + tid, clamped);
                     }
@@ -233,7 +320,7 @@ impl AudioEngineProcessor {
                         track_id
                     };
                     if tid < 16 {
-                        send_a[tid] = value.clamp(0.0, 1.0);
+                        send_a[tid] = if value.is_finite() { value.clamp(0.0, 1.0) } else { 0.0 };
                     }
                 } else if (PARAM_ID_TRACK_SEND_B_BASE..=PARAM_ID_TRACK_SEND_B_BASE + 15).contains(&param_id) {
                     let tid = if param_id > PARAM_ID_TRACK_SEND_B_BASE {
@@ -242,16 +329,18 @@ impl AudioEngineProcessor {
                         track_id
                     };
                     if tid < 16 {
-                        send_b[tid] = value.clamp(0.0, 1.0);
+                        send_b[tid] = if value.is_finite() { value.clamp(0.0, 1.0) } else { 0.0 };
                     }
                 } else if param_id == PARAM_ID_CROSSFADER {
-                    *crossfader = value.clamp(-1.0, 1.0);
+                    *crossfader = if value.is_finite() { value.clamp(-1.0, 1.0) } else { 0.0 };
                 } else if param_id == PARAM_ID_TEST_TONE_ENABLE {
                     *test_tone_enabled = value > 0.5;
                 } else if param_id == PARAM_ID_TEST_TONE_FREQ {
-                    *test_tone_freq = value.clamp(20.0, 20000.0);
+                    if value.is_finite() {
+                        *test_tone_freq = value.clamp(20.0, 20000.0);
+                    }
                 } else if param_id == PARAM_ID_TEST_TONE_VOL {
-                    *test_tone_volume = value.clamp(0.0, 1.0);
+                    *test_tone_volume = if value.is_finite() { value.clamp(0.0, 1.0) } else { 0.0 };
                 }
             }
             _ => {}
@@ -259,7 +348,7 @@ impl AudioEngineProcessor {
     }
 
     /// Process a sub-block of up to MAX_BLOCK_FRAMES frames.
-    fn process_sub_block(&mut self, output_chunk: &mut [f32], frames: usize) {
+    fn process_sub_block(&mut self, output_chunk: &mut [f32], frames: usize, channels: usize) {
         // 1. Advance transport
         self.transport.advance_frames(frames, self.sample_rate as f64);
 
@@ -323,20 +412,91 @@ impl AudioEngineProcessor {
         }
 
         let mut any_track_audible = false;
+        let track0_active =
+            synth_audible && !self.mixer.tracks[0].mute && self.mixer.tracks[0].volume_linear > 0.001;
+        let track1_active =
+            drum_audible && !self.mixer.tracks[1].mute && self.mixer.tracks[1].volume_linear > 0.001;
 
-        // 6. Sum audible tracks into Master Planar Scratch
-        if synth_audible && !self.mixer.tracks[0].mute && self.mixer.tracks[0].volume_linear > 0.001 {
+        self.send_a_l[..frames].fill(0.0);
+        self.send_a_r[..frames].fill(0.0);
+        self.send_b_l[..frames].fill(0.0);
+        self.send_b_r[..frames].fill(0.0);
+
+        let xf = if self.crossfader.is_finite() {
+            self.crossfader.clamp(-1.0, 1.0)
+        } else {
+            0.0
+        };
+        // Equal-power DJ crossfader gains: Track 0 -> A, Track 1 -> B
+        let xf_gain_0 = if xf <= 0.0 {
+            1.0
+        } else if xf >= 1.0 {
+            0.0
+        } else {
+            (0.5 * std::f32::consts::PI * xf).cos().max(0.0)
+        };
+        let xf_gain_1 = if xf >= 0.0 {
+            1.0
+        } else if xf <= -1.0 {
+            0.0
+        } else {
+            (0.5 * std::f32::consts::PI * xf.abs()).cos().max(0.0)
+        };
+
+        // 6. Sum audible tracks into Master Planar Scratch + Send A/B Buses
+        let send_a_0 = if self.send_a[0].is_finite() {
+            self.send_a[0].clamp(0.0, 1.0)
+        } else {
+            0.0
+        };
+        let send_b_0 = if self.send_b[0].is_finite() {
+            self.send_b[0].clamp(0.0, 1.0)
+        } else {
+            0.0
+        };
+        if track0_active && xf_gain_0 > 0.0 {
             any_track_audible = true;
             for i in 0..frames {
-                self.scratch_l[i] += self.synth_buf_l[i];
-                self.scratch_r[i] += self.synth_buf_r[i];
+                let l = self.synth_buf_l[i] * xf_gain_0;
+                let r = self.synth_buf_r[i] * xf_gain_0;
+                self.scratch_l[i] += l;
+                self.scratch_r[i] += r;
+                if send_a_0 > 0.0 {
+                    self.send_a_l[i] += l * send_a_0;
+                    self.send_a_r[i] += r * send_a_0;
+                }
+                if send_b_0 > 0.0 {
+                    self.send_b_l[i] += l * send_b_0;
+                    self.send_b_r[i] += r * send_b_0;
+                }
             }
         }
-        if drum_audible && !self.mixer.tracks[1].mute && self.mixer.tracks[1].volume_linear > 0.001 {
+
+        let send_a_1 = if self.send_a[1].is_finite() {
+            self.send_a[1].clamp(0.0, 1.0)
+        } else {
+            0.0
+        };
+        let send_b_1 = if self.send_b[1].is_finite() {
+            self.send_b[1].clamp(0.0, 1.0)
+        } else {
+            0.0
+        };
+        if track1_active && xf_gain_1 > 0.0 {
             any_track_audible = true;
             for i in 0..frames {
-                self.scratch_l[i] += self.drum_buf_l[i];
-                self.scratch_r[i] += self.drum_buf_r[i];
+                let l = self.drum_buf_l[i] * xf_gain_1;
+                let r = self.drum_buf_r[i] * xf_gain_1;
+                self.scratch_l[i] += l;
+                self.scratch_r[i] += r;
+                if send_a_1 > 0.0 {
+                    self.send_a_l[i] += l * send_a_1;
+                    self.send_a_r[i] += r * send_a_1;
+                }
+                if send_b_1 > 0.0 {
+                    self.send_b_l[i] += l * send_b_1;
+                    self.send_b_r[i] += r * send_b_1;
+                }
             }
         }
 
@@ -351,19 +511,48 @@ impl AudioEngineProcessor {
             self.mixer.master_rms_r = 0.0;
         } else {
             if any_track_audible {
-                // 7. Process Master Insert FX (Saturator -> Delay -> Reverb)
+                // 7. Process Master Insert Saturator & Return A (Delay) / Return B (Reverb) Sends
                 self.saturator.process_block(
                     &mut self.scratch_l[..frames],
                     &mut self.scratch_r[..frames],
                 );
-                self.delay.process_block(
-                    &mut self.scratch_l[..frames],
-                    &mut self.scratch_r[..frames],
-                );
-                self.reverb.process_block(
-                    &mut self.scratch_l[..frames],
-                    &mut self.scratch_r[..frames],
-                );
+                let send_a_active =
+                    (track0_active && xf_gain_0 > 0.0 && send_a_0 > 0.0001)
+                        || (track1_active && xf_gain_1 > 0.0 && send_a_1 > 0.0001);
+                if send_a_active || self.send_a_active_tail {
+                    self.delay.process_block(
+                        &mut self.send_a_l[..frames],
+                        &mut self.send_a_r[..frames],
+                    );
+                    let mut peak_ret = 0.0f32;
+                    for i in 0..frames {
+                        let l = self.send_a_l[i];
+                        let r = self.send_a_r[i];
+                        self.scratch_l[i] += l;
+                        self.scratch_r[i] += r;
+                        peak_ret = peak_ret.max(l.abs()).max(r.abs());
+                    }
+                    self.send_a_active_tail = peak_ret > 1e-6;
+                }
+
+                let send_b_active =
+                    (track0_active && xf_gain_0 > 0.0 && send_b_0 > 0.0001)
+                        || (track1_active && xf_gain_1 > 0.0 && send_b_1 > 0.0001);
+                if send_b_active || self.send_b_active_tail {
+                    self.reverb.process_block(
+                        &mut self.send_b_l[..frames],
+                        &mut self.send_b_r[..frames],
+                    );
+                    let mut peak_ret = 0.0f32;
+                    for i in 0..frames {
+                        let l = self.send_b_l[i];
+                        let r = self.send_b_r[i];
+                        self.scratch_l[i] += l;
+                        self.scratch_r[i] += r;
+                        peak_ret = peak_ret.max(l.abs()).max(r.abs());
+                    }
+                    self.send_b_active_tail = peak_ret > 1e-6;
+                }
             } else {
                 self.scratch_l[..frames].fill(0.0);
                 self.scratch_r[..frames].fill(0.0);
@@ -381,7 +570,12 @@ impl AudioEngineProcessor {
             }
 
             // 8. Master Bus & Brickwall Limiter
-            let master_vol = self.params.get(PARAM_MASTER_VOL);
+            let raw_master_vol = self.params.get(PARAM_MASTER_VOL);
+            let master_vol = if raw_master_vol.is_finite() {
+                raw_master_vol.clamp(0.0, 2.0)
+            } else {
+                0.0
+            };
             self.mixer.master_volume_linear = master_vol;
             if master_vol <= 0.001 {
                 self.scratch_l[..frames].fill(0.0);
@@ -405,10 +599,19 @@ impl AudioEngineProcessor {
             self.osc_write_pos = (self.osc_write_pos + 1) % 256;
         }
 
-        // 10. Interleave into output chunk slice
-        for (i, frame) in output_chunk.chunks_exact_mut(2).enumerate().take(frames) {
-            frame[0] = self.scratch_l[i];
-            frame[1] = self.scratch_r[i];
+        // 10. Interleave into output chunk slice supporting arbitrary hardware channel counts
+        if channels == 1 {
+            for (i, frame) in output_chunk.chunks_exact_mut(1).enumerate().take(frames) {
+                frame[0] = 0.5 * (self.scratch_l[i] + self.scratch_r[i]);
+            }
+        } else {
+            for (i, frame) in output_chunk.chunks_exact_mut(channels).enumerate().take(frames) {
+                frame[0] = self.scratch_l[i];
+                frame[1] = self.scratch_r[i];
+                for ch in 2..channels {
+                    frame[ch] = 0.0;
+                }
+            }
         }
     }
 
@@ -417,12 +620,21 @@ impl AudioEngineProcessor {
     /// Supports arbitrary buffer sizes (including standard Live 12 sizes 64..2048)
     /// via zero-allocation sub-block processing.
     pub fn process_interleaved(&mut self, output: &mut [f32]) {
+        self.process_interleaved_with_channels(output, 2);
+    }
+
+    /// Interleaved audio callback supporting arbitrary output channel counts
+    /// (mono downmix for 1ch, stereo on ch 0/1 with zeroed extra channels for >2ch).
+    pub fn process_interleaved_with_channels(&mut self, output: &mut [f32], channels: usize) {
         let start_time = std::time::Instant::now();
 
         // 1. Drain SPSC commands once at the start of callback
         self.process_commands();
 
-        let total_frames = output.len() / 2;
+        if channels == 0 {
+            return;
+        }
+        let total_frames = output.len() / channels;
         if total_frames == 0 {
             return;
         }
@@ -431,11 +643,11 @@ impl AudioEngineProcessor {
         let mut frame_offset = 0;
         while frame_offset < total_frames {
             let chunk_frames = (total_frames - frame_offset).min(MAX_BLOCK_FRAMES);
-            let sample_start = frame_offset * 2;
-            let sample_end = sample_start + chunk_frames * 2;
+            let sample_start = frame_offset * channels;
+            let sample_end = sample_start + chunk_frames * channels;
             let output_chunk = &mut output[sample_start..sample_end];
 
-            self.process_sub_block(output_chunk, chunk_frames);
+            self.process_sub_block(output_chunk, chunk_frames, channels);
             frame_offset += chunk_frames;
         }
 
@@ -458,17 +670,38 @@ impl AudioEngineProcessor {
             telemetry.track_peaks_r[t] = self.mixer.tracks[t].peak_r;
         }
 
-        // Copy aligned oscilloscope slice
+        // Copy aligned oscilloscope slice & apply Hann window for Goertzel spectral analysis
+        let mut windowed = [0.0f32; 256];
+        let mut osc_energy = 0.0f32;
         for k in 0..256 {
             let idx = (self.osc_write_pos + k) % 256;
-            telemetry.oscilloscope_slice[k] = self.osc_buffer[idx];
+            let s = self.osc_buffer[idx];
+            telemetry.oscilloscope_slice[k] = s;
+            let w = s * self.spec_hann[k];
+            windowed[k] = w;
+            osc_energy += w * w;
         }
 
-        // Compute fast 64-band log spectrum approximation
-        let rms_val = telemetry.master_rms_l.max(telemetry.master_rms_r);
-        for b in 0..64 {
-            let falloff = 1.0 - (b as f32 / 64.0);
-            telemetry.spectrum_bins[b] = (rms_val * falloff * (1.0 + (b as f32 * 0.1).sin() * 0.2)).min(1.0);
+        // Compute real 64-band log-spaced spectral magnitudes via precomputed Goertzel bank
+        if osc_energy > 1e-12 {
+            for b in 0..64 {
+                let coeff = self.spec_coeff[b];
+                let mut s1 = 0.0f32;
+                let mut s2 = 0.0f32;
+                for &x in &windowed {
+                    let s0 = x + coeff * s1 - s2;
+                    s2 = s1;
+                    s1 = s0;
+                }
+                let real = s1 - self.spec_cos[b] * s2;
+                let imag = self.spec_sin[b] * s2;
+                let mag = (real * real + imag * imag).max(0.0).sqrt() * self.spec_norm;
+                telemetry.spectrum_bins[b] = if mag.is_finite() {
+                    mag.clamp(0.0, 1.0)
+                } else {
+                    0.0
+                };
+            }
         }
 
         // Push telemetry without blocking
@@ -744,6 +977,110 @@ mod tests {
         proc.process_interleaved(&mut silent_output);
         let energy_off: f32 = silent_output.iter().map(|s| s * s).sum();
         assert_eq!(energy_off, 0.0, "Disabling test tone must return to silence");
+    }
+
+    #[test]
+    fn test_synth_params_and_master_clamp() {
+        let queues = AudioQueues::new();
+        let (mut ui, audio) = queues.split();
+        let params = AtomicParameters::new();
+        let mut proc = AudioEngineProcessor::new(44100.0, audio, params);
+
+        ui.send_command(AudioCommand::SetParameter {
+            track_id: 0,
+            param_id: PARAM_ID_MASTER_VOL,
+            value: 5000.0,
+        });
+        ui.send_command(AudioCommand::SetParameter {
+            track_id: 0,
+            param_id: PARAM_ID_SYNTH_CUTOFF,
+            value: 1200.0,
+        });
+        ui.send_command(AudioCommand::SetParameter {
+            track_id: 0,
+            param_id: PARAM_ID_SYNTH_RESONANCE,
+            value: 0.75,
+        });
+        ui.send_command(AudioCommand::SetParameter {
+            track_id: 0,
+            param_id: PARAM_ID_SYNTH_PULSE_PW,
+            value: 0.95,
+        });
+        ui.send_command(AudioCommand::SetParameter {
+            track_id: 0,
+            param_id: PARAM_ID_SYNTH_ENV_MOD,
+            value: -0.5,
+        });
+
+        proc.process_commands();
+
+        assert!((proc.mixer.master_volume_linear - 2.0).abs() < 1e-6);
+        assert!((proc.params.get(PARAM_MASTER_VOL) - 2.0).abs() < 1e-6);
+        assert!((proc.synth.params.get_value("filter_frequency") - 1200.0).abs() < 1e-3);
+        assert!((proc.synth.params.get_value("filter_resonance") - 0.75).abs() < 1e-4);
+        assert!((proc.synth.params.get_value("oscillator_pulse_width") - 1.0).abs() < 1e-4);
+        assert!((proc.synth.params.get_value("filter_envelope_amount") - (-0.5)).abs() < 1e-4);
+    }
+
+    #[test]
+    fn test_multichannel_interleaved_sends_crossfader_and_spectrum() {
+        let queues = AudioQueues::new();
+        let (mut ui, audio) = queues.split();
+        let params = AtomicParameters::new();
+        let mut proc = AudioEngineProcessor::new(44100.0, audio, params);
+
+        // Pure 440 Hz tone on 4 channels: ch 0/1 contain audio, ch 2/3 zeroed, Goertzel peaks near 440 Hz
+        proc.enable_test_tone(true, 440.0, 0.5);
+        let mut quad_buf = vec![99.0f32; 256 * 4];
+        proc.process_interleaved_with_channels(&mut quad_buf, 4);
+        for f in 0..256 {
+            assert_eq!(quad_buf[f * 4 + 2], 0.0);
+            assert_eq!(quad_buf[f * 4 + 3], 0.0);
+        }
+        let quad_energy: f32 = quad_buf.chunks_exact(4).map(|c| c[0] * c[0]).sum();
+        assert!(quad_energy > 1.0);
+
+        let telem = ui.poll_telemetry().expect("Spectrum telemetry");
+        let peak_bin = telem
+            .spectrum_bins
+            .iter()
+            .enumerate()
+            .max_by(|a, b| a.1.partial_cmp(b.1).unwrap())
+            .map(|(idx, _)| idx)
+            .unwrap();
+        assert!(
+            (25..=32).contains(&peak_bin),
+            "440 Hz tone should peak around mid-low log bins (25..32), got {}",
+            peak_bin
+        );
+        assert!(telem.spectrum_bins[peak_bin] > telem.spectrum_bins[63] * 5.0);
+
+        // Mono 1ch downmix
+        let mut mono_buf = vec![0.0f32; 128];
+        proc.process_interleaved_with_channels(&mut mono_buf, 1);
+        let mono_energy: f32 = mono_buf.iter().map(|s| s * s).sum();
+        assert!(mono_energy > 1.0);
+
+        // Crossfader and sends isolation: flush 128-sample limiter lookahead after disabling test tone,
+        // then verify Track 0 (A) is completely silenced when crossfader is full B (1.0).
+        proc.enable_test_tone(false, 440.0, 0.0);
+        let mut flush_buf = [0.0f32; 512];
+        proc.process_interleaved(&mut flush_buf);
+        ui.send_command(AudioCommand::Play);
+        ui.send_command(AudioCommand::NoteOn {
+            track_id: 0,
+            note: 60,
+            velocity: 120,
+        });
+        ui.send_command(AudioCommand::SetParameter {
+            track_id: 0,
+            param_id: PARAM_ID_CROSSFADER,
+            value: 1.0,
+        });
+        let mut xf_buf = [0.0f32; 256];
+        proc.process_interleaved(&mut xf_buf);
+        let xf_energy: f32 = xf_buf.iter().map(|s| s * s).sum();
+        assert_eq!(xf_energy, 0.0, "Full B crossfader must silence Track 0 (A)");
     }
 }
 

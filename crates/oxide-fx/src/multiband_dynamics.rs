@@ -326,7 +326,7 @@ impl AudioEffectDevice for MultibandDynamics {
             return;
         }
 
-        let count = buffer.frame_count.min(1024);
+        let count = buffer.frame_count.min(oxide_core::MAX_BUFFER_SIZE);
         if count == 0 {
             return;
         }
@@ -375,6 +375,29 @@ impl AudioEffectDevice for MultibandDynamics {
             // Amount blend
             buffer.left[i] = dry_l * (1.0 - self.amount) + wet_l * self.amount;
             buffer.right[i] = dry_r * (1.0 - self.amount) + wet_r * self.amount;
+        }
+    }
+
+    fn set_parameter(&mut self, param_id: u32, value: f32) {
+        if !value.is_finite() {
+            return;
+        }
+        match param_id {
+            0 => self.amount = value.clamp(0.0, 1.0),
+            1 => self.time_macro = value.clamp(0.1, 10.0),
+            2 => self.input_gain_db = value.clamp(-24.0, 24.0),
+            3 => self.output_gain_db = value.clamp(-24.0, 24.0),
+            _ => {}
+        }
+    }
+
+    fn get_parameter(&self, param_id: u32) -> f32 {
+        match param_id {
+            0 => self.amount,
+            1 => self.time_macro,
+            2 => self.input_gain_db,
+            3 => self.output_gain_db,
+            _ => 0.0,
         }
     }
 }

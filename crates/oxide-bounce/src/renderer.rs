@@ -13,7 +13,7 @@ use oxide_drums::DrumRack;
 use oxide_fx::MasterLimiter;
 use oxide_project::DAWProject;
 
-use crate::stems::{render_single_track_window, BounceError};
+use crate::stems::{apply_master_fx_and_limiter, render_project_mix_with_stems, BounceError};
 use crate::wav_writer::WavWriter;
 
 pub struct DemoArrangementRenderer {
@@ -188,9 +188,9 @@ pub fn render_project_to_wav(
     }
 
     let duration_seconds = if max_beat > 0.0 {
-        (max_beat * 60.0 / bpm).clamp(4.0, 30.0)
+        (max_beat * 60.0 / bpm).clamp(4.0, 120.0)
     } else if project.transport.loop_enabled && project.transport.loop_end_beat > 0.0 {
-        ((project.transport.loop_end_beat - project.transport.loop_start_beat) * 60.0 / bpm).clamp(4.0, 30.0)
+        ((project.transport.loop_end_beat - project.transport.loop_start_beat) * 60.0 / bpm).clamp(4.0, 120.0)
     } else {
         4.0
     };
@@ -213,55 +213,31 @@ pub fn render_project_window_to_wav(
         project.transport.bpm
     };
     let duration_seconds = duration_seconds.clamp(0.5, 300.0);
-
     let total_frames = (duration_seconds * sample_rate as f64).ceil() as usize;
-    let mut master_l = vec![0.0f32; total_frames];
-    let mut master_r = vec![0.0f32; total_frames];
 
-    if project.tracks.is_empty() {
+    let (master_l, master_r) = if project.tracks.is_empty() {
+        let mut ml = vec![0.0f32; total_frames];
+        let mut mr = vec![0.0f32; total_frames];
         let renderer = DemoArrangementRenderer::new(sample_rate, bpm);
         let interleaved = renderer.render_demo_seconds(duration_seconds);
         let frames = interleaved.len() / 2;
         for i in 0..frames.min(total_frames) {
-            master_l[i] = interleaved[i * 2];
-            master_r[i] = interleaved[i * 2 + 1];
+            ml[i] = interleaved[i * 2];
+            mr[i] = interleaved[i * 2 + 1];
         }
+        apply_master_fx_and_limiter(&project.master_track, &mut ml, &mut mr, sample_rate, bpm);
+        (ml, mr)
     } else {
-        for track in &project.tracks {
-            if !track.mixer.mute {
-                let (trk_l, trk_r) = render_single_track_window(
-                    track,
-                    sample_rate,
-                    bpm,
-                    start_beat_offset,
-                    duration_seconds,
-                );
-                for i in 0..total_frames {
-                    master_l[i] += trk_l[i];
-                    master_r[i] += trk_r[i];
-                }
-            }
-        }
-    }
-
-    // Apply master volume
-    let master_gain = 10.0f32.powf(project.master_track.volume_db.clamp(-70.0, 24.0) / 20.0);
-    for i in 0..total_frames {
-        master_l[i] *= master_gain;
-        master_r[i] *= master_gain;
-    }
-
-    let mut limiter = MasterLimiter::new(sample_rate);
-    const BLOCK_SIZE: usize = 128;
-    let mut frame = 0;
-    while frame < total_frames {
-        let cur_block = (total_frames - frame).min(BLOCK_SIZE);
-        limiter.process_block(
-            &mut master_l[frame..frame + cur_block],
-            &mut master_r[frame..frame + cur_block],
+        let (ml, mr, _) = render_project_mix_with_stems(
+            project,
+            sample_rate,
+            bpm,
+            start_beat_offset,
+            duration_seconds,
+            false,
         );
-        frame += cur_block;
-    }
+        (ml, mr)
+    };
 
     let mut interleaved = Vec::with_capacity(total_frames * 2);
     for i in 0..total_frames {

@@ -100,7 +100,7 @@ impl AudioEffectDevice for AutoShift {
             return;
         }
 
-        let count = buffer.frame_count.min(1024);
+        let count = buffer.frame_count.min(oxide_core::MAX_BUFFER_SIZE);
         if count == 0 {
             return;
         }
@@ -154,6 +154,33 @@ impl AudioEffectDevice for AutoShift {
 
             buffer.left[i] = dry_l * (1.0 - self.dry_wet) + wet_l * self.dry_wet;
             buffer.right[i] = dry_r * (1.0 - self.dry_wet) + wet_r * self.dry_wet;
+        }
+    }
+
+    fn set_parameter(&mut self, param_id: u32, value: f32) {
+        if !value.is_finite() {
+            return;
+        }
+        match param_id {
+            0 => self.dry_wet = value.clamp(0.0, 1.0),
+            1 => self.pitch_shift_semitones = value.clamp(-24.0, 24.0),
+            2 => self.retune_speed = value.clamp(0.0, 1.0),
+            3 => self.formant_shift_semitones = value.clamp(-24.0, 24.0),
+            4 => self.vibrato_depth = value.clamp(0.0, 1.0),
+            5 => self.vibrato_rate_hz = value.clamp(0.1, 20.0),
+            _ => {}
+        }
+    }
+
+    fn get_parameter(&self, param_id: u32) -> f32 {
+        match param_id {
+            0 => self.dry_wet,
+            1 => self.pitch_shift_semitones,
+            2 => self.retune_speed,
+            3 => self.formant_shift_semitones,
+            4 => self.vibrato_depth,
+            5 => self.vibrato_rate_hz,
+            _ => 0.0,
         }
     }
 }

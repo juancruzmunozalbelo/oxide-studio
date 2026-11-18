@@ -4,8 +4,6 @@
 //! and 4-band spectral energy balance across Sub/Bass, Low-Mid, High-Mid, and High frequencies.
 
 use std::f32::consts::PI;
-use std::fs::File;
-use std::io::Read;
 use std::path::Path;
 use serde::{Deserialize, Serialize};
 
@@ -111,7 +109,7 @@ impl AudioAnalysisMetrics {
         }
     }
 
-    /// Load and analyze WAV file from disk.
+    /// Load and analyze WAV file from disk using full RIFF chunk iteration.
     #[allow(clippy::chunks_exact_to_as_chunks)]
     pub fn analyze_wav_file<P: AsRef<Path>>(path: P) -> Result<Self, String> {
         let p = path.as_ref();
@@ -119,43 +117,130 @@ impl AudioAnalysisMetrics {
             return Err(format!("File does not exist: {}", p.display()));
         }
 
-        let mut file = File::open(p).map_err(|e| format!("Failed to open WAV: {}", e))?;
-        let mut header = [0u8; 44];
-        file.read_exact(&mut header)
-            .map_err(|e| format!("Failed to read WAV header: {}", e))?;
-
-        if &header[0..4] != b"RIFF" || &header[8..12] != b"WAVE" {
+        let bytes = std::fs::read(p).map_err(|e| format!("Failed to open/read WAV: {}", e))?;
+        if bytes.len() < 12 || &bytes[0..4] != b"RIFF" || &bytes[8..12] != b"WAVE" {
             return Err("Invalid RIFF/WAVE header".to_string());
         }
 
-        let channels = u16::from_le_bytes([header[22], header[23]]) as usize;
-        let sample_rate = u32::from_le_bytes([header[24], header[25], header[26], header[27]]);
-        let bits_per_sample = u16::from_le_bytes([header[34], header[35]]);
-        let format_tag = u16::from_le_bytes([header[20], header[21]]); // 1 = PCM, 3 = IEEE float
+        let mut format_tag: Option<u16> = None;
+        let mut channels: Option<usize> = None;
+        let mut sample_rate: Option<u32> = None;
+        let mut bits_per_sample: Option<u16> = None;
+        let mut data_slice: Option<&[u8]> = None;
 
-        // Read remaining audio data
-        let mut data = Vec::new();
-        file.read_to_end(&mut data)
-            .map_err(|e| format!("Failed to read audio data: {}", e))?;
+        let mut offset: usize = 12;
+        while offset + 8 <= bytes.len() {
+            let chunk_id = &bytes[offset..offset + 4];
+            let chunk_size = u32::from_le_bytes([
+                bytes[offset + 4],
+                bytes[offset + 5],
+                bytes[offset + 6],
+                bytes[offset + 7],
+            ]) as usize;
+            let payload_start = offset + 8;
+            if payload_start > bytes.len() {
+                break;
+            }
+            let payload_end = payload_start.saturating_add(chunk_size).min(bytes.len());
+            let payload = &bytes[payload_start..payload_end];
+
+            if chunk_id == b"fmt " {
+                if payload.len() < 16 {
+                    return Err("Malformed WAV 'fmt ' chunk (< 16 bytes)".to_string());
+                }
+                let mut tag = u16::from_le_bytes([payload[0], payload[1]]);
+                if tag == 0xFFFE && payload.len() >= 26 {
+                    // WAVE_FORMAT_EXTENSIBLE: actual format code is in SubFormat GUID bytes 24..26
+                    tag = u16::from_le_bytes([payload[24], payload[25]]);
+                }
+                format_tag = Some(tag);
+                channels = Some(u16::from_le_bytes([payload[2], payload[3]]) as usize);
+                sample_rate = Some(u32::from_le_bytes([
+                    payload[4],
+                    payload[5],
+                    payload[6],
+                    payload[7],
+                ]));
+                bits_per_sample = Some(u16::from_le_bytes([payload[14], payload[15]]));
+            } else if chunk_id == b"data" {
+                data_slice = Some(payload);
+            }
+
+            // RIFF chunks are 2-byte word aligned
+            let padded_size = chunk_size.saturating_add(chunk_size & 1);
+            let next_offset = payload_start.saturating_add(padded_size);
+            if next_offset <= offset {
+                break;
+            }
+            offset = next_offset;
+        }
+
+        let format_tag = format_tag.ok_or_else(|| "Missing WAV 'fmt ' chunk".to_string())?;
+        let channels = channels.ok_or_else(|| "Missing WAV channel count".to_string())?;
+        let sample_rate = sample_rate.ok_or_else(|| "Missing WAV sample rate".to_string())?;
+        let bits_per_sample =
+            bits_per_sample.ok_or_else(|| "Missing WAV bits per sample".to_string())?;
+        let data = data_slice.ok_or_else(|| "Missing WAV 'data' chunk".to_string())?;
+
+        if channels == 0 || sample_rate == 0 {
+            return Err(format!(
+                "Invalid WAV stream metadata: channels={}, sample_rate={}",
+                channels, sample_rate
+            ));
+        }
 
         let mut samples = Vec::new();
-        if format_tag == 3 && bits_per_sample == 32 {
-            // 32-bit float
-            for chunk in data.chunks_exact(4) {
-                let bytes = [chunk[0], chunk[1], chunk[2], chunk[3]];
-                samples.push(f32::from_le_bytes(bytes));
+        match (format_tag, bits_per_sample) {
+            (1, 16) => {
+                samples.reserve(data.len() / 2);
+                for chunk in data.chunks_exact(2) {
+                    let s = i16::from_le_bytes([chunk[0], chunk[1]]);
+                    samples.push(s as f32 / 32768.0);
+                }
             }
-        } else if format_tag == 1 && bits_per_sample == 16 {
-            // 16-bit PCM
-            for chunk in data.chunks_exact(2) {
-                let s = i16::from_le_bytes([chunk[0], chunk[1]]);
-                samples.push(s as f32 / 32768.0);
+            (1, 24) => {
+                samples.reserve(data.len() / 3);
+                for chunk in data.chunks_exact(3) {
+                    let raw = (chunk[0] as i32)
+                        | ((chunk[1] as i32) << 8)
+                        | ((chunk[2] as i32) << 16);
+                    let signed = if (raw & 0x80_0000) != 0 {
+                        raw | !0xFF_FFFF
+                    } else {
+                        raw
+                    };
+                    samples.push(signed as f32 / 8_388_608.0);
+                }
             }
-        } else {
-            return Err(format!(
-                "Unsupported WAV format: tag {}, {} bits",
-                format_tag, bits_per_sample
-            ));
+            (1, 32) => {
+                samples.reserve(data.len() / 4);
+                for chunk in data.chunks_exact(4) {
+                    let s = i32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
+                    samples.push(s as f32 / 2_147_483_648.0);
+                }
+            }
+            (3, 32) => {
+                samples.reserve(data.len() / 4);
+                for chunk in data.chunks_exact(4) {
+                    samples.push(f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]));
+                }
+            }
+            (3, 64) => {
+                samples.reserve(data.len() / 8);
+                for chunk in data.chunks_exact(8) {
+                    let v = f64::from_le_bytes([
+                        chunk[0], chunk[1], chunk[2], chunk[3], chunk[4], chunk[5], chunk[6],
+                        chunk[7],
+                    ]);
+                    samples.push(v as f32);
+                }
+            }
+            _ => {
+                return Err(format!(
+                    "Unsupported WAV format: tag {}, {} bits",
+                    format_tag, bits_per_sample
+                ));
+            }
         }
 
         Ok(Self::analyze_interleaved(&samples, sample_rate, channels))

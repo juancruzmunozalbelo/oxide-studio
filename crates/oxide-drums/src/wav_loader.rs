@@ -46,21 +46,50 @@ pub fn load_wav_file<P: AsRef<Path>>(path: P) -> Result<DecodedWav, String> {
         pos += 8;
 
         if chunk_id == b"fmt " {
-            if chunk_size < 16 || pos + 16 > bytes.len() {
+            if chunk_size < 16 || pos + chunk_size > bytes.len() {
                 return Err("Corrupt fmt chunk in WAV".into());
             }
             let audio_format = u16::from_le_bytes(bytes[pos..pos + 2].try_into().unwrap());
-            is_float_pcm = audio_format == 3;
             channels = u16::from_le_bytes(bytes[pos + 2..pos + 4].try_into().unwrap());
+            if channels == 0 {
+                return Err("Invalid channel count (0) in WAV".into());
+            }
             sample_rate = u32::from_le_bytes(bytes[pos + 4..pos + 8].try_into().unwrap());
             bits_per_sample = u16::from_le_bytes(bytes[pos + 14..pos + 16].try_into().unwrap());
-            pos += chunk_size;
+
+            if audio_format == 3 {
+                is_float_pcm = true;
+            } else if audio_format == 0xFFFE {
+                if chunk_size < 40 {
+                    return Err("Truncated WAVE_FORMAT_EXTENSIBLE fmt chunk".into());
+                }
+                let sub_format = u16::from_le_bytes(bytes[pos + 24..pos + 26].try_into().unwrap());
+                const MS_SUBFORMAT_TAIL: [u8; 14] = [
+                    0x00, 0x00, 0x00, 0x00, 0x10, 0x00, 0x80, 0x00, 0x00, 0xAA, 0x00, 0x38, 0x9B, 0x71,
+                ];
+                if bytes[pos + 26..pos + 40] != MS_SUBFORMAT_TAIL {
+                    return Err("Unsupported WAVE_FORMAT_EXTENSIBLE subformat GUID".into());
+                }
+                match sub_format {
+                    1 => is_float_pcm = false,
+                    3 => is_float_pcm = true,
+                    other => {
+                        return Err(format!(
+                            "Unsupported WAVE_FORMAT_EXTENSIBLE subformat code: {}",
+                            other
+                        ));
+                    }
+                }
+            } else if audio_format != 1 {
+                return Err(format!("Unsupported WAV audio_format: {}", audio_format));
+            }
+            pos = pos.saturating_add(chunk_size + (chunk_size & 1));
         } else if chunk_id == b"data" {
             data_offset = pos;
             data_len = chunk_size.min(bytes.len().saturating_sub(pos));
             break;
         } else {
-            pos += chunk_size;
+            pos = pos.saturating_add(chunk_size + (chunk_size & 1));
         }
     }
 

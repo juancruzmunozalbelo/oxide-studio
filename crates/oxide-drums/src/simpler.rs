@@ -55,7 +55,8 @@ pub struct SimplerVoice {
     pub amp_env: AdsrEnvelope,
     pub filter_env: AdsrEnvelope,
     pub pitch_env: AdsrEnvelope,
-    pub filter: CytomicZdfFilter,
+    pub filter_l: CytomicZdfFilter,
+    pub filter_r: CytomicZdfFilter,
 
     // OneShot fade state
     pub fade_in_samples: usize,
@@ -77,7 +78,8 @@ impl SimplerVoice {
             amp_env: AdsrEnvelope::new(sample_rate),
             filter_env: AdsrEnvelope::new(sample_rate),
             pitch_env: AdsrEnvelope::new(sample_rate),
-            filter: CytomicZdfFilter::new(sample_rate),
+            filter_l: CytomicZdfFilter::new(sample_rate),
+            filter_r: CytomicZdfFilter::new(sample_rate),
             fade_in_samples: 0,
             fade_out_samples: 0,
             played_samples: 0,
@@ -90,7 +92,8 @@ impl SimplerVoice {
         self.amp_env.reset();
         self.filter_env.reset();
         self.pitch_env.reset();
-        self.filter.reset();
+        self.filter_l.reset();
+        self.filter_r.reset();
         self.played_samples = 0;
     }
 }
@@ -336,7 +339,8 @@ impl SimplerDevice {
         v.note = note;
         v.velocity = velocity as f32 / 127.0;
         v.age = self.voice_counter;
-        v.filter.reset();
+        v.filter_l.reset();
+        v.filter_r.reset();
         v.played_samples = 0;
 
         let pitch_ratio = match self.mode {
@@ -534,12 +538,14 @@ impl SimplerDevice {
             );
 
             let (proc_l, proc_r) = if self.filter_enabled {
-                voice.filter.filter_type = self.filter_type;
-                voice.filter.circuit_model = self.filter_model;
+                voice.filter_l.filter_type = self.filter_type;
+                voice.filter_l.circuit_model = self.filter_model;
+                voice.filter_r.filter_type = self.filter_type;
+                voice.filter_r.circuit_model = self.filter_model;
                 let cutoff_mod_oct = filter_env_val * self.filter_env_amt * 4.0 + lfo_sig * self.lfo_to_filter * 3.0;
                 let mod_cutoff = (self.filter_cutoff * 2.0f32.powf(cutoff_mod_oct)).clamp(20.0, 20000.0);
-                let fl = voice.filter.process_sample(interp_l, mod_cutoff, self.filter_res, 0.0, 0.0);
-                let fr = voice.filter.process_sample(interp_r, mod_cutoff, self.filter_res, 0.0, 0.0);
+                let fl = voice.filter_l.process_sample(interp_l, mod_cutoff, self.filter_res, 0.0, 0.0);
+                let fr = voice.filter_r.process_sample(interp_r, mod_cutoff, self.filter_res, 0.0, 0.0);
                 (fl, fr)
             } else {
                 (interp_l, interp_r)
@@ -599,7 +605,7 @@ impl InstrumentDevice for SimplerDevice {
             }
         }
 
-        let frames = audio_out.frame_count.min(1024);
+        let frames = audio_out.frame_count.min(oxide_core::MAX_BUFFER_SIZE);
         for i in 0..frames {
             let (l, r) = self.process_stereo_sample();
             audio_out.left[i] += l;
@@ -617,6 +623,43 @@ impl InstrumentDevice for SimplerDevice {
 
     fn all_notes_off(&mut self) {
         self.silence_all();
+    }
+
+    fn set_parameter(&mut self, param_id: u32, value: f32) {
+        if !value.is_finite() {
+            return;
+        }
+        match param_id {
+            0 => self.master_volume = value.clamp(0.0, 2.0),
+            1 => self.filter_cutoff = value.clamp(20.0, 20000.0),
+            2 => self.filter_res = value.clamp(0.0, 1.0),
+            3 => self.filter_env_amt = value.clamp(-1.0, 1.0),
+            4 => self.transpose_semitones = value.round().clamp(-48.0, 48.0) as i8,
+            5 => self.detune_cents = value.clamp(-50.0, 50.0),
+            6 => self.master_pan = value.clamp(-1.0, 1.0),
+            7 => self.start_pos = value.clamp(0.0, 1.0),
+            8 => self.length_pos = value.clamp(0.01, 1.0),
+            9 => self.fade_in_ms = value.clamp(0.0, 5000.0),
+            10 => self.fade_out_ms = value.clamp(1.0, 5000.0),
+            _ => {}
+        }
+    }
+
+    fn get_parameter(&self, param_id: u32) -> f32 {
+        match param_id {
+            0 => self.master_volume,
+            1 => self.filter_cutoff,
+            2 => self.filter_res,
+            3 => self.filter_env_amt,
+            4 => self.transpose_semitones as f32,
+            5 => self.detune_cents,
+            6 => self.master_pan,
+            7 => self.start_pos,
+            8 => self.length_pos,
+            9 => self.fade_in_ms,
+            10 => self.fade_out_ms,
+            _ => 0.0,
+        }
     }
 }
 
@@ -712,5 +755,32 @@ mod tests {
             diff > 0.01,
             "Pitch and filter envelope/LFO modulation must produce distinct audio compared to neutral"
         );
+    }
+
+    #[test]
+    fn test_simpler_stereo_filter_channel_independence_and_params() {
+        let mut simpler = SimplerDevice::new(44100.0);
+        simpler.set_parameter(0, 1.0);
+        simpler.set_parameter(1, 800.0);
+        simpler.set_parameter(2, 0.7);
+        assert!((simpler.get_parameter(1) - 800.0).abs() < 1e-4);
+
+        // Interleaved stereo sample with strong impulse ONLY on L and exact 0.0 on R
+        let mut stereo = Vec::with_capacity(512 * 2);
+        for i in 0..512 {
+            stereo.push(if i < 64 { 0.8 } else { 0.0 });
+            stereo.push(0.0);
+        }
+        simpler.load_sample(stereo, 44100, 2);
+        simpler.master_pan = 0.0;
+        simpler.trigger_note_on(60, 127);
+
+        let mut buf = AudioBuffer::silence(128);
+        simpler.process(&[], &mut buf, &MusicalTime::default());
+
+        let l_energy: f32 = buf.left[..128].iter().map(|s| s * s).sum();
+        let r_max: f32 = buf.right[..128].iter().map(|s| s.abs()).fold(0.0, f32::max);
+        assert!(l_energy > 0.01, "Left channel should sound");
+        assert_eq!(r_max, 0.0, "Right channel must not bleed from left filter state");
     }
 }

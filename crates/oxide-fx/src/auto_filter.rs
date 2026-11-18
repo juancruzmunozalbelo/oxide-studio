@@ -157,7 +157,7 @@ impl AudioEffectDevice for AutoFilter {
             return;
         }
 
-        let count = buffer.frame_count.min(1024);
+        let count = buffer.frame_count.min(oxide_core::MAX_BUFFER_SIZE);
         if count == 0 {
             return;
         }
@@ -263,6 +263,37 @@ impl AudioEffectDevice for AutoFilter {
 
             buffer.left[i] = (dry_l * (1.0 - self.dry_wet) + wet_l * self.dry_wet).clamp(-3.0, 3.0);
             buffer.right[i] = (dry_r * (1.0 - self.dry_wet) + wet_r * self.dry_wet).clamp(-3.0, 3.0);
+        }
+    }
+
+    fn set_parameter(&mut self, param_id: u32, value: f32) {
+        if !value.is_finite() {
+            return;
+        }
+        match param_id {
+            0 => self.cutoff_hz = value.clamp(20.0, 20000.0),
+            1 => self.resonance = value.clamp(0.0, 0.99),
+            2 => self.drive = value.clamp(0.1, 10.0),
+            3 => self.morph = value.clamp(0.0, 1.0),
+            4 => self.env_amount = value.clamp(-5.0, 5.0),
+            5 => self.lfo_rate_hz = value.clamp(0.05, 30.0),
+            6 => self.lfo_amount = value.clamp(0.0, 5.0),
+            7 => self.dry_wet = value.clamp(0.0, 1.0),
+            _ => {}
+        }
+    }
+
+    fn get_parameter(&self, param_id: u32) -> f32 {
+        match param_id {
+            0 => self.cutoff_hz,
+            1 => self.resonance,
+            2 => self.drive,
+            3 => self.morph,
+            4 => self.env_amount,
+            5 => self.lfo_rate_hz,
+            6 => self.lfo_amount,
+            7 => self.dry_wet,
+            _ => 0.0,
         }
     }
 }

@@ -90,6 +90,35 @@ pub struct DrumRackMacroMapping {
     pub range: oxide_core::MacroMappingRange,
 }
 
+#[derive(Clone, Copy)]
+struct PadSyncState {
+    choke_group: Option<u8>,
+    volume: f32,
+    pan: f32,
+    pitch_semitones: f32,
+    decay_seconds: f32,
+    send_a: f32,
+    send_b: f32,
+    solo: bool,
+    mute: bool,
+}
+
+impl PadSyncState {
+    fn from_pad(pad: &DrumPad) -> Self {
+        Self {
+            choke_group: pad.choke_group,
+            volume: pad.volume,
+            pan: pad.pan,
+            pitch_semitones: pad.pitch_semitones,
+            decay_seconds: pad.decay_seconds,
+            send_a: pad.send_a,
+            send_b: pad.send_b,
+            solo: pad.solo,
+            mute: pad.mute,
+        }
+    }
+}
+
 pub struct DrumRack {
     pub enabled: bool,
     pub pads: [DrumPad; NUM_DRUM_PADS], // Active visible bank of 16 pads
@@ -111,6 +140,11 @@ pub struct DrumRack {
     pub macro_system: oxide_core::RackMacroSystem,
     pub macro_mappings: Vec<DrumRackMacroMapping>,
     pub rng_state: u32,
+    sync_state: [PadSyncState; NUM_DRUM_PADS],
+    send_a_l: Box<[f32]>,
+    send_a_r: Box<[f32]>,
+    send_b_l: Box<[f32]>,
+    send_b_r: Box<[f32]>,
 }
 
 impl DrumRack {
@@ -204,6 +238,8 @@ impl DrumRack {
             });
         }
 
+        let sync_state = std::array::from_fn(|i| PadSyncState::from_pad(&default_bank_a[i]));
+
         Self {
             enabled: true,
             pads: default_bank_a,
@@ -223,6 +259,11 @@ impl DrumRack {
             macro_system: oxide_core::RackMacroSystem::new(oxide_core::DEFAULT_RACK_MACROS),
             macro_mappings: Vec::new(),
             rng_state: 0x9091982,
+            sync_state,
+            send_a_l: vec![0.0; oxide_core::MAX_BUFFER_SIZE].into_boxed_slice(),
+            send_a_r: vec![0.0; oxide_core::MAX_BUFFER_SIZE].into_boxed_slice(),
+            send_b_l: vec![0.0; oxide_core::MAX_BUFFER_SIZE].into_boxed_slice(),
+            send_b_r: vec![0.0; oxide_core::MAX_BUFFER_SIZE].into_boxed_slice(),
         }
     }
 
@@ -231,6 +272,7 @@ impl DrumRack {
         if bank_idx >= NUM_BANKS {
             return;
         }
+        self.sync_visible_pads_to_bank();
         // Save current visible pads back to all_pads
         let start = self.active_bank * PADS_PER_BANK;
         for i in 0..PADS_PER_BANK {
@@ -244,6 +286,7 @@ impl DrumRack {
         for i in 0..PADS_PER_BANK {
             if new_start + i < self.all_pads.len() {
                 self.pads[i] = self.all_pads[new_start + i].clone();
+                self.sync_state[i] = PadSyncState::from_pad(&self.pads[i]);
             }
         }
     }
@@ -254,7 +297,86 @@ impl DrumRack {
         for i in 0..PADS_PER_BANK {
             if start + i < self.all_pads.len() {
                 self.all_pads[start + i] = self.pads[i].clone();
+                self.sync_state[i] = PadSyncState::from_pad(&self.pads[i]);
             }
+        }
+    }
+
+    /// Reconcile edits made to either `self.pads[i]` or `self.all_pads[bank * 16 + i]`
+    /// without latching booleans (`mute`/`solo`) or default values.
+    pub fn sync_visible_pads_to_bank(&mut self) {
+        let bank_start = self.active_bank * PADS_PER_BANK;
+        for i in 0..NUM_DRUM_PADS {
+            let global_idx = bank_start + i;
+            if global_idx >= self.all_pads.len() {
+                continue;
+            }
+            let vis = &mut self.pads[i];
+            let all = &mut self.all_pads[global_idx];
+            let snap = &mut self.sync_state[i];
+
+            if vis.choke_group != snap.choke_group {
+                all.choke_group = vis.choke_group;
+            } else if all.choke_group != snap.choke_group {
+                vis.choke_group = all.choke_group;
+            }
+            snap.choke_group = all.choke_group;
+
+            if vis.volume.to_bits() != snap.volume.to_bits() {
+                all.volume = vis.volume;
+            } else if all.volume.to_bits() != snap.volume.to_bits() {
+                vis.volume = all.volume;
+            }
+            snap.volume = all.volume;
+
+            if vis.pan.to_bits() != snap.pan.to_bits() {
+                all.pan = vis.pan;
+            } else if all.pan.to_bits() != snap.pan.to_bits() {
+                vis.pan = all.pan;
+            }
+            snap.pan = all.pan;
+
+            if vis.pitch_semitones.to_bits() != snap.pitch_semitones.to_bits() {
+                all.pitch_semitones = vis.pitch_semitones;
+            } else if all.pitch_semitones.to_bits() != snap.pitch_semitones.to_bits() {
+                vis.pitch_semitones = all.pitch_semitones;
+            }
+            snap.pitch_semitones = all.pitch_semitones;
+
+            if vis.decay_seconds.to_bits() != snap.decay_seconds.to_bits() {
+                all.decay_seconds = vis.decay_seconds;
+            } else if all.decay_seconds.to_bits() != snap.decay_seconds.to_bits() {
+                vis.decay_seconds = all.decay_seconds;
+            }
+            snap.decay_seconds = all.decay_seconds;
+
+            if vis.send_a.to_bits() != snap.send_a.to_bits() {
+                all.send_a = vis.send_a;
+            } else if all.send_a.to_bits() != snap.send_a.to_bits() {
+                vis.send_a = all.send_a;
+            }
+            snap.send_a = all.send_a;
+
+            if vis.send_b.to_bits() != snap.send_b.to_bits() {
+                all.send_b = vis.send_b;
+            } else if all.send_b.to_bits() != snap.send_b.to_bits() {
+                vis.send_b = all.send_b;
+            }
+            snap.send_b = all.send_b;
+
+            if vis.solo != snap.solo {
+                all.solo = vis.solo;
+            } else if all.solo != snap.solo {
+                vis.solo = all.solo;
+            }
+            snap.solo = all.solo;
+
+            if vis.mute != snap.mute {
+                all.mute = vis.mute;
+            } else if all.mute != snap.mute {
+                vis.mute = all.mute;
+            }
+            snap.mute = all.mute;
         }
     }
 
@@ -331,7 +453,9 @@ impl DrumRack {
             self.all_pads[global_idx].choke_group = choke;
             let bank_start = self.active_bank * PADS_PER_BANK;
             if global_idx >= bank_start && global_idx < bank_start + PADS_PER_BANK {
-                self.pads[global_idx - bank_start].choke_group = choke;
+                let local = global_idx - bank_start;
+                self.pads[local].choke_group = choke;
+                self.sync_state[local].choke_group = choke;
             }
         }
     }
@@ -342,53 +466,11 @@ impl DrumRack {
             return;
         }
 
+        self.sync_visible_pads_to_bank();
+
         let global_idx = self.active_bank * PADS_PER_BANK + pad_idx as usize;
         if global_idx >= self.all_pads.len() {
             return;
-        }
-
-        // Bidirectional sync between visible bank and global pads
-        {
-            let vis = &mut self.pads[pad_idx as usize];
-            let all = &mut self.all_pads[global_idx];
-            if all.choke_group.is_some() && vis.choke_group.is_none() {
-                vis.choke_group = all.choke_group;
-            } else if vis.choke_group.is_some() && all.choke_group.is_none() {
-                all.choke_group = vis.choke_group;
-            }
-            if all.volume != 1.0 && vis.volume == 1.0 {
-                vis.volume = all.volume;
-            } else if vis.volume != 1.0 && all.volume == 1.0 {
-                all.volume = vis.volume;
-            }
-            if all.pan != 0.0 && vis.pan == 0.0 {
-                vis.pan = all.pan;
-            } else if vis.pan != 0.0 && all.pan == 0.0 {
-                all.pan = vis.pan;
-            }
-            if all.pitch_semitones != 0.0 && vis.pitch_semitones == 0.0 {
-                vis.pitch_semitones = all.pitch_semitones;
-            } else if vis.pitch_semitones != 0.0 && all.pitch_semitones == 0.0 {
-                all.pitch_semitones = vis.pitch_semitones;
-            }
-            if all.send_a != 0.0 && vis.send_a == 0.0 {
-                vis.send_a = all.send_a;
-            } else if vis.send_a != 0.0 && all.send_a == 0.0 {
-                all.send_a = vis.send_a;
-            }
-            if all.send_b != 0.0 && vis.send_b == 0.0 {
-                vis.send_b = all.send_b;
-            } else if vis.send_b != 0.0 && all.send_b == 0.0 {
-                all.send_b = vis.send_b;
-            }
-            if all.solo || vis.solo {
-                all.solo = true;
-                vis.solo = true;
-            }
-            if all.mute || vis.mute {
-                all.mute = true;
-                vis.mute = true;
-            }
         }
 
         let pad_mute = self.all_pads[global_idx].mute;
@@ -468,6 +550,8 @@ impl DrumRack {
             self.note_off(note);
             return;
         }
+
+        self.sync_visible_pads_to_bank();
 
         // Check if note is in the current visible bank
         for (i, pad) in self.pads.iter().enumerate() {
@@ -563,22 +647,32 @@ impl DrumRack {
             return;
         }
 
-        let n_frames = block_len.min(1024);
-        let mut send_a_l = [0.0f32; 1024];
-        let mut send_a_r = [0.0f32; 1024];
-        let mut send_b_l = [0.0f32; 1024];
-        let mut send_b_r = [0.0f32; 1024];
+        self.sync_visible_pads_to_bank();
 
-        for voice in &mut self.voices {
+        let n_frames = block_len.min(oxide_core::MAX_BUFFER_SIZE);
+        self.send_a_l[..n_frames].fill(0.0);
+        self.send_a_r[..n_frames].fill(0.0);
+        self.send_b_l[..n_frames].fill(0.0);
+        self.send_b_r[..n_frames].fill(0.0);
+
+        let sr_local = self.sample_rate;
+        let voices = &mut self.voices;
+        let all_pads = &mut self.all_pads;
+        let send_a_l = &mut self.send_a_l;
+        let send_a_r = &mut self.send_a_r;
+        let send_b_l = &mut self.send_b_l;
+        let send_b_r = &mut self.send_b_r;
+
+        for voice in voices.iter_mut() {
             if !voice.active {
                 continue;
             }
             let pad_idx = voice.pad_idx as usize;
-            if pad_idx >= self.all_pads.len() {
+            if pad_idx >= all_pads.len() {
                 voice.active = false;
                 continue;
             }
-            let pad = &self.all_pads[pad_idx];
+            let pad = &all_pads[pad_idx];
 
             let pan_norm = pad.pan.clamp(-1.0, 1.0);
             let theta = (pan_norm + 1.0) * 0.25 * PI;
@@ -615,7 +709,7 @@ impl DrumRack {
                             &mut voice.synth_phase,
                             &mut voice.synth_phase_2,
                             voice.envelope_val,
-                            self.sample_rate,
+                            sr_local,
                             &mut voice.rng_state,
                         )
                     }
@@ -673,8 +767,8 @@ impl DrumRack {
         }
 
         // Render per-pad Simpler devices (independent polyphonic synthesis per pad)
-        let any_solo = self.all_pads.iter().any(|p| p.solo);
-        for pad in &mut self.all_pads {
+        let any_solo = all_pads.iter().any(|p| p.solo);
+        for pad in all_pads.iter_mut() {
             if pad.mute || (any_solo && !pad.solo) {
                 continue;
             }
@@ -747,7 +841,7 @@ impl DrumRack {
 
     /// Renders into an `oxide_core::AudioBuffer` with zero allocations.
     pub fn process_audio_buffer(&mut self, buffer: &mut AudioBuffer) {
-        let count = buffer.frame_count.min(1024);
+        let count = buffer.frame_count.min(oxide_core::MAX_BUFFER_SIZE);
         self.process_block(&mut buffer.left[..count], &mut buffer.right[..count]);
     }
 
@@ -886,6 +980,9 @@ impl DrumRack {
                     }
                 }
             }
+        }
+        for i in 0..NUM_DRUM_PADS {
+            self.sync_state[i] = PadSyncState::from_pad(&self.pads[i]);
         }
     }
 
@@ -1433,5 +1530,31 @@ mod tests {
         // reset
         rack.reset();
         assert!(!rack.voices.iter().any(|v| v.active));
+    }
+
+    #[test]
+    fn test_drum_rack_unmute_unsolo_sync_without_latching() {
+        let mut rack = DrumRack::new(44100.0);
+
+        // Mute pad 0 on visible bank, trigger -> must stay silent
+        rack.pads[0].mute = true;
+        rack.trigger_pad(0, 127);
+        assert!(!rack.voices.iter().any(|v| v.active));
+
+        // Unmute pad 0 on visible bank, trigger -> must play (not latched!)
+        rack.pads[0].mute = false;
+        rack.trigger_pad(0, 127);
+        assert!(rack.voices.iter().any(|v| v.active && v.pad_idx == 0));
+
+        rack.reset();
+
+        // Solo pad 0 -> pad 1 muted; unsolo pad 0 -> pad 1 plays again
+        rack.pads[0].solo = true;
+        rack.trigger_pad(1, 127);
+        assert!(!rack.voices.iter().any(|v| v.active));
+
+        rack.pads[0].solo = false;
+        rack.trigger_pad(1, 127);
+        assert!(rack.voices.iter().any(|v| v.active && v.pad_idx == 1));
     }
 }

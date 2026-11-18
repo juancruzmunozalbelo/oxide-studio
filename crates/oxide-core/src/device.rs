@@ -82,6 +82,14 @@ pub trait AudioEffectDevice: Device {
         buffer: &mut AudioBuffer,
         time: &MusicalTime,
     );
+
+    /// Set a device parameter by integer ID.
+    fn set_parameter(&mut self, _param_id: u32, _value: f32) {}
+
+    /// Query a device parameter value by integer ID.
+    fn get_parameter(&self, _param_id: u32) -> f32 {
+        0.0
+    }
 }
 
 /// Dynamic, arbitrary-length Ableton Live 12 style Device Chain.
@@ -384,6 +392,19 @@ impl InstrumentDevice for DeviceChain {
             inst.all_notes_off();
         }
     }
+
+    fn set_parameter(&mut self, param_id: u32, value: f32) {
+        if let Some(ref mut inst) = self.instrument {
+            inst.set_parameter(param_id, value);
+        }
+    }
+
+    fn get_parameter(&self, param_id: u32) -> f32 {
+        self.instrument
+            .as_ref()
+            .map(|inst| inst.get_parameter(param_id))
+            .unwrap_or(0.0)
+    }
 }
 
 impl AudioEffectDevice for DeviceChain {
@@ -393,6 +414,19 @@ impl AudioEffectDevice for DeviceChain {
         time: &MusicalTime,
     ) {
         self.process(&[], buffer, time);
+    }
+
+    fn set_parameter(&mut self, param_id: u32, value: f32) {
+        if let Some(afx) = self.audio_effects.first_mut() {
+            afx.set_parameter(param_id, value);
+        }
+    }
+
+    fn get_parameter(&self, param_id: u32) -> f32 {
+        self.audio_effects
+            .first()
+            .map(|afx| afx.get_parameter(param_id))
+            .unwrap_or(0.0)
     }
 }
 
@@ -696,7 +730,7 @@ mod tests {
                 }
             }
             let val = self.last_note as f32 / 127.0;
-            for i in 0..audio_out.frame_count.min(1024) {
+            for i in 0..audio_out.frame_count.min(crate::MAX_BUFFER_SIZE) {
                 audio_out.left[i] = val;
                 audio_out.right[i] = val;
             }

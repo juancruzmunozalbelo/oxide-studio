@@ -20,7 +20,7 @@ impl PluginScannerSupervisor {
         Self {
             timeout: Duration::from_secs(10),
             search_paths: standard_search_paths(),
-            manifest_cache_path: Some(PathBuf::from("plugin_manifest.json")),
+            manifest_cache_path: Some(std::env::temp_dir().join("oxide_plugin_manifest.json")),
         }
     }
 
@@ -212,7 +212,7 @@ impl PluginScannerSupervisor {
         }
     }
 
-    /// Default isolated scan using the standalone worker binary or an isolated shell probe.
+    /// Default isolated scan using the standalone worker binary or an in-process safe bundle probe.
     pub fn scan_plugin(&self, plugin_path: &Path, format: PluginFormat) -> PluginDescriptor {
         self.scan_plugin_isolated(plugin_path, format, |path| {
             build_default_worker_command(path)
@@ -286,25 +286,62 @@ fn build_default_worker_command(plugin_path: &Path) -> Command {
         return cmd;
     }
 
-    // Try finding the compiled oxide-plugin-scanner binary in current target directory
+    // Try finding the compiled oxide-plugin-scanner binary in current or parent target directory
     if let Ok(current_exe) = std::env::current_exe() {
         if let Some(bin_dir) = current_exe.parent() {
-            let candidate_bin = bin_dir.join("oxide-plugin-scanner");
-            if candidate_bin.exists() {
-                let mut cmd = Command::new(candidate_bin);
-                cmd.arg("--scan-single").arg(plugin_path);
-                cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
-                return cmd;
+            let candidates = [
+                Some(bin_dir.join("oxide-plugin-scanner")),
+                bin_dir.parent().map(|p| p.join("oxide-plugin-scanner")),
+            ];
+            for candidate_bin in candidates.into_iter().flatten() {
+                if candidate_bin.is_file() {
+                    let mut cmd = Command::new(candidate_bin);
+                    cmd.arg("--scan-single").arg(plugin_path);
+                    cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
+                    return cmd;
+                }
             }
         }
     }
 
-    // Fallback: spawn isolated shell command verifying the bundle structure
-    let mut cmd = Command::new("/bin/sh");
-    cmd.arg("-c").arg(format!(
-        "test -d '{}' && exit 0 || exit 1",
-        plugin_path.display()
-    ));
+    // Safe zero-shell fallback: inspect directory directly in Rust + execute direct argv probe
+    let is_bundle_dir = plugin_path.is_dir();
+    let test_bin = Path::new("/bin/test");
+    let mut cmd = if test_bin.exists() {
+        let mut c = Command::new(test_bin);
+        c.arg("-d").arg(plugin_path);
+        c
+    } else if is_bundle_dir {
+        Command::new("/usr/bin/true")
+    } else {
+        Command::new("/usr/bin/false")
+    };
     cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
     cmd
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_supervisor_default_cache_uses_temp_dir_and_safe_argv() {
+        let supervisor = PluginScannerSupervisor::new();
+        let cache = supervisor.manifest_cache_path.as_ref().expect("default cache path");
+        assert!(
+            cache.starts_with(std::env::temp_dir()),
+            "Manifest cache should live under temp_dir, got {:?}",
+            cache
+        );
+
+        let marker = std::env::temp_dir().join("oxide_shell_injection_marker");
+        let _ = fs::remove_file(&marker);
+        let malicious = PathBuf::from(format!("/nonexistent'; touch {}; '", marker.display()));
+        let mut cmd = build_default_worker_command(&malicious);
+        let program = cmd.get_program().to_string_lossy().to_string();
+        assert_ne!(program, "/bin/sh");
+        assert_ne!(program, "sh");
+        let _ = cmd.output();
+        assert!(!marker.exists(), "Shell metacharacters must never execute");
+    }
 }

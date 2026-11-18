@@ -235,11 +235,13 @@ fn test_synthetic_live12_arrangement_and_linear_volume_import() {
         project.master_track.volume_db
     );
 
-    // 3. Verify GroupTrack skipped cleanly
-    assert_eq!(project.tracks.len(), 2, "Expected 2 tracks (GroupTrack skipped)");
+    // 3. Verify GroupTrack is imported as TrackType::Group (not skipped)
+    assert_eq!(project.tracks.len(), 3, "Expected 3 tracks (GroupTrack + MidiTrack + AudioTrack)");
+    assert_eq!(project.tracks[0].track_type, oxide_project::TrackType::Group);
+    assert_eq!(project.tracks[0].name, "1-Group");
 
     // 4. Verify MIDI track
-    let midi_trk = &project.tracks[0];
+    let midi_trk = &project.tracks[1];
     assert_eq!(midi_trk.id, 16);
     assert_eq!(midi_trk.name, "7-ADRKT_WTTB4_Synth_10");
     assert!(midi_trk.mixer.volume_db.abs() < 0.05);
@@ -258,10 +260,10 @@ fn test_synthetic_live12_arrangement_and_linear_volume_import() {
     assert!(midi_trk.session_clips[0].is_some());
 
     // 5. Verify Audio track with relative sample resolution
-    let audio_trk = &project.tracks[1];
+    let audio_trk = &project.tracks[2];
     assert_eq!(audio_trk.id, 27);
     assert_eq!(audio_trk.name, "16-Vocal Hook");
-    assert_eq!(audio_trk.mixer.volume_db, -60.0);
+    assert!((audio_trk.mixer.volume_db - (-70.0)).abs() < 1e-3);
     assert_eq!(audio_trk.arrangement_clips.len(), 1);
     let arr_aclip = &audio_trk.arrangement_clips[0];
     assert_eq!(arr_aclip.timeline_start_beat, 0.0);

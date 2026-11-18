@@ -146,7 +146,7 @@ impl AudioEffectDevice for Corpus {
             return;
         }
 
-        let count = buffer.frame_count.min(1024);
+        let count = buffer.frame_count.min(oxide_core::MAX_BUFFER_SIZE);
         if count == 0 {
             return;
         }
@@ -175,6 +175,38 @@ impl AudioEffectDevice for Corpus {
 
             buffer.left[i] = (dry_l * (1.0 - self.dry_wet) + wet_l * self.dry_wet).clamp(-3.0, 3.0);
             buffer.right[i] = (dry_r * (1.0 - self.dry_wet) + wet_r * self.dry_wet).clamp(-3.0, 3.0);
+        }
+    }
+
+    fn set_parameter(&mut self, param_id: u32, value: f32) {
+        if !value.is_finite() {
+            return;
+        }
+        match param_id {
+            0 => self.dry_wet = value.clamp(0.0, 1.0),
+            1 => {
+                self.tune_hz = value.clamp(20.0, 2000.0);
+                self.rebuild_modes();
+            }
+            2 => {
+                self.decay_s = value.clamp(0.05, 10.0);
+                self.rebuild_modes();
+            }
+            3 => {
+                self.material = value.clamp(-1.0, 1.0);
+                self.rebuild_modes();
+            }
+            _ => {}
+        }
+    }
+
+    fn get_parameter(&self, param_id: u32) -> f32 {
+        match param_id {
+            0 => self.dry_wet,
+            1 => self.tune_hz,
+            2 => self.decay_s,
+            3 => self.material,
+            _ => 0.0,
         }
     }
 }

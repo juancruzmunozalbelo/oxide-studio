@@ -1,6 +1,6 @@
-//! Native Non-Blocking Aruston Live GUI RPC Server (`127.0.0.1:9877`).
+//! Native Non-Blocking Oxide Studio Live GUI RPC Server (`127.0.0.1:9877`).
 //!
-//! Synchronizes external MCP tool calls directly with the live open Aruston Studio
+//! Synchronizes external MCP tool calls directly with the live open Oxide Studio
 //! GUI window and audio engine in real time:
 //! - Non-blocking TCP listener on `127.0.0.1:9877`
 //! - Dispatches line-delimited JSON-RPC requests directly against `OxideStudioApp`
@@ -10,7 +10,9 @@
 use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};
 
-use oxide_audio::PARAM_BPM;
+use oxide_audio::{
+    PARAM_BPM, PARAM_ID_SYNTH_CUTOFF, PARAM_ID_SYNTH_PULSE_PW, PARAM_ID_SYNTH_RESONANCE,
+};
 use oxide_core::{AudioCommand, GlobalScale, ScaleMode};
 use oxide_mcp::bridge::serde_json::{self, json, Value};
 use oxide_timeline::{
@@ -30,7 +32,7 @@ struct ActiveClient {
     keep: bool,
 }
 
-/// Embedded Native GUI RPC Server running inside Aruston Studio.
+/// Embedded Native GUI RPC Server running inside Oxide Studio.
 pub struct OxideGuiRpcServer {
     listener: Option<TcpListener>,
     clients: Vec<ActiveClient>,
@@ -210,7 +212,7 @@ fn execute_method(method: &str, params: &Value, app: &mut OxideStudioApp) -> Val
     match method {
         "ping" | "get_song_info" => json!({
             "status": "ok",
-            "app": "Aruston Studio",
+            "app": "Oxide Studio",
             "tempo": app.bpm,
             "bpm": app.bpm,
             "is_playing": app.is_playing,
@@ -636,20 +638,45 @@ fn execute_method(method: &str, params: &Value, app: &mut OxideStudioApp) -> Val
                 .and_then(|v| v.as_u64())
                 .unwrap_or(0) as usize;
             let value = params.get("value").and_then(|v| v.as_f64()).unwrap_or(0.0);
+            let fval = value as f32;
 
-            if device_index == 0 {
-                match param_index {
-                    0 => app.synth_state.cutoff_hz = value as f32,
-                    1 => app.synth_state.resonance = value as f32,
-                    2 => app.synth_state.pulse_pw = value as f32,
-                    _ => {}
+            app.ensure_track_device_chain(track_index);
+            if let Some(chain) = app.track_device_chains.get_mut(track_index) {
+                if let Some(dev) = chain.devices.get_mut(device_index) {
+                    apply_gui_device_param(dev, param_index, fval);
                 }
             }
-            app.send_command(AudioCommand::SetParameter {
-                track_id: track_index,
-                param_id: param_index as u32,
-                value: value as f32,
-            });
+            if track_index == app.selected_track {
+                if let Some(dev) = app.device_chain.devices.get_mut(device_index) {
+                    apply_gui_device_param(dev, param_index, fval);
+                }
+            }
+
+            if track_index == 0 && device_index == 0 {
+                let mapped_audio_param = match param_index {
+                    0 => {
+                        app.synth_state.cutoff_hz = fval.clamp(20.0, 20000.0);
+                        Some(PARAM_ID_SYNTH_CUTOFF)
+                    }
+                    1 => {
+                        app.synth_state.resonance = fval.clamp(0.0, 1.0);
+                        Some(PARAM_ID_SYNTH_RESONANCE)
+                    }
+                    2 => {
+                        app.synth_state.pulse_pw = fval.clamp(0.05, 0.95);
+                        Some(PARAM_ID_SYNTH_PULSE_PW)
+                    }
+                    id if id >= 10 => Some(id as u32),
+                    _ => None,
+                };
+                if let Some(audio_pid) = mapped_audio_param {
+                    app.send_command(AudioCommand::SetParameter {
+                        track_id: track_index,
+                        param_id: audio_pid,
+                        value: fval,
+                    });
+                }
+            }
 
             json!({
                 "status": "ok",
@@ -667,25 +694,31 @@ fn execute_method(method: &str, params: &Value, app: &mut OxideStudioApp) -> Val
                 .and_then(|v| v.as_u64())
                 .unwrap_or(0) as usize;
 
-            let devices: Vec<Value> = app
-                .device_chain
-                .devices
-                .iter()
-                .enumerate()
-                .map(|(idx, dev)| {
-                    json!({
-                        "index": idx,
-                        "id": dev.id,
-                        "name": dev.name,
-                        "kind": format!("{:?}", dev.kind),
-                        "is_enabled": dev.is_enabled,
-                        "parameters": [
-                            { "index": 0, "name": "Frequency / Macro 1", "value": 0.5 },
-                            { "index": 1, "name": "Resonance / Macro 2", "value": 0.5 }
-                        ]
-                    })
+            let chain_ref = if track_index == app.selected_track {
+                Some(&app.device_chain)
+            } else {
+                app.track_device_chains.get(track_index)
+            };
+
+            let devices: Vec<Value> = chain_ref
+                .map(|chain| {
+                    chain
+                        .devices
+                        .iter()
+                        .enumerate()
+                        .map(|(idx, dev)| {
+                            json!({
+                                "index": idx,
+                                "id": dev.id,
+                                "name": dev.name,
+                                "kind": format!("{:?}", dev.kind),
+                                "is_enabled": dev.is_enabled,
+                                "parameters": serialize_gui_device_params(dev)
+                            })
+                        })
+                        .collect()
                 })
-                .collect();
+                .unwrap_or_default();
 
             json!({
                 "status": "ok",
@@ -749,7 +782,7 @@ fn execute_method(method: &str, params: &Value, app: &mut OxideStudioApp) -> Val
                 })
             } else {
                 json!({
-                    "app": "Aruston Studio",
+                    "app": "Oxide Studio",
                     "tempo": app.bpm,
                     "tracks": app.tracks_gui.len(),
                     "query": query,
@@ -766,9 +799,139 @@ fn execute_method(method: &str, params: &Value, app: &mut OxideStudioApp) -> Val
         _ => json!({
             "status": "ok",
             "method": method,
-            "handled_by": "ArustonStudioApp",
+            "handled_by": "OxideStudioApp",
             "message": format!("Method '{}' executed against live GUI state", method)
         }),
+    }
+}
+
+fn apply_gui_device_param(dev: &mut GuiDeviceModule, param_index: usize, value: f32) {
+    match dev.kind {
+        DeviceKind::Wavetable => match param_index {
+            0 => dev.wavetable.filter1_cutoff = value.clamp(20.0, 20000.0),
+            1 => dev.wavetable.filter1_res = value.clamp(0.0, 1.0),
+            2 => dev.wavetable.table_pos = value.clamp(0.0, 1.0),
+            3 => dev.wavetable.filter2_cutoff = value.clamp(20.0, 20000.0),
+            4 => dev.wavetable.filter2_res = value.clamp(0.0, 1.0),
+            _ => {}
+        },
+        DeviceKind::Operator => match param_index {
+            0 => dev.operator.ops[0].level = value.clamp(0.0, 2.0),
+            1 => dev.operator.ops[0].ratio = value.clamp(0.5, 32.0),
+            2 => dev.operator.algorithm_id = (value.round() as usize).min(10),
+            3 => dev.operator.ops[1].level = value.clamp(0.0, 2.0),
+            _ => {}
+        },
+        DeviceKind::Roar => match param_index {
+            0 => dev.roar.drive_db = value.clamp(0.0, 36.0),
+            1 => dev.roar.tone = value.clamp(-1.0, 1.0),
+            2 => dev.roar.feedback = value.clamp(0.0, 0.95),
+            3 => dev.roar.feedback_freq_hz = value.clamp(20.0, 20000.0),
+            _ => {}
+        },
+        DeviceKind::EQEight => match param_index {
+            0 => dev.eq8.bands[0].freq_hz = value.clamp(10.0, 20000.0),
+            1 => dev.eq8.bands[0].gain_db = value.clamp(-15.0, 15.0),
+            2 => dev.eq8.bands[0].q = value.clamp(0.1, 18.0),
+            3 => dev.eq8.bands[1].freq_hz = value.clamp(10.0, 20000.0),
+            4 => dev.eq8.bands[1].gain_db = value.clamp(-15.0, 15.0),
+            _ => {}
+        },
+        DeviceKind::GlueCompressor => match param_index {
+            0 => {
+                dev.glue.threshold_db = value.clamp(-40.0, 0.0);
+                dev.glue.recompute_gain_reduction();
+            }
+            1 => {
+                dev.glue.ratio = value.clamp(1.0, 20.0);
+                dev.glue.recompute_gain_reduction();
+            }
+            2 => dev.glue.attack_ms = value.clamp(0.01, 100.0),
+            3 => dev.glue.release_ms = value.clamp(50.0, 2000.0),
+            _ => {}
+        },
+        DeviceKind::AutoFilter => match param_index {
+            0 => dev.auto_filter.cutoff_hz = value.clamp(20.0, 20000.0),
+            1 => dev.auto_filter.resonance = value.clamp(0.0, 1.0),
+            2 => dev.auto_filter.env_amount = value.clamp(-1.0, 1.0),
+            3 => dev.auto_filter.lfo_amount = value.clamp(0.0, 1.0),
+            4 => dev.auto_filter.lfo_rate_hz = value.clamp(0.05, 50.0),
+            _ => {}
+        },
+        DeviceKind::OTT => match param_index {
+            0 => dev.ott.depth = value.clamp(0.0, 1.0),
+            1 => dev.ott.time_scale = value.clamp(0.1, 10.0),
+            2 => dev.ott.output_gain_db = value.clamp(-24.0, 24.0),
+            _ => {}
+        },
+        DeviceKind::Simpler => match param_index {
+            0 => dev.simpler.start_pos = value.clamp(0.0, 1.0),
+            1 => dev.simpler.end_pos = value.clamp(0.0, 1.0),
+            _ => {}
+        },
+        DeviceKind::DrumRack => match param_index {
+            0 => dev.drum_rack.bank = (value.round() as usize).min(7),
+            1 => dev.drum_rack.selected_pad = (value.round() as usize).min(15),
+            _ => {}
+        },
+    }
+}
+
+fn serialize_gui_device_params(dev: &GuiDeviceModule) -> Vec<Value> {
+    match dev.kind {
+        DeviceKind::Wavetable => vec![
+            json!({ "index": 0, "name": "filter1_cutoff", "value": dev.wavetable.filter1_cutoff }),
+            json!({ "index": 1, "name": "filter1_res", "value": dev.wavetable.filter1_res }),
+            json!({ "index": 2, "name": "table_pos", "value": dev.wavetable.table_pos }),
+            json!({ "index": 3, "name": "filter2_cutoff", "value": dev.wavetable.filter2_cutoff }),
+            json!({ "index": 4, "name": "filter2_res", "value": dev.wavetable.filter2_res }),
+        ],
+        DeviceKind::Operator => vec![
+            json!({ "index": 0, "name": "op_a_level", "value": dev.operator.ops[0].level }),
+            json!({ "index": 1, "name": "op_a_ratio", "value": dev.operator.ops[0].ratio }),
+            json!({ "index": 2, "name": "algorithm_id", "value": dev.operator.algorithm_id }),
+            json!({ "index": 3, "name": "op_b_level", "value": dev.operator.ops[1].level }),
+        ],
+        DeviceKind::Roar => vec![
+            json!({ "index": 0, "name": "drive_db", "value": dev.roar.drive_db }),
+            json!({ "index": 1, "name": "tone", "value": dev.roar.tone }),
+            json!({ "index": 2, "name": "feedback", "value": dev.roar.feedback }),
+            json!({ "index": 3, "name": "feedback_freq_hz", "value": dev.roar.feedback_freq_hz }),
+        ],
+        DeviceKind::EQEight => vec![
+            json!({ "index": 0, "name": "band1_freq_hz", "value": dev.eq8.bands[0].freq_hz }),
+            json!({ "index": 1, "name": "band1_gain_db", "value": dev.eq8.bands[0].gain_db }),
+            json!({ "index": 2, "name": "band1_q", "value": dev.eq8.bands[0].q }),
+            json!({ "index": 3, "name": "band2_freq_hz", "value": dev.eq8.bands[1].freq_hz }),
+            json!({ "index": 4, "name": "band2_gain_db", "value": dev.eq8.bands[1].gain_db }),
+        ],
+        DeviceKind::GlueCompressor => vec![
+            json!({ "index": 0, "name": "threshold_db", "value": dev.glue.threshold_db }),
+            json!({ "index": 1, "name": "ratio", "value": dev.glue.ratio }),
+            json!({ "index": 2, "name": "attack_ms", "value": dev.glue.attack_ms }),
+            json!({ "index": 3, "name": "release_ms", "value": dev.glue.release_ms }),
+            json!({ "index": 4, "name": "gain_reduction_db", "value": dev.glue.gain_reduction_db }),
+        ],
+        DeviceKind::AutoFilter => vec![
+            json!({ "index": 0, "name": "cutoff_hz", "value": dev.auto_filter.cutoff_hz }),
+            json!({ "index": 1, "name": "resonance", "value": dev.auto_filter.resonance }),
+            json!({ "index": 2, "name": "env_amount", "value": dev.auto_filter.env_amount }),
+            json!({ "index": 3, "name": "lfo_amount", "value": dev.auto_filter.lfo_amount }),
+            json!({ "index": 4, "name": "lfo_rate_hz", "value": dev.auto_filter.lfo_rate_hz }),
+        ],
+        DeviceKind::OTT => vec![
+            json!({ "index": 0, "name": "depth", "value": dev.ott.depth }),
+            json!({ "index": 1, "name": "time_scale", "value": dev.ott.time_scale }),
+            json!({ "index": 2, "name": "output_gain_db", "value": dev.ott.output_gain_db }),
+        ],
+        DeviceKind::Simpler => vec![
+            json!({ "index": 0, "name": "start_pos", "value": dev.simpler.start_pos }),
+            json!({ "index": 1, "name": "end_pos", "value": dev.simpler.end_pos }),
+        ],
+        DeviceKind::DrumRack => vec![
+            json!({ "index": 0, "name": "bank", "value": dev.drum_rack.bank }),
+            json!({ "index": 1, "name": "selected_pad", "value": dev.drum_rack.selected_pad }),
+        ],
     }
 }
 
@@ -779,7 +942,7 @@ mod tests {
     use std::time::Duration;
 
     #[test]
-    fn test_aruston_live_rpc_roundtrip_and_mutations() {
+    fn test_oxide_live_rpc_roundtrip_and_mutations() {
         let mut app = OxideStudioApp::new_mock(44100.0);
         let mut server = OxideGuiRpcServer::new_on_port(19877);
 
@@ -868,7 +1031,7 @@ mod tests {
     }
 
     #[test]
-    fn test_aruston_live_rpc_connection_limit_and_oversized_line() {
+    fn test_oxide_live_rpc_connection_limit_and_oversized_line() {
         let mut app = OxideStudioApp::new_mock(44100.0);
         let mut server = OxideGuiRpcServer::new_on_port(19878);
         assert!(server.listener.is_some());

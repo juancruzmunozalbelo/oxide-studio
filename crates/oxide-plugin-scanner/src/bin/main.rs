@@ -14,9 +14,10 @@ fn print_help() {
     println!("    -h, --help               Print this help message");
     println!("    --scan-plugins           Scan all standard macOS plugin directories into manifest");
     println!("    --scan-single <PATH>     Inspect a single plugin bundle out-of-process and emit JSON");
-    println!("    --output <PATH>          Path to write plugin_manifest.json (default: plugin_manifest.json)");
+    println!("    --output <PATH>          Path to write plugin_manifest.json (default: temp dir)");
     println!("    --timeout <SECS>         Subprocess timeout in seconds (default: 10)");
-    println!("    --simulate-crash         Simulate fatal crash (SIGSEGV) for testing isolation");
+    println!("    --simulate-crash         Simulate fatal exit status (139) for testing isolation");
+    println!("    --simulate-hang          Simulate process hang for testing timeout isolation");
     println!("    --simulate-timeout       Simulate process hang for testing timeout isolation");
 }
 
@@ -29,16 +30,12 @@ fn main() {
     }
 
     if args.contains(&"--simulate-crash".to_string()) {
-        // Intentionally trigger fatal memory access violation (SIGSEGV)
-        eprintln!("[Worker] Simulating intentional SIGSEGV fatal crash");
-        unsafe {
-            let null_ptr = std::ptr::null_mut::<i32>();
-            null_ptr.write(0xDEAD);
-        }
-        return;
+        // Exit with SIGSEGV-equivalent non-zero status (128 + 11 = 139) without UB or CrashReporter spam
+        eprintln!("[Worker] Simulating fatal worker exit (status 139)");
+        std::process::exit(139);
     }
 
-    if args.contains(&"--simulate-timeout".to_string()) {
+    if args.contains(&"--simulate-timeout".to_string()) || args.contains(&"--simulate-hang".to_string()) {
         eprintln!("[Worker] Simulating hung initialization loop (sleep 60s)");
         std::thread::sleep(Duration::from_secs(60));
         return;
@@ -47,7 +44,7 @@ fn main() {
     let mut i = 1;
     let mut scan_single_path: Option<PathBuf> = None;
     let mut do_scan_all = false;
-    let mut output_path = PathBuf::from("plugin_manifest.json");
+    let mut output_path = std::env::temp_dir().join("oxide_plugin_manifest.json");
     let mut timeout_secs: u64 = 10;
 
     while i < args.len() {
@@ -77,23 +74,7 @@ fn main() {
     }
 
     if let Some(path) = scan_single_path {
-        // Handle simulated crash in path name for testing
         let path_str = path.to_string_lossy();
-        if path_str.contains("Faulty") || path_str.contains("Crash") {
-            eprintln!("[Worker] Faulty plugin path detected: triggering SIGSEGV");
-            unsafe {
-                let null_ptr = std::ptr::null_mut::<i32>();
-                null_ptr.write(0xDEAD);
-            }
-            return;
-        }
-
-        if path_str.contains("Hang") || path_str.contains("InfiniteLoop") {
-            eprintln!("[Worker] Hung plugin path detected: sleeping 60s");
-            std::thread::sleep(Duration::from_secs(60));
-            return;
-        }
-
         let format = if path_str.to_lowercase().ends_with(".vst3") {
             PluginFormat::Vst3
         } else {

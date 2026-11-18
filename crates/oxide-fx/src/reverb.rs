@@ -12,12 +12,12 @@ const NUM_FDN_LINES: usize = 8;
 const MAX_FDN_DELAY: usize = 4096;
 
 pub struct FdnReverb {
-    delay_buffers: [Box<[f32; MAX_FDN_DELAY]>; NUM_FDN_LINES],
+    delay_buffers: [Box<[f32]>; NUM_FDN_LINES],
     write_indices: [usize; NUM_FDN_LINES],
     delay_lengths: [usize; NUM_FDN_LINES],
     damp_states: [f32; NUM_FDN_LINES],
     // 4 Series All-Pass Diffusers for early reflection density
-    ap_buffers: [Box<[f32; 1024]>; 4],
+    ap_buffers: [Box<[f32]>; 4],
     ap_write_indices: [usize; 4],
     ap_lengths: [usize; 4],
     pub sample_rate: f32,
@@ -53,11 +53,11 @@ impl FdnReverb {
         }
 
         Self {
-            delay_buffers: std::array::from_fn(|_| Box::new([0.0; MAX_FDN_DELAY])),
+            delay_buffers: std::array::from_fn(|_| vec![0.0; MAX_FDN_DELAY].into_boxed_slice()),
             write_indices: [0; NUM_FDN_LINES],
             delay_lengths,
             damp_states: [0.0; NUM_FDN_LINES],
-            ap_buffers: std::array::from_fn(|_| Box::new([0.0; 1024])),
+            ap_buffers: std::array::from_fn(|_| vec![0.0; 1024].into_boxed_slice()),
             ap_write_indices: [0; 4],
             ap_lengths,
             sample_rate: sr,

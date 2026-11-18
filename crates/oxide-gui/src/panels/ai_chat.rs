@@ -17,6 +17,7 @@ use egui::{
     vec2, Align, Button, Color32, Frame, Key, Layout, Margin, RichText, ScrollArea, Stroke,
     TextEdit, Ui,
 };
+use oxide_audio::{PARAM_ID_SYNTH_CUTOFF, PARAM_ID_SYNTH_RESONANCE};
 use oxide_core::AudioCommand;
 use crate::app::OxideStudioApp;
 use crate::theme::{
@@ -451,7 +452,7 @@ pub fn execute_studio_intent(prompt: &str, app: &mut OxideStudioApp) -> (String,
         app.ai_copilot.kick_fundamental_hz = 48.0;
         app.send_command(AudioCommand::SetParameter {
             track_id: 1,
-            param_id: 0,
+            param_id: 3000,
             value: 48.0,
         });
 
@@ -467,7 +468,7 @@ pub fn execute_studio_intent(prompt: &str, app: &mut OxideStudioApp) -> (String,
         app.ai_copilot.kick_decay_ms = 480.0;
         app.send_command(AudioCommand::SetParameter {
             track_id: 1,
-            param_id: 2,
+            param_id: 3001,
             value: 480.0,
         });
 
@@ -542,12 +543,12 @@ pub fn execute_studio_intent(prompt: &str, app: &mut OxideStudioApp) -> (String,
 
         app.send_command(AudioCommand::SetParameter {
             track_id: 0,
-            param_id: 0,
+            param_id: PARAM_ID_SYNTH_CUTOFF,
             value: 620.0,
         });
         app.send_command(AudioCommand::SetParameter {
             track_id: 0,
-            param_id: 1,
+            param_id: PARAM_ID_SYNTH_RESONANCE,
             value: 4.8,
         });
         app.send_command(AudioCommand::SetParameter {
@@ -719,12 +720,12 @@ pub fn execute_studio_intent(prompt: &str, app: &mut OxideStudioApp) -> (String,
 
         app.send_command(AudioCommand::SetParameter {
             track_id: 0,
-            param_id: 0,
+            param_id: PARAM_ID_SYNTH_CUTOFF,
             value: 4800.0,
         });
         app.send_command(AudioCommand::SetParameter {
             track_id: 0,
-            param_id: 1,
+            param_id: PARAM_ID_SYNTH_RESONANCE,
             value: 1.2,
         });
 
@@ -980,7 +981,7 @@ pub fn render_ai_copilot_panel(ui: &mut Ui, app: &mut OxideStudioApp) {
         // 2. Context-Aware Header Card ("Knows What We're Doing")
         let is_es = app.ai_copilot.locale == StudioLocale::Es;
         let sel_track_idx = ui
-            .data(|d| d.get_temp::<usize>(egui::Id::new("aruston_selected_track")))
+            .data(|d| d.get_temp::<usize>(egui::Id::new("oxide_selected_track")))
             .unwrap_or(0);
         let trk_name = app
             .tracks_gui
@@ -1401,7 +1402,7 @@ mod tests {
         // Render at different panel heights to verify bottom-up flex-fill
         for &height in &[600.0_f32, 800.0, 900.0, 1080.0] {
             let full_output = ctx.run(raw_input.clone(), |ctx| {
-                egui::SidePanel::right("aruston_ai_copilot_panel")
+                egui::SidePanel::right("oxide_ai_copilot_panel")
                     .exact_width(280.0)
                     .show(ctx, |ui| {
                         ui.set_height(height);

@@ -347,7 +347,7 @@ pub fn detect_transients(audio: &[f32], channels: usize, sample_rate: f32) -> Ve
 
     if transients.len() < 2 {
         // Fallback: regular 16th note divisions at default 120 bpm (125 ms intervals)
-        let step = ((60.0 / 120.0 / 4.0) * sample_rate) as usize;
+        let step = (((60.0 / 120.0 / 4.0) * sample_rate) as usize).max(1);
         let mut cur = step;
         while cur < num_frames {
             transients.push(cur);
@@ -1114,21 +1114,50 @@ pub fn decode_wav_pcm(bytes: &[u8]) -> Result<(u32, u16, Vec<f32>), String> {
         pos += 8;
 
         if chunk_id == b"fmt " {
-            if chunk_size < 16 || pos + 16 > bytes.len() {
+            if chunk_size < 16 || pos + chunk_size > bytes.len() {
                 return Err("Corrupt fmt chunk in WAV".into());
             }
             let audio_format = u16::from_le_bytes(bytes[pos..pos + 2].try_into().unwrap());
-            is_float = audio_format == 3;
             channels = u16::from_le_bytes(bytes[pos + 2..pos + 4].try_into().unwrap());
+            if channels == 0 {
+                return Err("Invalid channel count (0) in WAV".into());
+            }
             sample_rate = u32::from_le_bytes(bytes[pos + 4..pos + 8].try_into().unwrap());
             bits_per_sample = u16::from_le_bytes(bytes[pos + 14..pos + 16].try_into().unwrap());
-            pos += chunk_size;
+
+            if audio_format == 3 {
+                is_float = true;
+            } else if audio_format == 0xFFFE {
+                if chunk_size < 40 {
+                    return Err("Truncated WAVE_FORMAT_EXTENSIBLE fmt chunk".into());
+                }
+                let sub_format = u16::from_le_bytes(bytes[pos + 24..pos + 26].try_into().unwrap());
+                const MS_SUBFORMAT_TAIL: [u8; 14] = [
+                    0x00, 0x00, 0x00, 0x00, 0x10, 0x00, 0x80, 0x00, 0x00, 0xAA, 0x00, 0x38, 0x9B, 0x71,
+                ];
+                if bytes[pos + 26..pos + 40] != MS_SUBFORMAT_TAIL {
+                    return Err("Unsupported WAVE_FORMAT_EXTENSIBLE subformat GUID".into());
+                }
+                match sub_format {
+                    1 => is_float = false,
+                    3 => is_float = true,
+                    other => {
+                        return Err(format!(
+                            "Unsupported WAVE_FORMAT_EXTENSIBLE subformat code: {}",
+                            other
+                        ));
+                    }
+                }
+            } else if audio_format != 1 {
+                return Err(format!("Unsupported WAV audio_format: {}", audio_format));
+            }
+            pos = pos.saturating_add(chunk_size + (chunk_size & 1));
         } else if chunk_id == b"data" {
             data_offset = pos;
             data_len = chunk_size.min(bytes.len().saturating_sub(pos));
             break;
         } else {
-            pos += chunk_size;
+            pos = pos.saturating_add(chunk_size + (chunk_size & 1));
         }
     }
 
@@ -1261,5 +1290,57 @@ mod tests {
 
         assert_eq!(warper.sample_time_to_beat(1.0), 2.0);
         assert_eq!(warper.sample_time_to_beat(3.5), 6.0);
+    }
+
+    #[test]
+    fn test_detect_transients_low_sample_rate_no_hang() {
+        let audio = vec![0.0f32; 2048];
+        let transients = detect_transients(&audio, 1, 4.0);
+        assert!(!transients.is_empty());
+    }
+
+    #[test]
+    fn test_decode_wav_odd_chunk_and_extensible_format() {
+        // Build WAV with odd-length JUNK chunk (5 bytes + 1 pad byte) and WAVE_FORMAT_EXTENSIBLE (0xFFFE) IEEE float
+        let mut wav = Vec::new();
+        wav.extend_from_slice(b"RIFF");
+        wav.extend_from_slice(&0u32.to_le_bytes()); // placeholder
+        wav.extend_from_slice(b"WAVE");
+
+        // Odd-sized JUNK chunk (5 bytes payload + 1 pad byte)
+        wav.extend_from_slice(b"JUNK");
+        wav.extend_from_slice(&5u32.to_le_bytes());
+        wav.extend_from_slice(b"hello");
+        wav.push(0u8);
+
+        // 40-byte WAVE_FORMAT_EXTENSIBLE fmt chunk (IEEE Float subformat = 3)
+        wav.extend_from_slice(b"fmt ");
+        wav.extend_from_slice(&40u32.to_le_bytes());
+        wav.extend_from_slice(&0xFFFEu16.to_le_bytes()); // wFormatTag
+        wav.extend_from_slice(&1u16.to_le_bytes());      // nChannels
+        wav.extend_from_slice(&48000u32.to_le_bytes());  // nSamplesPerSec
+        wav.extend_from_slice(&(48000u32 * 4).to_le_bytes()); // nAvgBytesPerSec
+        wav.extend_from_slice(&4u16.to_le_bytes());      // nBlockAlign
+        wav.extend_from_slice(&32u16.to_le_bytes());     // wBitsPerSample
+        wav.extend_from_slice(&22u16.to_le_bytes());     // cbSize
+        wav.extend_from_slice(&32u16.to_le_bytes());     // wValidBitsPerSample
+        wav.extend_from_slice(&4u32.to_le_bytes());      // dwChannelMask
+        wav.extend_from_slice(&3u16.to_le_bytes());      // SubFormat IEEE float
+        wav.extend_from_slice(&[
+            0x00, 0x00, 0x00, 0x00, 0x10, 0x00, 0x80, 0x00, 0x00, 0xAA, 0x00, 0x38, 0x9B, 0x71,
+        ]);
+
+        // data chunk with 2 float samples
+        wav.extend_from_slice(b"data");
+        wav.extend_from_slice(&8u32.to_le_bytes());
+        wav.extend_from_slice(&0.25f32.to_le_bytes());
+        wav.extend_from_slice(&(-0.5f32).to_le_bytes());
+
+        let (sr, ch, samples) = decode_wav_pcm(&wav).expect("Must decode extensible WAV");
+        assert_eq!(sr, 48000);
+        assert_eq!(ch, 1);
+        assert_eq!(samples.len(), 2);
+        assert!((samples[0] - 0.25).abs() < 1e-6);
+        assert!((samples[1] + 0.5).abs() < 1e-6);
     }
 }

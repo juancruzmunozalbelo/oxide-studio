@@ -294,7 +294,7 @@ pub struct GranulatorIIIEngine {
     pub is_playing: bool,
     pub pitch_bend_semi: f32,
 
-    pub memory_buffer: [f32; GRANULATOR_BUFFER_SIZE],
+    pub memory_buffer: Box<[f32]>,
     pub grains: [Grain; MAX_GRAINS],
     pub rng: XorShift32,
 }
@@ -302,7 +302,7 @@ pub struct GranulatorIIIEngine {
 impl GranulatorIIIEngine {
     pub fn new(sample_rate: f32) -> Self {
         let sr = if sample_rate <= 0.0 { 44100.0 } else { sample_rate };
-        let mut memory_buffer = [0.0f32; GRANULATOR_BUFFER_SIZE];
+        let mut memory_buffer = vec![0.0f32; GRANULATOR_BUFFER_SIZE].into_boxed_slice();
 
         // Synthesize rich granular sound source (multi-sine + subtle wavefold)
         for i in 0..GRANULATOR_BUFFER_SIZE {
@@ -706,7 +706,7 @@ impl InstrumentDevice for SuiteInstrumentEngine {
             }
         }
 
-        let frames = audio_out.frame_count.min(1024);
+        let frames = audio_out.frame_count.min(oxide_core::MAX_BUFFER_SIZE);
         for i in 0..frames {
             let (l, r) = self.process_sample();
             audio_out.left[i] += l;
@@ -724,6 +724,97 @@ impl InstrumentDevice for SuiteInstrumentEngine {
 
     fn all_notes_off(&mut self) {
         self.all_notes_off();
+    }
+
+    fn set_parameter(&mut self, param_id: u32, value: f32) {
+        if !value.is_finite() {
+            return;
+        }
+        match param_id {
+            0 => self.volume = value.clamp(0.0, 2.0),
+            1 => self.pan = value.clamp(-1.0, 1.0),
+            2 => match self.kind {
+                SuiteInstrumentKind::Drift => self.drift.lp_cutoff = value.clamp(20.0, 20000.0),
+                SuiteInstrumentKind::Meld => self.meld.filter_a_cutoff = value.clamp(20.0, 20000.0),
+                SuiteInstrumentKind::Collision => self.collision.mallet_stiffness = value.clamp(0.0, 1.0),
+                SuiteInstrumentKind::Tension => self.tension.string_damping = value.clamp(0.0, 1.0),
+                SuiteInstrumentKind::Electric => self.electric.hammer_hardness = value.clamp(0.0, 1.0),
+                SuiteInstrumentKind::Analog => self.analog.filter1_cutoff = value.clamp(20.0, 20000.0),
+                SuiteInstrumentKind::Sampler => self.sampler.filter_cutoff = value.clamp(20.0, 20000.0),
+                SuiteInstrumentKind::GranulatorIII => self.granulator.grain_size_ms = value.clamp(5.0, 500.0),
+            },
+            3 => match self.kind {
+                SuiteInstrumentKind::Drift => self.drift.lp_resonance = value.clamp(0.0, 1.0),
+                SuiteInstrumentKind::Meld => self.meld.filter_a_res = value.clamp(0.0, 1.0),
+                SuiteInstrumentKind::Collision => self.collision.coupling_gain = value.clamp(0.0, 1.0),
+                SuiteInstrumentKind::Tension => self.tension.string_stiffness = value.clamp(0.0, 0.8),
+                SuiteInstrumentKind::Electric => self.electric.tine_decay = value.clamp(0.5, 8.0),
+                SuiteInstrumentKind::Analog => self.analog.filter1_res = value.clamp(0.0, 1.0),
+                SuiteInstrumentKind::Sampler => self.sampler.filter_res = value.clamp(0.0, 1.0),
+                SuiteInstrumentKind::GranulatorIII => self.granulator.spray = value.clamp(0.0, 1.0),
+            },
+            4 => match self.kind {
+                SuiteInstrumentKind::Drift => self.drift.drift_amount = value.clamp(0.0, 1.0),
+                SuiteInstrumentKind::Meld => self.meld.cross_mod_amount = value.clamp(0.0, 1.0),
+                SuiteInstrumentKind::Collision => self.collision.mallet_noise = value.clamp(0.0, 1.0),
+                SuiteInstrumentKind::Tension => self.tension.pickup_position = value.clamp(0.0, 1.0),
+                SuiteInstrumentKind::Electric => self.electric.bell_gain = value.clamp(0.0, 2.0),
+                SuiteInstrumentKind::Analog => self.analog.filter2_cutoff = value.clamp(20.0, 20000.0),
+                SuiteInstrumentKind::Sampler => self.sampler.filter_env_amt = value.clamp(-1.0, 1.0),
+                SuiteInstrumentKind::GranulatorIII => self.granulator.scan_rate = value.clamp(-4.0, 4.0),
+            },
+            5 => match self.kind {
+                SuiteInstrumentKind::GranulatorIII => self.granulator.cloud_density = value.clamp(1.0, 200.0),
+                SuiteInstrumentKind::Electric => self.electric.tremolo_depth = value.clamp(0.0, 1.0),
+                SuiteInstrumentKind::Tension => self.tension.string_decay_loss = value.clamp(0.8, 0.999),
+                _ => {}
+            },
+            _ => {}
+        }
+    }
+
+    fn get_parameter(&self, param_id: u32) -> f32 {
+        match param_id {
+            0 => self.volume,
+            1 => self.pan,
+            2 => match self.kind {
+                SuiteInstrumentKind::Drift => self.drift.lp_cutoff,
+                SuiteInstrumentKind::Meld => self.meld.filter_a_cutoff,
+                SuiteInstrumentKind::Collision => self.collision.mallet_stiffness,
+                SuiteInstrumentKind::Tension => self.tension.string_damping,
+                SuiteInstrumentKind::Electric => self.electric.hammer_hardness,
+                SuiteInstrumentKind::Analog => self.analog.filter1_cutoff,
+                SuiteInstrumentKind::Sampler => self.sampler.filter_cutoff,
+                SuiteInstrumentKind::GranulatorIII => self.granulator.grain_size_ms,
+            },
+            3 => match self.kind {
+                SuiteInstrumentKind::Drift => self.drift.lp_resonance,
+                SuiteInstrumentKind::Meld => self.meld.filter_a_res,
+                SuiteInstrumentKind::Collision => self.collision.coupling_gain,
+                SuiteInstrumentKind::Tension => self.tension.string_stiffness,
+                SuiteInstrumentKind::Electric => self.electric.tine_decay,
+                SuiteInstrumentKind::Analog => self.analog.filter1_res,
+                SuiteInstrumentKind::Sampler => self.sampler.filter_res,
+                SuiteInstrumentKind::GranulatorIII => self.granulator.spray,
+            },
+            4 => match self.kind {
+                SuiteInstrumentKind::Drift => self.drift.drift_amount,
+                SuiteInstrumentKind::Meld => self.meld.cross_mod_amount,
+                SuiteInstrumentKind::Collision => self.collision.mallet_noise,
+                SuiteInstrumentKind::Tension => self.tension.pickup_position,
+                SuiteInstrumentKind::Electric => self.electric.bell_gain,
+                SuiteInstrumentKind::Analog => self.analog.filter2_cutoff,
+                SuiteInstrumentKind::Sampler => self.sampler.filter_env_amt,
+                SuiteInstrumentKind::GranulatorIII => self.granulator.scan_rate,
+            },
+            5 => match self.kind {
+                SuiteInstrumentKind::GranulatorIII => self.granulator.cloud_density,
+                SuiteInstrumentKind::Electric => self.electric.tremolo_depth,
+                SuiteInstrumentKind::Tension => self.tension.string_decay_loss,
+                _ => 0.0,
+            },
+            _ => 0.0,
+        }
     }
 }
 

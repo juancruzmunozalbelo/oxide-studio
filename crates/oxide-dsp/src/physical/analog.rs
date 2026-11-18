@@ -364,7 +364,7 @@ impl InstrumentDevice for AnalogDevice {
             }
         }
 
-        let frames = audio_out.frame_count.min(1024);
+        let frames = audio_out.frame_count.min(oxide_core::MAX_BUFFER_SIZE);
         for i in 0..frames {
             let (l, r) = self.process_stereo_sample();
             audio_out.left[i] += l;
@@ -382,6 +382,39 @@ impl InstrumentDevice for AnalogDevice {
 
     fn all_notes_off(&mut self) {
         self.silence_all();
+    }
+
+    fn set_parameter(&mut self, param_id: u32, value: f32) {
+        if !value.is_finite() {
+            return;
+        }
+        match param_id {
+            0 => self.master_volume = value.clamp(0.0, 2.0),
+            1 => self.master_pan = value.clamp(-1.0, 1.0),
+            2 => self.filter1_cutoff = value.clamp(20.0, 20000.0),
+            3 => self.filter1_res = value.clamp(0.0, 1.0),
+            4 => self.filter1_env_amt = value.clamp(-1.0, 1.0),
+            5 => self.filter2_cutoff = value.clamp(20.0, 20000.0),
+            6 => self.filter2_res = value.clamp(0.0, 1.0),
+            7 => self.sub_gain = value.clamp(0.0, 1.0),
+            8 => self.noise_gain = value.clamp(0.0, 1.0),
+            _ => {}
+        }
+    }
+
+    fn get_parameter(&self, param_id: u32) -> f32 {
+        match param_id {
+            0 => self.master_volume,
+            1 => self.master_pan,
+            2 => self.filter1_cutoff,
+            3 => self.filter1_res,
+            4 => self.filter1_env_amt,
+            5 => self.filter2_cutoff,
+            6 => self.filter2_res,
+            7 => self.sub_gain,
+            8 => self.noise_gain,
+            _ => 0.0,
+        }
     }
 }
 

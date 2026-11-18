@@ -1,7 +1,7 @@
 //! Top control & scale bar (height ~48px).
 //!
 //! Live 12 Complete Workstation Top Bar featuring:
-//! - Brand Badge: ARUSTON Studio Header
+//! - Brand Badge: OXIDE STUDIO Header
 //! - Transport controls: Play, Stop, Record, Draggable BPM, Tap Tempo, Time Sig, Metronome, Key Mode
 //! - Global Scale & Root Key selector with Scale-Lock toggle
 //! - Segmented View Switcher: Session vs Arrangement
@@ -166,7 +166,7 @@ pub fn render_top_control_bar(
         }
 
         // Keyboard Mode Toggle: "♪ Piano"
-        let key_mode_id = egui::Id::new("aruston_key_piano_mode");
+        let key_mode_id = egui::Id::new("oxide_key_piano_mode");
         let mut is_piano_mode = ui.data_mut(|d| *d.get_temp_mut_or(key_mode_id, true));
         let key_label = if is_piano_mode { "♪ Piano" } else { "♪ Iso" };
         let key_btn = Button::new(RichText::new(key_label).size(10.0).color(if is_piano_mode { COLOR_AMBER } else { COLOR_CYAN }))
@@ -224,7 +224,7 @@ pub fn render_top_control_bar(
         }
 
         // 4. Pro Controls (Toggle "⚙ Pro", stored in ui.data_mut)
-        let pro_mode_id = egui::Id::new("aruston_pro_header_mode");
+        let pro_mode_id = egui::Id::new("oxide_pro_header_mode");
         let mut pro_mode = ui.data_mut(|d| *d.get_temp_mut_or(pro_mode_id, false));
 
         let pro_btn = Button::new(
@@ -244,7 +244,7 @@ pub fn render_top_control_bar(
 
         if pro_mode {
             // Swing control
-            let swing_id = egui::Id::new("aruston_transport_swing_pct");
+            let swing_id = egui::Id::new("oxide_transport_swing_pct");
             let mut swing_pct = ui.data_mut(|d| *d.get_temp_mut_or(swing_id, 0.0f32));
             ui.label(RichText::new("Swing:").size(10.0).color(COLOR_TEXT_MUTED));
             let swing_drag = ui.add(
@@ -474,7 +474,7 @@ pub fn render_transport_bar(
     let mut arr_rec = false;
 
     // Sync swing to data_mut
-    let swing_id = egui::Id::new("aruston_transport_swing_pct");
+    let swing_id = egui::Id::new("oxide_transport_swing_pct");
     ui.data_mut(|d| *d.get_temp_mut_or(swing_id, *swing * 100.0) = *swing * 100.0);
 
     let action = render_top_control_bar(

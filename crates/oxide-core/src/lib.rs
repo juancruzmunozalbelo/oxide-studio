@@ -32,11 +32,14 @@ pub use transport::{
 };
 pub use tuning::{TuningSystem, TuningType};
 
-/// Fixed-size zero-allocation audio buffer holding up to 1024 stereo frames.
+/// Maximum number of stereo audio frames held in an `AudioBuffer`.
+pub const MAX_BUFFER_SIZE: usize = 2048;
+
+/// Fixed-size zero-allocation audio buffer holding up to `MAX_BUFFER_SIZE` (2048) stereo frames.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct AudioBuffer {
-    pub left: [f32; 1024],
-    pub right: [f32; 1024],
+    pub left: [f32; MAX_BUFFER_SIZE],
+    pub right: [f32; MAX_BUFFER_SIZE],
     pub frame_count: usize,
 }
 
@@ -44,8 +47,8 @@ impl AudioBuffer {
     /// Create a new empty AudioBuffer with frame_count 0 and all samples set to 0.0.
     pub const fn new() -> Self {
         Self {
-            left: [0.0; 1024],
-            right: [0.0; 1024],
+            left: [0.0; MAX_BUFFER_SIZE],
+            right: [0.0; MAX_BUFFER_SIZE],
             frame_count: 0,
         }
     }
@@ -53,30 +56,30 @@ impl AudioBuffer {
     /// Create an AudioBuffer with specified frame count, all zeroed.
     pub fn silence(frame_count: usize) -> Self {
         Self {
-            left: [0.0; 1024],
-            right: [0.0; 1024],
-            frame_count: frame_count.min(1024),
+            left: [0.0; MAX_BUFFER_SIZE],
+            right: [0.0; MAX_BUFFER_SIZE],
+            frame_count: frame_count.min(MAX_BUFFER_SIZE),
         }
     }
 
     /// Reset all samples in active frame_count to 0.0.
     pub fn clear(&mut self) {
-        for i in 0..self.frame_count.min(1024) {
+        for i in 0..self.frame_count.min(MAX_BUFFER_SIZE) {
             self.left[i] = 0.0;
             self.right[i] = 0.0;
         }
     }
 
-    /// Reset all 1024 samples to 0.0 and set frame_count.
+    /// Reset all `MAX_BUFFER_SIZE` samples to 0.0 and set frame_count.
     pub fn reset_all(&mut self, frame_count: usize) {
-        self.left = [0.0; 1024];
-        self.right = [0.0; 1024];
-        self.frame_count = frame_count.min(1024);
+        self.left = [0.0; MAX_BUFFER_SIZE];
+        self.right = [0.0; MAX_BUFFER_SIZE];
+        self.frame_count = frame_count.min(MAX_BUFFER_SIZE);
     }
 
     /// Accumulate (mix) samples from another buffer into this buffer.
     pub fn mix_from(&mut self, other: &AudioBuffer) {
-        let count = self.frame_count.min(other.frame_count).min(1024);
+        let count = self.frame_count.min(other.frame_count).min(MAX_BUFFER_SIZE);
         for i in 0..count {
             self.left[i] += other.left[i];
             self.right[i] += other.right[i];
@@ -85,7 +88,7 @@ impl AudioBuffer {
 
     /// Scale all active frames by a gain factor.
     pub fn apply_gain(&mut self, gain: f32) {
-        let count = self.frame_count.min(1024);
+        let count = self.frame_count.min(MAX_BUFFER_SIZE);
         for i in 0..count {
             self.left[i] *= gain;
             self.right[i] *= gain;

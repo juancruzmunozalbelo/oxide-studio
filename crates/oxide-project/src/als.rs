@@ -6,7 +6,8 @@ use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 
 use oxide_timeline::{
-    ArrangementClip, ClipPattern, MidiNote, MidiPattern, Scene, SessionClip,
+    ArrangementClip, AutomationCurveType, AutomationLane, AutomationPoint, ClipPattern,
+    CubicBezierHandle, DrumStepPattern, MidiNote, MidiPattern, Scene, SessionClip,
 };
 use flate2::read::GzDecoder;
 use flate2::write::GzEncoder;
@@ -21,6 +22,76 @@ use crate::synth::{load_all_factory_macros, load_all_factory_presets, SynthPatch
 use crate::track::{InstrumentConfig, TrackDefinition, TrackType};
 
 pub const MAX_ALS_XML_BYTES: u64 = 64 * 1024 * 1024; // 64 MiB cap
+
+/// Ableton Live unity fader value (`0.0 dB`).
+pub const ABLETON_UNITY_LINEAR: f32 = 0.85;
+/// Ableton Live silence (`-70.0 dB` / `-inf`) fader/send linear value.
+pub const ABLETON_SILENCE_LINEAR: f32 = 0.00031622776;
+pub const ABLETON_MIN_DB: f32 = -70.0;
+pub const ABLETON_MAX_DB: f32 = 6.0;
+
+/// Convert Oxide dB (`[-70.0, +6.0]`) to Ableton Live `.als` linear gain:
+/// - `0.0 dB` -> `0.85`
+/// - `-70.0 dB` -> `0.00031622776`
+/// - `+6.0 dB` -> `1.0`
+/// Invertible with [`ableton_linear_to_db`].
+pub fn db_to_ableton_linear(db: f32) -> f32 {
+    if !db.is_finite() || db <= ABLETON_MIN_DB {
+        return ABLETON_SILENCE_LINEAR;
+    }
+    if db >= ABLETON_MAX_DB {
+        return 1.0;
+    }
+    let unity = ABLETON_UNITY_LINEAR as f64;
+    if db >= 0.0 {
+        let t = (db as f64) / (ABLETON_MAX_DB as f64);
+        (unity * (1.0_f64 / unity).powf(t)) as f32
+    } else {
+        let min_lin = ABLETON_SILENCE_LINEAR as f64;
+        let t = (db as f64 - ABLETON_MIN_DB as f64) / (0.0 - ABLETON_MIN_DB as f64);
+        (min_lin * (unity / min_lin).powf(t)) as f32
+    }
+}
+
+/// Convert Ableton Live `.als` linear gain to Oxide dB (`[-70.0, +6.0]`):
+/// - `0.85` -> `0.0 dB`
+/// - `<= 0.00031622776` -> `-70.0 dB`
+/// - `>= 1.0` -> `+6.0 dB`
+/// Invertible with [`db_to_ableton_linear`].
+pub fn ableton_linear_to_db(lin: f32) -> f32 {
+    if !lin.is_finite() || lin <= ABLETON_SILENCE_LINEAR {
+        return ABLETON_MIN_DB;
+    }
+    if lin >= 1.0 {
+        return ABLETON_MAX_DB;
+    }
+    let lin64 = lin as f64;
+    let unity = ABLETON_UNITY_LINEAR as f64;
+    if (lin64 - unity).abs() < 1e-9 {
+        return 0.0;
+    }
+    if lin64 > unity {
+        let t = (lin64 / unity).ln() / (1.0_f64 / unity).ln();
+        (t * (ABLETON_MAX_DB as f64)).clamp(0.0, ABLETON_MAX_DB as f64) as f32
+    } else {
+        let min_lin = ABLETON_SILENCE_LINEAR as f64;
+        let t = (lin64 / min_lin).ln() / (unity / min_lin).ln();
+        (ABLETON_MIN_DB as f64 + t * (0.0 - ABLETON_MIN_DB as f64))
+            .clamp(ABLETON_MIN_DB as f64, 0.0) as f32
+    }
+}
+
+fn format_ableton_linear(lin: f32) -> String {
+    if lin < 0.01 {
+        format!("{:.11}", lin)
+    } else {
+        format!("{:.7}", lin)
+    }
+}
+
+fn sanitize_xml_comment(s: &str) -> String {
+    s.replace("--", "\\u002d\\u002d")
+}
 
 /// Escapes standard XML characters in text content and attribute values.
 pub fn xml_escape(s: &str) -> String {
@@ -168,6 +239,19 @@ pub fn parse_xml_to_node(xml: &str) -> Result<XmlNode, DAWProjectError> {
                     }
                 }
             }
+            Ok(Event::Comment(ref e)) => {
+                if let Some(current) = stack.last_mut() {
+                    let comment = String::from_utf8_lossy(e.as_ref()).trim().to_string();
+                    if !comment.is_empty() {
+                        current.children.push(XmlNode {
+                            tag: "__comment__".to_string(),
+                            attributes: HashMap::new(),
+                            children: Vec::new(),
+                            text: comment,
+                        });
+                    }
+                }
+            }
             Ok(Event::Eof) => break,
             Err(e) => {
                 return Err(DAWProjectError::Validation(format!(
@@ -185,7 +269,13 @@ pub fn parse_xml_to_node(xml: &str) -> Result<XmlNode, DAWProjectError> {
     })
 }
 
-/// Read PCM samples from a standard RIFF WAV file, capped to `max_seconds`.
+/// Read all PCM samples from a standard RIFF WAV file without truncation.
+/// Returns `(sample_rate, channels, interleaved_stereo_samples)`.
+pub fn read_wav_full<P: AsRef<Path>>(path: P) -> Option<(u32, u16, Vec<f32>)> {
+    read_wav_preview(path, 0.0)
+}
+
+/// Read PCM samples from a standard RIFF WAV file, capped to `max_seconds` (if `> 0.0`).
 /// Returns `(sample_rate, channels, interleaved_stereo_samples)`.
 pub fn read_wav_preview<P: AsRef<Path>>(path: P, max_seconds: f64) -> Option<(u32, u16, Vec<f32>)> {
     let bytes = fs::read(path).ok()?;
@@ -218,13 +308,13 @@ pub fn read_wav_preview<P: AsRef<Path>>(path: P, max_seconds: f64) -> Option<(u3
                 let sub_format = u16::from_le_bytes(bytes[pos + 24..pos + 26].try_into().ok()?);
                 audio_format = sub_format;
             }
-            pos += chunk_size;
+            pos += chunk_size + (chunk_size & 1);
         } else if chunk_id == b"data" {
             data_offset = pos;
             data_len = chunk_size.min(bytes.len().saturating_sub(pos));
             break;
         } else {
-            pos += chunk_size;
+            pos += chunk_size + (chunk_size & 1);
         }
     }
 
@@ -257,6 +347,24 @@ pub fn read_wav_preview<P: AsRef<Path>>(path: P, max_seconds: f64) -> Option<(u3
             };
             stereo_samples.push(if s_left.is_finite() { s_left.clamp(-16.0, 16.0) } else { 0.0 });
             stereo_samples.push(if s_right.is_finite() { s_right.clamp(-16.0, 16.0) } else { 0.0 });
+        }
+    } else if !is_float && bits_per_sample == 32 {
+        let count = data_len / 4;
+        let total_frames = count / (channels as usize);
+        let frames_to_read = total_frames.min(max_frames);
+        stereo_samples.reserve(frames_to_read * 2);
+        for f in 0..frames_to_read {
+            let base = f * (channels as usize);
+            let v_left = i32::from_le_bytes(raw_data[base * 4..(base + 1) * 4].try_into().ok()?);
+            let s_left = v_left as f32 / 2_147_483_648.0;
+            let s_right = if channels > 1 {
+                let v_right = i32::from_le_bytes(raw_data[(base + 1) * 4..(base + 2) * 4].try_into().ok()?);
+                v_right as f32 / 2_147_483_648.0
+            } else {
+                s_left
+            };
+            stereo_samples.push(if s_left.is_finite() { s_left } else { 0.0 });
+            stereo_samples.push(if s_right.is_finite() { s_right } else { 0.0 });
         }
     } else if bits_per_sample == 24 {
         let count = data_len / 3;
@@ -347,10 +455,14 @@ pub fn resolve_sample_path(
             }
         }
 
-        // Fallback with base_dir if relative path exists as a string
-        if !relative_path_val.is_empty() {
+        // Fallback with base_dir only when relative_path_val is actually relative
+        if !relative_path_val.is_empty()
+            && !relative_path_val.starts_with('/')
+            && !relative_path_val.starts_with('\\')
+            && !(relative_path_val.len() >= 2 && relative_path_val.as_bytes()[1] == b':')
+        {
             let rel_clean = relative_path_val.replace('\\', "/");
-            return base.join(rel_clean.trim_start_matches('/'));
+            return base.join(rel_clean);
         }
     }
 
@@ -360,6 +472,38 @@ pub fn resolve_sample_path(
     } else {
         PathBuf::from(relative_path_val)
     }
+}
+
+fn parse_oxide_comment_json(node: &XmlNode, prefix: &str) -> Option<serde_json::Value> {
+    for child in &node.children {
+        if child.tag == "__comment__" {
+            let trimmed = child.text.trim();
+            if let Some(rest) = trimmed.strip_prefix(prefix) {
+                if let Ok(val) = serde_json::from_str::<serde_json::Value>(rest.trim()) {
+                    return Some(val);
+                }
+            }
+        }
+    }
+    None
+}
+
+fn find_child_or_descendant<'a>(node: &'a XmlNode, tag: &str) -> Option<&'a XmlNode> {
+    node.find_child(tag).or_else(|| node.find_descendant(tag))
+}
+
+fn read_manual_or_attr_f32(node: &XmlNode, child_tag: &str, attr_name: &str) -> Option<f32> {
+    node.get_attr(attr_name)
+        .and_then(|v| v.parse::<f32>().ok())
+        .or_else(|| {
+            node.find_child(child_tag)
+                .and_then(|c| {
+                    c.find_child("Manual")
+                        .and_then(|m| m.get_attr_or_text("Value"))
+                        .or_else(|| c.get_attr_or_text("Value"))
+                })
+                .and_then(|v| v.parse::<f32>().ok())
+        })
 }
 
 fn parse_midi_clip_node(
@@ -380,11 +524,28 @@ fn parse_midi_clip_node(
         .filter(|s| !s.is_empty())
         .unwrap_or_else(|| fallback_name.to_string());
 
+    let clip_meta = parse_oxide_comment_json(node, "oxide-clip:");
     let clip_color = node
         .find_child("ColorHex")
         .and_then(|c| c.get_attr_or_text("Value"))
         .filter(|s| !s.is_empty())
+        .or_else(|| {
+            clip_meta
+                .as_ref()
+                .and_then(|m| m.get("color_hex").and_then(|v| v.as_str()).map(|s| s.to_string()))
+        })
         .unwrap_or_else(|| fallback_color.to_string());
+
+    let cur_start = node
+        .find_child("CurrentStart")
+        .and_then(|c| c.get_attr_or_text("Value"))
+        .or_else(|| node.get_attr("Time"))
+        .and_then(|v| v.parse::<f64>().ok())
+        .unwrap_or(0.0);
+    let explicit_cur_end = node
+        .find_child("CurrentEnd")
+        .and_then(|c| c.get_attr_or_text("Value"))
+        .and_then(|v| v.parse::<f64>().ok());
 
     let loop_node = node.find_child("Loop");
     let loop_on = loop_node
@@ -401,19 +562,25 @@ fn parse_midi_clip_node(
         .and_then(|l| l.find_child("LoopEnd"))
         .and_then(|v| v.get_attr_or_text("Value"))
         .and_then(|v| v.parse::<f64>().ok())
-        .unwrap_or(4.0);
+        .unwrap_or_else(|| {
+            explicit_cur_end
+                .map(|ce| loop_start + (ce - cur_start).max(0.0625))
+                .unwrap_or(4.0)
+        });
 
-    let cur_start = node
-        .find_child("CurrentStart")
-        .and_then(|c| c.get_attr_or_text("Value"))
-        .or_else(|| node.get_attr("Time"))
-        .and_then(|v| v.parse::<f64>().ok())
-        .unwrap_or(0.0);
-    let cur_end = node
-        .find_child("CurrentEnd")
-        .and_then(|c| c.get_attr_or_text("Value"))
-        .and_then(|v| v.parse::<f64>().ok())
-        .unwrap_or_else(|| cur_start + (loop_end - loop_start).max(4.0));
+    let cur_end = explicit_cur_end.unwrap_or_else(|| cur_start + (loop_end - loop_start).max(0.0625));
+
+    let is_note_enabled = |note_ev: &XmlNode| -> bool {
+        note_ev
+            .get_attr("IsEnabled")
+            .or_else(|| {
+                note_ev
+                    .find_child("IsEnabled")
+                    .and_then(|e| e.get_attr_or_text("Value"))
+            })
+            .map(|v| !v.eq_ignore_ascii_case("false") && v != "0")
+            .unwrap_or(true)
+    };
 
     let mut notes = Vec::new();
     let key_tracks = node.find_descendants("KeyTrack");
@@ -425,6 +592,9 @@ fn parse_midi_clip_node(
                 .and_then(|v| v.parse::<u8>().ok())
                 .unwrap_or(60);
             for note_ev in kt.find_descendants("MidiNoteEvent") {
+                if !is_note_enabled(note_ev) {
+                    continue;
+                }
                 let time = note_ev
                     .get_attr("Time")
                     .or_else(|| {
@@ -473,6 +643,9 @@ fn parse_midi_clip_node(
         }
     } else {
         for note_ev in node.find_descendants("MidiNoteEvent") {
+            if !is_note_enabled(note_ev) {
+                continue;
+            }
             let pitch = note_ev
                 .get_attr("MidiKey")
                 .or_else(|| note_ev.get_attr("Pitch"))
@@ -511,7 +684,7 @@ fn parse_midi_clip_node(
             .unwrap_or(std::cmp::Ordering::Equal)
             .then_with(|| a.pitch.cmp(&b.pitch))
     });
-    let pat_len = (loop_end - loop_start).max(4.0);
+    let pat_len = (loop_end - loop_start).max(0.0625);
     let pattern = MidiPattern {
         length_beats: pat_len,
         notes,
@@ -550,11 +723,28 @@ fn parse_audio_clip_node(
         .filter(|s| !s.is_empty())
         .unwrap_or_else(|| fallback_name.to_string());
 
+    let clip_meta = parse_oxide_comment_json(node, "oxide-clip:");
     let clip_color = node
         .find_child("ColorHex")
         .and_then(|c| c.get_attr_or_text("Value"))
         .filter(|s| !s.is_empty())
+        .or_else(|| {
+            clip_meta
+                .as_ref()
+                .and_then(|m| m.get("color_hex").and_then(|v| v.as_str()).map(|s| s.to_string()))
+        })
         .unwrap_or_else(|| fallback_color.to_string());
+
+    let cur_start = node
+        .find_child("CurrentStart")
+        .and_then(|c| c.get_attr_or_text("Value"))
+        .or_else(|| node.get_attr("Time"))
+        .and_then(|v| v.parse::<f64>().ok())
+        .unwrap_or(0.0);
+    let explicit_cur_end = node
+        .find_child("CurrentEnd")
+        .and_then(|c| c.get_attr_or_text("Value"))
+        .and_then(|v| v.parse::<f64>().ok());
 
     let loop_node = node.find_child("Loop");
     let loop_on = loop_node
@@ -571,19 +761,13 @@ fn parse_audio_clip_node(
         .and_then(|l| l.find_child("LoopEnd"))
         .and_then(|v| v.get_attr_or_text("Value"))
         .and_then(|v| v.parse::<f64>().ok())
-        .unwrap_or(4.0);
+        .unwrap_or_else(|| {
+            explicit_cur_end
+                .map(|ce| loop_start + (ce - cur_start).max(0.0625))
+                .unwrap_or(4.0)
+        });
 
-    let cur_start = node
-        .find_child("CurrentStart")
-        .and_then(|c| c.get_attr_or_text("Value"))
-        .or_else(|| node.get_attr("Time"))
-        .and_then(|v| v.parse::<f64>().ok())
-        .unwrap_or(0.0);
-    let cur_end = node
-        .find_child("CurrentEnd")
-        .and_then(|c| c.get_attr_or_text("Value"))
-        .and_then(|v| v.parse::<f64>().ok())
-        .unwrap_or_else(|| cur_start + (loop_end - loop_start).max(4.0));
+    let cur_end = explicit_cur_end.unwrap_or_else(|| cur_start + (loop_end - loop_start).max(0.0625));
 
     let path_val = node
         .find_descendant("Path")
@@ -597,7 +781,7 @@ fn parse_audio_clip_node(
     let resolved = resolve_sample_path(&path_val, &rel_val, base_dir);
     let (sr, ch, samples) = if resolved.exists() {
         let entry = sample_cache.entry(resolved.clone()).or_insert_with(|| {
-            read_wav_preview(&resolved, 30.0).unwrap_or((44100, 2, Vec::new()))
+            read_wav_full(&resolved).unwrap_or((44100, 2, Vec::new()))
         });
         (entry.0, entry.1, entry.2.clone())
     } else {
@@ -608,7 +792,7 @@ fn parse_audio_clip_node(
         resolved.to_string_lossy().to_string(),
         sr,
         ch,
-        (loop_end - loop_start).max(4.0),
+        (loop_end - loop_start).max(0.0625),
     );
     audio_data.samples = samples;
 
@@ -625,504 +809,921 @@ fn parse_audio_clip_node(
     )
 }
 
+fn alloc_id(next_id: &mut u32) -> u32 {
+    let id = *next_id;
+    *next_id = next_id.saturating_add(1);
+    id
+}
+
+fn drum_pattern_to_midi_notes(drum_pat: &DrumStepPattern) -> Vec<MidiNote> {
+    let mut notes = Vec::new();
+    for trk in &drum_pat.tracks {
+        let pitch = 36u8.saturating_add(trk.pad_index);
+        for (step_idx, step) in trk.steps.iter().enumerate() {
+            if step.active {
+                let time = step_idx as f64 * drum_pat.step_duration_beats;
+                let dur = drum_pat.step_duration_beats;
+                notes.push(MidiNote::new(pitch, step.velocity.max(1), time, dur));
+            }
+        }
+    }
+    notes
+}
+
+fn write_midi_notes_xml(
+    out: &mut String,
+    notes: &[MidiNote],
+    indent: &str,
+    next_id: &mut u32,
+) {
+    out.push_str(&format!("{indent}<Notes>\n"));
+    out.push_str(&format!("{indent}  <KeyTracks>\n"));
+    let mut notes_by_key: BTreeMap<u8, Vec<&MidiNote>> = BTreeMap::new();
+    for note in notes {
+        notes_by_key.entry(note.pitch).or_default().push(note);
+    }
+    for (pitch, key_notes) in notes_by_key {
+        let kt_id = alloc_id(next_id);
+        out.push_str(&format!("{indent}    <KeyTrack Id=\"{kt_id}\">\n"));
+        out.push_str(&format!("{indent}      <MidiKey Value=\"{pitch}\"/>\n"));
+        out.push_str(&format!("{indent}      <Notes>\n"));
+        for n in key_notes {
+            let ev_id = alloc_id(next_id);
+            out.push_str(&format!(
+                "{indent}        <MidiNoteEvent Id=\"{ev_id}\" NoteId=\"{ev_id}\" Time=\"{:.4}\" Duration=\"{:.4}\" Velocity=\"{:.1}\" OffVelocity=\"64\" Probability=\"{:.2}\" IsEnabled=\"true\"/>\n",
+                n.start_beat, n.duration_beats, n.velocity as f32, n.probability
+            ));
+        }
+        out.push_str(&format!("{indent}      </Notes>\n"));
+        out.push_str(&format!("{indent}    </KeyTrack>\n"));
+    }
+    out.push_str(&format!("{indent}  </KeyTracks>\n"));
+    out.push_str(&format!("{indent}</Notes>\n"));
+}
+
+fn write_midi_clip_xml(
+    out: &mut String,
+    clip_id: u32,
+    name: &str,
+    color_hex: &str,
+    loop_on: bool,
+    loop_start: f64,
+    loop_end: f64,
+    cur_start: f64,
+    cur_end: f64,
+    notes: &[MidiNote],
+    indent: &str,
+    next_id: &mut u32,
+) {
+    let xml_id = alloc_id(next_id);
+    out.push_str(&format!(
+        "{indent}<MidiClip Id=\"{xml_id}\" Time=\"{:.4}\">\n",
+        cur_start
+    ));
+    out.push_str(&format!("{indent}  <LomId Value=\"{clip_id}\"/>\n"));
+    out.push_str(&format!(
+        "{indent}  <Name Value=\"{}\"/>\n",
+        xml_escape(name)
+    ));
+    let clip_meta = sanitize_xml_comment(
+        &serde_json::json!({ "color_hex": color_hex }).to_string(),
+    );
+    out.push_str(&format!("{indent}  <!-- oxide-clip:{clip_meta} -->\n"));
+    out.push_str(&format!("{indent}  <Loop>\n"));
+    out.push_str(&format!("{indent}    <LoopOn Value=\"{loop_on}\"/>\n"));
+    out.push_str(&format!(
+        "{indent}    <LoopStart Value=\"{:.4}\"/>\n",
+        loop_start
+    ));
+    out.push_str(&format!(
+        "{indent}    <LoopEnd Value=\"{:.4}\"/>\n",
+        loop_end
+    ));
+    out.push_str(&format!(
+        "{indent}    <StartRelative Value=\"{:.4}\"/>\n",
+        loop_start
+    ));
+    out.push_str(&format!(
+        "{indent}    <OutMarker Value=\"{:.4}\"/>\n",
+        loop_end
+    ));
+    out.push_str(&format!(
+        "{indent}    <HiddenLoopStart Value=\"{:.4}\"/>\n",
+        loop_start
+    ));
+    out.push_str(&format!(
+        "{indent}    <HiddenLoopEnd Value=\"{:.4}\"/>\n",
+        loop_end
+    ));
+    out.push_str(&format!("{indent}  </Loop>\n"));
+    out.push_str(&format!(
+        "{indent}  <CurrentStart Value=\"{:.4}\"/>\n",
+        cur_start
+    ));
+    out.push_str(&format!(
+        "{indent}  <CurrentEnd Value=\"{:.4}\"/>\n",
+        cur_end
+    ));
+    let inner_indent = format!("{indent}  ");
+    write_midi_notes_xml(out, notes, &inner_indent, next_id);
+    out.push_str(&format!("{indent}</MidiClip>\n"));
+}
+
+fn write_audio_clip_xml(
+    out: &mut String,
+    clip_id: u32,
+    name: &str,
+    color_hex: &str,
+    loop_on: bool,
+    loop_start: f64,
+    loop_end: f64,
+    cur_start: f64,
+    cur_end: f64,
+    file_path: &str,
+    indent: &str,
+    next_id: &mut u32,
+) {
+    let xml_id = alloc_id(next_id);
+    out.push_str(&format!(
+        "{indent}<AudioClip Id=\"{xml_id}\" Time=\"{:.4}\">\n",
+        cur_start
+    ));
+    out.push_str(&format!("{indent}  <LomId Value=\"{clip_id}\"/>\n"));
+    out.push_str(&format!(
+        "{indent}  <Name Value=\"{}\"/>\n",
+        xml_escape(name)
+    ));
+    let clip_meta = sanitize_xml_comment(
+        &serde_json::json!({ "color_hex": color_hex }).to_string(),
+    );
+    out.push_str(&format!("{indent}  <!-- oxide-clip:{clip_meta} -->\n"));
+    out.push_str(&format!("{indent}  <Loop>\n"));
+    out.push_str(&format!("{indent}    <LoopOn Value=\"{loop_on}\"/>\n"));
+    out.push_str(&format!(
+        "{indent}    <LoopStart Value=\"{:.4}\"/>\n",
+        loop_start
+    ));
+    out.push_str(&format!(
+        "{indent}    <LoopEnd Value=\"{:.4}\"/>\n",
+        loop_end
+    ));
+    out.push_str(&format!("{indent}  </Loop>\n"));
+    out.push_str(&format!(
+        "{indent}  <CurrentStart Value=\"{:.4}\"/>\n",
+        cur_start
+    ));
+    out.push_str(&format!(
+        "{indent}  <CurrentEnd Value=\"{:.4}\"/>\n",
+        cur_end
+    ));
+    out.push_str(&format!("{indent}  <SampleRef>\n"));
+    out.push_str(&format!("{indent}    <FileRef>\n"));
+    out.push_str(&format!(
+        "{indent}      <Path Value=\"{}\"/>\n",
+        xml_escape(file_path)
+    ));
+    out.push_str(&format!(
+        "{indent}      <RelativePath Value=\"{}\"/>\n",
+        xml_escape(file_path)
+    ));
+    out.push_str(&format!(
+        "{indent}      <Name Value=\"{}\"/>\n",
+        xml_escape(file_path)
+    ));
+    out.push_str(&format!("{indent}    </FileRef>\n"));
+    out.push_str(&format!("{indent}  </SampleRef>\n"));
+    out.push_str(&format!("{indent}</AudioClip>\n"));
+}
+
+fn write_insert_fx_xml(
+    out: &mut String,
+    fx: &InsertEffectConfig,
+    indent: &str,
+    next_id: &mut u32,
+) {
+    let dev_id = alloc_id(next_id);
+    match fx {
+        InsertEffectConfig::Saturator {
+            drive_db,
+            curve,
+            output_gain_db,
+        } => {
+            out.push_str(&format!(
+                "{indent}<Saturator Id=\"{dev_id}\" Drive=\"{drive_db:.3}\" Curve=\"{curve:.4}\" OutputGain=\"{output_gain_db:.3}\"><UserName Value=\"Saturator\"/></Saturator>\n"
+            ));
+        }
+        InsertEffectConfig::TempoDelay {
+            time_beats,
+            feedback,
+            mix,
+        } => {
+            out.push_str(&format!(
+                "{indent}<Delay Id=\"{dev_id}\" Time=\"{time_beats:.4}\" Feedback=\"{feedback:.4}\" Mix=\"{mix:.4}\"><UserName Value=\"Delay\"/></Delay>\n"
+            ));
+        }
+        InsertEffectConfig::Reverb {
+            ir_path,
+            decay_ms,
+            mix,
+        } => {
+            let meta_comment = if let Some(path) = ir_path {
+                let s = sanitize_xml_comment(&serde_json::json!({ "ir_path": path }).to_string());
+                format!("<!-- oxide-reverb:{s} -->")
+            } else {
+                String::new()
+            };
+            out.push_str(&format!(
+                "{indent}<Reverb Id=\"{dev_id}\" Decay=\"{decay_ms:.2}\" Mix=\"{mix:.4}\"><UserName Value=\"Reverb\"/>{meta_comment}</Reverb>\n"
+            ));
+        }
+        InsertEffectConfig::EqEight { params } => {
+            let meta_json = sanitize_xml_comment(&serde_json::to_string(params).unwrap_or_else(|_| "{}".to_string()));
+            out.push_str(&format!(
+                "{indent}<Eq8 Id=\"{dev_id}\"><UserName Value=\"EQ Eight\"/><!-- oxide-eq8:{meta_json} --></Eq8>\n"
+            ));
+        }
+        InsertEffectConfig::GlueCompressor {
+            threshold_db,
+            ratio,
+            attack_ms,
+            release_s,
+            makeup_gain_db,
+            dry_wet,
+        } => {
+            out.push_str(&format!(
+                "{indent}<GlueCompressor Id=\"{dev_id}\" Threshold=\"{threshold_db:.2}\" Ratio=\"{ratio:.2}\" Attack=\"{attack_ms:.3}\" Release=\"{release_s:.4}\" Makeup=\"{makeup_gain_db:.2}\" DryWet=\"{dry_wet:.4}\"><UserName Value=\"Glue Compressor\"/></GlueCompressor>\n"
+            ));
+        }
+        InsertEffectConfig::Roar {
+            drive_db,
+            tone,
+            dry_wet,
+            output_gain_db,
+        } => {
+            out.push_str(&format!(
+                "{indent}<Roar Id=\"{dev_id}\" Drive=\"{drive_db:.3}\" Tone=\"{tone:.4}\" DryWet=\"{dry_wet:.4}\" OutputGain=\"{output_gain_db:.3}\"><UserName Value=\"Roar\"/></Roar>\n"
+            ));
+        }
+        InsertEffectConfig::AutoFilter {
+            cutoff_hz,
+            resonance,
+            dry_wet,
+        } => {
+            out.push_str(&format!(
+                "{indent}<AutoFilter Id=\"{dev_id}\" Cutoff=\"{cutoff_hz:.2}\" Resonance=\"{resonance:.4}\" DryWet=\"{dry_wet:.4}\"><UserName Value=\"Auto Filter\"/></AutoFilter>\n"
+            ));
+        }
+        InsertEffectConfig::Compressor {
+            threshold_db,
+            ratio,
+            attack_ms,
+            release_ms,
+            makeup_gain_db,
+            dry_wet,
+        } => {
+            out.push_str(&format!(
+                "{indent}<Compressor2 Id=\"{dev_id}\" Threshold=\"{threshold_db:.2}\" Ratio=\"{ratio:.2}\" Attack=\"{attack_ms:.3}\" Release=\"{release_ms:.2}\" Makeup=\"{makeup_gain_db:.2}\" DryWet=\"{dry_wet:.4}\"><UserName Value=\"Compressor\"/></Compressor2>\n"
+            ));
+        }
+        InsertEffectConfig::MultibandDynamics {
+            amount,
+            time_macro,
+            input_gain_db,
+            output_gain_db,
+        } => {
+            out.push_str(&format!(
+                "{indent}<MultibandDynamics Id=\"{dev_id}\" Amount=\"{amount:.4}\" Time=\"{time_macro:.4}\" InputGain=\"{input_gain_db:.2}\" OutputGain=\"{output_gain_db:.2}\"><UserName Value=\"Multiband Dynamics\"/></MultibandDynamics>\n"
+            ));
+        }
+        InsertEffectConfig::GenericDevice {
+            device_type,
+            params,
+        } => {
+            let meta_json = sanitize_xml_comment(
+                &serde_json::json!({ "device_type": device_type, "params": params }).to_string(),
+            );
+            out.push_str(&format!("{indent}<!-- oxide-device:{meta_json} -->\n"));
+        }
+    }
+}
+
+fn parse_insert_fx_from_devices_node(devs: &XmlNode) -> Vec<InsertEffectConfig> {
+    let mut insert_fx = Vec::new();
+    for dev in &devs.children {
+        if dev.tag == "__comment__" {
+            if let Some(rest) = dev.text.trim().strip_prefix("oxide-device:") {
+                if let Ok(val) = serde_json::from_str::<serde_json::Value>(rest.trim()) {
+                    if let Some(device_type) = val.get("device_type").and_then(|v| v.as_str()) {
+                        let params = val
+                            .get("params")
+                            .and_then(|p| serde_json::from_value::<HashMap<String, f32>>(p.clone()).ok())
+                            .unwrap_or_default();
+                        insert_fx.push(InsertEffectConfig::GenericDevice {
+                            device_type: device_type.to_string(),
+                            params,
+                        });
+                    }
+                }
+            }
+            continue;
+        }
+        match dev.tag.as_str() {
+            "Saturator" => {
+                let drive = read_manual_or_attr_f32(dev, "Drive", "Drive").unwrap_or(4.0);
+                let curve = read_manual_or_attr_f32(dev, "Curve", "Curve").unwrap_or(0.5);
+                let out_gain = read_manual_or_attr_f32(dev, "OutputGain", "OutputGain").unwrap_or(0.0);
+                insert_fx.push(InsertEffectConfig::Saturator {
+                    drive_db: drive,
+                    curve,
+                    output_gain_db: out_gain,
+                });
+            }
+            "Roar" => {
+                let drive = read_manual_or_attr_f32(dev, "Drive", "Drive").unwrap_or(6.0);
+                let tone = read_manual_or_attr_f32(dev, "Tone", "Tone").unwrap_or(0.0);
+                let dry_wet = read_manual_or_attr_f32(dev, "DryWet", "DryWet").unwrap_or(1.0);
+                let out_gain = read_manual_or_attr_f32(dev, "OutputGain", "OutputGain").unwrap_or(0.0);
+                insert_fx.push(InsertEffectConfig::Roar {
+                    drive_db: drive,
+                    tone,
+                    dry_wet,
+                    output_gain_db: out_gain,
+                });
+            }
+            "Delay" => {
+                let time = read_manual_or_attr_f32(dev, "Time", "Time").unwrap_or(0.5);
+                let fb = read_manual_or_attr_f32(dev, "Feedback", "Feedback").unwrap_or(0.4);
+                let mix = read_manual_or_attr_f32(dev, "Mix", "Mix")
+                    .or_else(|| read_manual_or_attr_f32(dev, "DryWet", "DryWet"))
+                    .unwrap_or(0.3);
+                insert_fx.push(InsertEffectConfig::TempoDelay {
+                    time_beats: time,
+                    feedback: fb,
+                    mix,
+                });
+            }
+            "Reverb" => {
+                let decay = read_manual_or_attr_f32(dev, "Decay", "Decay")
+                    .or_else(|| read_manual_or_attr_f32(dev, "DecayTime", "DecayTime"))
+                    .unwrap_or(1500.0);
+                let mix = read_manual_or_attr_f32(dev, "Mix", "Mix")
+                    .or_else(|| read_manual_or_attr_f32(dev, "DryWet", "DryWet"))
+                    .unwrap_or(0.25);
+                let ir_path = parse_oxide_comment_json(dev, "oxide-reverb:")
+                    .and_then(|v| v.get("ir_path").and_then(|p| p.as_str()).map(|s| s.to_string()));
+                insert_fx.push(InsertEffectConfig::Reverb {
+                    ir_path,
+                    decay_ms: decay,
+                    mix,
+                });
+            }
+            "Eq8" => {
+                let params = parse_oxide_comment_json(dev, "oxide-eq8:")
+                    .and_then(|v| serde_json::from_value::<HashMap<String, f32>>(v).ok())
+                    .unwrap_or_default();
+                insert_fx.push(InsertEffectConfig::EqEight { params });
+            }
+            "GlueCompressor" => {
+                insert_fx.push(InsertEffectConfig::GlueCompressor {
+                    threshold_db: read_manual_or_attr_f32(dev, "Threshold", "Threshold").unwrap_or(0.0),
+                    ratio: read_manual_or_attr_f32(dev, "Ratio", "Ratio").unwrap_or(4.0),
+                    attack_ms: read_manual_or_attr_f32(dev, "Attack", "Attack").unwrap_or(1.0),
+                    release_s: read_manual_or_attr_f32(dev, "Release", "Release").unwrap_or(0.2),
+                    makeup_gain_db: read_manual_or_attr_f32(dev, "Makeup", "Makeup").unwrap_or(0.0),
+                    dry_wet: read_manual_or_attr_f32(dev, "DryWet", "DryWet").unwrap_or(1.0),
+                });
+            }
+            "AutoFilter" => {
+                insert_fx.push(InsertEffectConfig::AutoFilter {
+                    cutoff_hz: read_manual_or_attr_f32(dev, "Cutoff", "Cutoff").unwrap_or(1000.0),
+                    resonance: read_manual_or_attr_f32(dev, "Resonance", "Resonance").unwrap_or(0.2),
+                    dry_wet: read_manual_or_attr_f32(dev, "DryWet", "DryWet").unwrap_or(1.0),
+                });
+            }
+            "Compressor2" | "Compressor" => {
+                insert_fx.push(InsertEffectConfig::Compressor {
+                    threshold_db: read_manual_or_attr_f32(dev, "Threshold", "Threshold").unwrap_or(-12.0),
+                    ratio: read_manual_or_attr_f32(dev, "Ratio", "Ratio").unwrap_or(4.0),
+                    attack_ms: read_manual_or_attr_f32(dev, "Attack", "Attack").unwrap_or(5.0),
+                    release_ms: read_manual_or_attr_f32(dev, "Release", "Release").unwrap_or(50.0),
+                    makeup_gain_db: read_manual_or_attr_f32(dev, "Makeup", "Makeup").unwrap_or(0.0),
+                    dry_wet: read_manual_or_attr_f32(dev, "DryWet", "DryWet").unwrap_or(1.0),
+                });
+            }
+            "MultibandDynamics" => {
+                insert_fx.push(InsertEffectConfig::MultibandDynamics {
+                    amount: read_manual_or_attr_f32(dev, "Amount", "Amount").unwrap_or(1.0),
+                    time_macro: read_manual_or_attr_f32(dev, "Time", "Time").unwrap_or(1.0),
+                    input_gain_db: read_manual_or_attr_f32(dev, "InputGain", "InputGain").unwrap_or(0.0),
+                    output_gain_db: read_manual_or_attr_f32(dev, "OutputGain", "OutputGain").unwrap_or(0.0),
+                });
+            }
+            _ => {}
+        }
+    }
+    insert_fx
+}
+
+fn parse_track_automation_envelopes(track_node: &XmlNode) -> Vec<AutomationLane> {
+    let mut lanes = Vec::new();
+    let Some(auto_envs) = track_node.find_child("AutomationEnvelopes") else {
+        return lanes;
+    };
+    let envelopes = auto_envs.find_descendants("AutomationEnvelope");
+    for (env_idx, env_node) in envelopes.iter().enumerate() {
+        let oxide_meta = parse_oxide_comment_json(env_node, "oxide-automation:");
+        let pointee_id = env_node
+            .find_child("EnvelopeTarget")
+            .and_then(|et| et.find_child("PointeeId"))
+            .and_then(|p| p.get_attr_or_text("Value"))
+            .and_then(|v| v.parse::<u32>().ok())
+            .unwrap_or((env_idx + 1) as u32);
+
+        let param_id = oxide_meta
+            .as_ref()
+            .and_then(|m| m.get("parameter_id").and_then(|v| v.as_u64()))
+            .map(|v| v as u32)
+            .unwrap_or(pointee_id);
+        let param_name = oxide_meta
+            .as_ref()
+            .and_then(|m| m.get("parameter_name").and_then(|v| v.as_str()))
+            .map(|s| s.to_string())
+            .unwrap_or_else(|| format!("envelope_{}", pointee_id));
+
+        let mut lane = AutomationLane::new(param_id, param_name);
+        if let Some(events_node) = env_node
+            .find_child("Automation")
+            .and_then(|a| a.find_child("Events"))
+        {
+            let has_oxide_meta = oxide_meta.is_some();
+            for ev in &events_node.children {
+                if ev.tag != "FloatEvent" && ev.tag != "IntEvent" && ev.tag != "BoolEvent" {
+                    continue;
+                }
+                let Some(beat) = ev.get_attr("Time").and_then(|v| v.parse::<f64>().ok()) else {
+                    continue;
+                };
+                if !has_oxide_meta && beat < 0.0 {
+                    continue;
+                }
+                let Some(val) = ev.get_attr("Value").and_then(|v| v.parse::<f32>().ok()) else {
+                    continue;
+                };
+                let curve = ev
+                    .get_attr("Curve")
+                    .and_then(|v| v.parse::<f32>().ok())
+                    .unwrap_or(0.0);
+                let mut pt = AutomationPoint::new(beat, val, curve);
+                pt.curve_type = AutomationCurveType::from_curve_tension(curve);
+                if let (Some(cx1), Some(cy1), Some(cx2), Some(cy2)) = (
+                    ev.get_attr("CurveControl1X").and_then(|v| v.parse::<f32>().ok()),
+                    ev.get_attr("CurveControl1Y").and_then(|v| v.parse::<f32>().ok()),
+                    ev.get_attr("CurveControl2X").and_then(|v| v.parse::<f32>().ok()),
+                    ev.get_attr("CurveControl2Y").and_then(|v| v.parse::<f32>().ok()),
+                ) {
+                    pt.bezier = Some(CubicBezierHandle::new(cx1, cy1, cx2, cy2));
+                }
+                lane.add_point(pt);
+            }
+            if has_oxide_meta || lane.points.len() >= 2 {
+                lanes.push(lane);
+            }
+        }
+    }
+    lanes
+}
+
 impl DAWProject {
     /// Emit a complete, valid Ableton Live 12 XML string.
     pub fn to_als_xml(&self) -> String {
-        let mut out = String::with_capacity(16384);
-        out.push_str("<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n");
-        out.push_str("<Ableton MajorVersion=\"5\" MinorVersion=\"12.0_12049\" SchemaChangeCount=\"3\" Creator=\"Oxide Studio\" Revision=\"oxide-12.0\">\n");
-        out.push_str("  <LiveSet>\n");
+        let max_existing_id = self
+            .tracks
+            .iter()
+            .map(|t| t.id)
+            .chain(self.scenes.iter().map(|s| s.id))
+            .max()
+            .unwrap_or(0);
+        let mut next_id: u32 = max_existing_id.saturating_add(100);
+        let mut body = String::with_capacity(16384);
 
-        // Metadata & Annotation
-        out.push_str("    <Annotation Value=\"");
-        out.push_str(&xml_escape(&self.metadata.name));
-        out.push_str("\"/>\n");
-        out.push_str("    <Metadata>\n");
-        out.push_str(&format!(
-            "      <Name Value=\"{}\"/>\n",
-            xml_escape(&self.metadata.name)
-        ));
-        out.push_str(&format!(
-            "      <Author Value=\"{}\"/>\n",
-            xml_escape(&self.metadata.author)
-        ));
-        out.push_str(&format!(
-            "      <Version Value=\"{}\"/>\n",
-            xml_escape(&self.metadata.version)
-        ));
-        out.push_str(&format!(
-            "      <CreatedAt Value=\"{}\"/>\n",
-            xml_escape(&self.metadata.created_at_utc)
-        ));
-        out.push_str(&format!(
-            "      <ModifiedAt Value=\"{}\"/>\n",
-            xml_escape(&self.metadata.modified_at_utc)
-        ));
-        out.push_str("    </Metadata>\n");
+        // Metadata & Annotation (Oxide extra fields in XML comment for clean Live 12 compatibility)
+        body.push_str("    <Annotation Value=\"");
+        body.push_str(&xml_escape(&self.metadata.name));
+        body.push_str("\"/>\n");
+        let meta_json = sanitize_xml_comment(
+            &serde_json::json!({
+                "name": self.metadata.name,
+                "author": self.metadata.author,
+                "version": self.metadata.version,
+                "created_at_utc": self.metadata.created_at_utc,
+                "modified_at_utc": self.metadata.modified_at_utc,
+            })
+            .to_string(),
+        );
+        body.push_str(&format!("    <!-- oxide-metadata:{meta_json} -->\n"));
 
         // Tempo
-        out.push_str("    <Tempo>\n");
-        out.push_str(&format!(
+        body.push_str("    <Tempo>\n");
+        body.push_str(&format!(
             "      <Manual Value=\"{:.4}\"/>\n",
             self.transport.bpm
         ));
-        out.push_str("    </Tempo>\n");
+        body.push_str("    </Tempo>\n");
 
         // Time Signature
-        out.push_str("    <TimeSignature>\n");
-        out.push_str("      <TimeSignatures>\n");
-        out.push_str("        <RemoteableTimeSignature>\n");
-        out.push_str(&format!(
+        body.push_str("    <TimeSignature>\n");
+        body.push_str("      <TimeSignatures>\n");
+        let ts_id = alloc_id(&mut next_id);
+        body.push_str(&format!("        <RemoteableTimeSignature Id=\"{ts_id}\">\n"));
+        body.push_str(&format!(
             "          <Numerator Value=\"{}\"/>\n",
             self.transport.time_signature_numerator
         ));
-        out.push_str(&format!(
+        body.push_str(&format!(
             "          <Denominator Value=\"{}\"/>\n",
             self.transport.time_signature_denominator
         ));
-        out.push_str("        </RemoteableTimeSignature>\n");
-        out.push_str("      </TimeSignatures>\n");
-        out.push_str("    </TimeSignature>\n");
+        body.push_str("        </RemoteableTimeSignature>\n");
+        body.push_str("      </TimeSignatures>\n");
+        body.push_str("    </TimeSignature>\n");
 
         // Transport
         let loop_len = (self.transport.loop_end_beat - self.transport.loop_start_beat).max(0.0);
-        out.push_str("    <Transport>\n");
-        out.push_str(&format!(
+        body.push_str("    <Transport>\n");
+        body.push_str(&format!(
             "      <LoopOn Value=\"{}\"/>\n",
             self.transport.loop_enabled
         ));
-        out.push_str(&format!(
+        body.push_str(&format!(
             "      <LoopStart Value=\"{:.4}\"/>\n",
             self.transport.loop_start_beat
         ));
-        out.push_str(&format!(
+        body.push_str(&format!(
             "      <LoopLength Value=\"{:.4}\"/>\n",
             loop_len
         ));
-        out.push_str("    </Transport>\n");
+        body.push_str("    </Transport>\n");
 
         // Master Track
-        out.push_str("    <MasterTrack Id=\"0\">\n");
-        out.push_str("      <Name>\n");
-        out.push_str("        <EffectiveName Value=\"Master\"/>\n");
-        out.push_str("        <UserName Value=\"Master\"/>\n");
-        out.push_str("      </Name>\n");
-        out.push_str("      <DeviceChain>\n");
-        out.push_str("        <Mixer>\n");
-        out.push_str(&format!(
-            "          <Volume><Manual Value=\"{:.4}\"/></Volume>\n",
-            self.master_track.volume_db
+        let master_vol_lin = db_to_ableton_linear(self.master_track.volume_db);
+        body.push_str("    <MasterTrack Id=\"0\">\n");
+        body.push_str("      <Name>\n");
+        body.push_str("        <EffectiveName Value=\"Master\"/>\n");
+        body.push_str("        <UserName Value=\"Master\"/>\n");
+        body.push_str("      </Name>\n");
+        let master_meta = sanitize_xml_comment(
+            &serde_json::to_string(&self.master_track).unwrap_or_else(|_| "{}".to_string()),
+        );
+        body.push_str(&format!("      <!-- oxide-master:{master_meta} -->\n"));
+        body.push_str("      <DeviceChain>\n");
+        body.push_str("        <Mixer>\n");
+        body.push_str(&format!(
+            "          <Volume><Manual Value=\"{}\"/></Volume>\n",
+            format_ableton_linear(master_vol_lin)
         ));
-        out.push_str(&format!(
+        body.push_str(&format!(
             "          <Pan><Manual Value=\"{:.4}\"/></Pan>\n",
             self.master_track.pan
         ));
-        out.push_str("        </Mixer>\n");
-        out.push_str("      </DeviceChain>\n");
-        out.push_str("    </MasterTrack>\n");
+        body.push_str("        </Mixer>\n");
+        body.push_str("        <Devices>\n");
+        if self.master_track.saturator_enabled {
+            let fx = InsertEffectConfig::Saturator {
+                drive_db: self.master_track.saturator_drive_db,
+                curve: self.master_track.saturator_curve,
+                output_gain_db: self.master_track.saturator_output_db,
+            };
+            write_insert_fx_xml(&mut body, &fx, "          ", &mut next_id);
+        }
+        if self.master_track.delay_mix > 0.0 {
+            let fx = InsertEffectConfig::TempoDelay {
+                time_beats: self.master_track.delay_time_beats,
+                feedback: self.master_track.delay_feedback,
+                mix: self.master_track.delay_mix,
+            };
+            write_insert_fx_xml(&mut body, &fx, "          ", &mut next_id);
+        }
+        if self.master_track.reverb_mix > 0.0 {
+            let fx = InsertEffectConfig::Reverb {
+                ir_path: None,
+                decay_ms: self.master_track.reverb_decay_ms,
+                mix: self.master_track.reverb_mix,
+            };
+            write_insert_fx_xml(&mut body, &fx, "          ", &mut next_id);
+        }
+        body.push_str("        </Devices>\n");
+        body.push_str("      </DeviceChain>\n");
+        body.push_str("    </MasterTrack>\n");
 
         // Tracks
-        out.push_str("    <Tracks>\n");
+        body.push_str("    <Tracks>\n");
         for track in &self.tracks {
             let (tag, color_idx) = match track.track_type {
                 TrackType::Audio => ("AudioTrack", 24),
                 TrackType::DrumRack => ("MidiTrack", 48),
                 TrackType::MidiSynth => ("MidiTrack", 12),
+                TrackType::Return => ("ReturnTrack", 18),
+                TrackType::Group => ("GroupTrack", 30),
             };
 
-            out.push_str(&format!("      <{} Id=\"{}\">\n", tag, track.id));
-            out.push_str("        <Name>\n");
-            out.push_str(&format!(
+            body.push_str(&format!("      <{} Id=\"{}\">\n", tag, track.id));
+            body.push_str("        <Name>\n");
+            body.push_str(&format!(
                 "          <EffectiveName Value=\"{}\"/>\n",
                 xml_escape(&track.name)
             ));
-            out.push_str(&format!(
+            body.push_str(&format!(
                 "          <UserName Value=\"{}\"/>\n",
                 xml_escape(&track.name)
             ));
-            out.push_str("        </Name>\n");
-            out.push_str(&format!("        <Color Value=\"{}\"/>\n", color_idx));
-            out.push_str(&format!(
-                "        <ColorHex Value=\"{}\"/>\n",
-                xml_escape(&track.color_hex)
-            ));
-            out.push_str(&format!(
-                "        <TrackType Value=\"{:?}\"/>\n",
-                track.track_type
-            ));
+            body.push_str("        </Name>\n");
+            body.push_str(&format!("        <Color Value=\"{}\"/>\n", color_idx));
+            let track_meta = sanitize_xml_comment(
+                &serde_json::json!({
+                    "track_type": format!("{:?}", track.track_type),
+                    "color_hex": track.color_hex,
+                })
+                .to_string(),
+            );
+            body.push_str(&format!("        <!-- oxide-track:{track_meta} -->\n"));
 
-            out.push_str("        <DeviceChain>\n");
-            out.push_str("          <Mixer>\n");
-            out.push_str(&format!(
-                "            <Volume><Manual Value=\"{:.4}\"/></Volume>\n",
-                track.mixer.volume_db
+            body.push_str("        <DeviceChain>\n");
+            body.push_str("          <Mixer>\n");
+            let trk_vol_lin = db_to_ableton_linear(track.mixer.volume_db);
+            body.push_str(&format!(
+                "            <Volume><Manual Value=\"{}\"/></Volume>\n",
+                format_ableton_linear(trk_vol_lin)
             ));
-            out.push_str(&format!(
+            body.push_str(&format!(
                 "            <Pan><Manual Value=\"{:.4}\"/></Pan>\n",
                 track.mixer.pan
             ));
-            out.push_str(&format!(
+            body.push_str(&format!(
                 "            <On><Manual Value=\"{}\"/></On>\n",
                 !track.mixer.mute
             ));
-            out.push_str(&format!(
+            body.push_str(&format!(
                 "            <SoloSink><Manual Value=\"{}\"/></SoloSink>\n",
                 track.mixer.solo
             ));
-            out.push_str(&format!(
+            body.push_str(&format!(
                 "            <Speaker><Manual Value=\"{}\"/></Speaker>\n",
                 !track.mixer.mute
             ));
-            out.push_str(&format!(
+            body.push_str(&format!(
                 "            <Arm><Manual Value=\"{}\"/></Arm>\n",
                 track.mixer.arm
             ));
-            out.push_str("            <Sends>\n");
-            out.push_str(&format!(
-                "              <TrackSendHolder Id=\"0\"><Send><Manual Value=\"{:.4}\"/></Send></TrackSendHolder>\n",
-                track.mixer.send_a_db
-            ));
-            out.push_str(&format!(
-                "              <TrackSendHolder Id=\"1\"><Send><Manual Value=\"{:.4}\"/></Send></TrackSendHolder>\n",
-                track.mixer.send_b_db
-            ));
-            out.push_str("            </Sends>\n");
-            out.push_str("          </Mixer>\n");
+            body.push_str("            <Sends>\n");
+            for (send_idx, send_db) in track.mixer.effective_sends_db().into_iter().enumerate() {
+                let send_lin = db_to_ableton_linear(send_db);
+                body.push_str(&format!(
+                    "              <TrackSendHolder Id=\"{send_idx}\"><Send><Manual Value=\"{}\"/></Send></TrackSendHolder>\n",
+                    format_ableton_linear(send_lin)
+                ));
+            }
+            body.push_str("            </Sends>\n");
+            body.push_str("          </Mixer>\n");
 
-            out.push_str("          <MainSequencer>\n");
-            out.push_str("            <ClipSlotList>\n");
-            for (slot_idx, maybe_clip) in track.session_clips.iter().enumerate() {
-                out.push_str(&format!("              <ClipSlot Id=\"{}\">\n", slot_idx));
-                out.push_str("                <ClipSlot>\n");
-                out.push_str("                  <Value>\n");
-                if let Some(clip) = maybe_clip {
-                    match &clip.pattern {
-                        ClipPattern::Midi(midi_pat) => {
-                            out.push_str("                    <MidiClip>\n");
-                            out.push_str(&format!(
-                                "                      <LomId Value=\"{}\"/>\n",
-                                clip.id
-                            ));
-                            out.push_str(&format!(
-                                "                      <Name Value=\"{}\"/>\n",
-                                xml_escape(&clip.name)
-                            ));
-                            out.push_str(&format!(
-                                "                      <ColorHex Value=\"{}\"/>\n",
-                                xml_escape(&clip.color_hex)
-                            ));
-                            out.push_str("                      <Loop>\n");
-                            out.push_str(&format!(
-                                "                        <LoopOn Value=\"{}\"/>\n",
-                                clip.loop_enabled
-                            ));
-                            out.push_str(&format!(
-                                "                        <LoopStart Value=\"{:.4}\"/>\n",
-                                clip.loop_start_beat
-                            ));
-                            out.push_str(&format!(
-                                "                        <LoopEnd Value=\"{:.4}\"/>\n",
-                                clip.loop_end_beat
-                            ));
-                            out.push_str(&format!(
-                                "                        <StartRelative Value=\"{:.4}\"/>\n",
-                                clip.loop_start_beat
-                            ));
-                            out.push_str(&format!(
-                                "                        <OutMarker Value=\"{:.4}\"/>\n",
-                                clip.loop_end_beat
-                            ));
-                            out.push_str(&format!(
-                                "                        <HiddenLoopStart Value=\"{:.4}\"/>\n",
-                                clip.loop_start_beat
-                            ));
-                            out.push_str(&format!(
-                                "                        <HiddenLoopEnd Value=\"{:.4}\"/>\n",
-                                clip.loop_end_beat
-                            ));
-                            out.push_str("                      </Loop>\n");
-                            out.push_str(&format!(
-                                "                      <CurrentStart Value=\"{:.4}\"/>\n",
-                                clip.loop_start_beat
-                            ));
-                            out.push_str(&format!(
-                                "                      <CurrentEnd Value=\"{:.4}\"/>\n",
-                                clip.loop_end_beat
-                            ));
-
-                            out.push_str("                      <Notes>\n");
-                            out.push_str("                        <KeyTracks>\n");
-                            let mut notes_by_key: BTreeMap<u8, Vec<&MidiNote>> = BTreeMap::new();
-                            for note in &midi_pat.notes {
-                                notes_by_key.entry(note.pitch).or_default().push(note);
+            if track.track_type != TrackType::Return && track.track_type != TrackType::Group {
+                body.push_str("          <MainSequencer>\n");
+                body.push_str("            <ClipSlotList>\n");
+                for (slot_idx, maybe_clip) in track.session_clips.iter().enumerate() {
+                    body.push_str(&format!("              <ClipSlot Id=\"{}\">\n", slot_idx));
+                    body.push_str("                <ClipSlot>\n");
+                    body.push_str("                  <Value>\n");
+                    if let Some(clip) = maybe_clip {
+                        match &clip.pattern {
+                            ClipPattern::Midi(midi_pat) => {
+                                write_midi_clip_xml(
+                                    &mut body,
+                                    clip.id,
+                                    &clip.name,
+                                    &clip.color_hex,
+                                    clip.loop_enabled,
+                                    clip.loop_start_beat,
+                                    clip.loop_end_beat,
+                                    clip.loop_start_beat,
+                                    clip.loop_end_beat,
+                                    &midi_pat.notes,
+                                    "                    ",
+                                    &mut next_id,
+                                );
                             }
-                            for (pitch, key_notes) in notes_by_key {
-                                out.push_str("                          <KeyTrack>\n");
-                                out.push_str(&format!(
-                                    "                            <MidiKey Value=\"{}\"/>\n",
-                                    pitch
-                                ));
-                                out.push_str("                            <Notes>\n");
-                                for n in key_notes {
-                                    out.push_str(&format!(
-                                        "                              <MidiNoteEvent Time=\"{:.4}\" Duration=\"{:.4}\" Velocity=\"{:.1}\" OffVelocity=\"64\" Probability=\"{:.2}\" IsEnabled=\"true\"/>\n",
-                                        n.start_beat, n.duration_beats, n.velocity as f32, n.probability
-                                    ));
-                                }
-                                out.push_str("                            </Notes>\n");
-                                out.push_str("                          </KeyTrack>\n");
+                            ClipPattern::Drum(drum_pat) => {
+                                let notes = drum_pattern_to_midi_notes(drum_pat);
+                                write_midi_clip_xml(
+                                    &mut body,
+                                    clip.id,
+                                    &clip.name,
+                                    &clip.color_hex,
+                                    clip.loop_enabled,
+                                    clip.loop_start_beat,
+                                    clip.loop_end_beat,
+                                    clip.loop_start_beat,
+                                    clip.loop_end_beat,
+                                    &notes,
+                                    "                    ",
+                                    &mut next_id,
+                                );
                             }
-                            out.push_str("                        </KeyTracks>\n");
-                            out.push_str("                      </Notes>\n");
-                            out.push_str("                    </MidiClip>\n");
+                            ClipPattern::Audio(audio_data) => {
+                                write_audio_clip_xml(
+                                    &mut body,
+                                    clip.id,
+                                    &clip.name,
+                                    &clip.color_hex,
+                                    clip.loop_enabled,
+                                    clip.loop_start_beat,
+                                    clip.loop_end_beat,
+                                    clip.loop_start_beat,
+                                    clip.loop_end_beat,
+                                    &audio_data.file_path,
+                                    "                    ",
+                                    &mut next_id,
+                                );
+                            }
                         }
-                        ClipPattern::Drum(drum_pat) => {
-                            out.push_str("                    <MidiClip>\n");
-                            out.push_str(&format!(
-                                "                      <LomId Value=\"{}\"/>\n",
-                                clip.id
-                            ));
-                            out.push_str(&format!(
-                                "                      <Name Value=\"{}\"/>\n",
-                                xml_escape(&clip.name)
-                            ));
-                            out.push_str(&format!(
-                                "                      <ColorHex Value=\"{}\"/>\n",
-                                xml_escape(&clip.color_hex)
-                            ));
-                            out.push_str("                      <Loop>\n");
-                            out.push_str(&format!(
-                                "                        <LoopOn Value=\"{}\"/>\n",
-                                clip.loop_enabled
-                            ));
-                            out.push_str(&format!(
-                                "                        <LoopStart Value=\"{:.4}\"/>\n",
-                                clip.loop_start_beat
-                            ));
-                            out.push_str(&format!(
-                                "                        <LoopEnd Value=\"{:.4}\"/>\n",
-                                clip.loop_end_beat
-                            ));
-                            out.push_str("                      </Loop>\n");
-
-                            out.push_str("                      <Notes>\n");
-                            out.push_str("                        <KeyTracks>\n");
-                            let mut drum_notes_by_key: BTreeMap<u8, Vec<(f64, f64, u8)>> =
-                                BTreeMap::new();
-                            for trk in &drum_pat.tracks {
-                                for (step_idx, step) in trk.steps.iter().enumerate() {
-                                    if step.active {
-                                        let time =
-                                            step_idx as f64 * drum_pat.step_duration_beats;
-                                        let dur = drum_pat.step_duration_beats;
-                                        drum_notes_by_key.entry(step.pitch).or_default().push((
-                                            time,
-                                            dur,
-                                            step.velocity,
-                                        ));
+                    }
+                    body.push_str("                  </Value>\n");
+                    body.push_str("                </ClipSlot>\n");
+                    body.push_str("              </ClipSlot>\n");
+                }
+                body.push_str("            </ClipSlotList>\n");
+                if !track.arrangement_clips.is_empty() {
+                    match track.track_type {
+                        TrackType::Audio => {
+                            body.push_str("            <Sample>\n");
+                            body.push_str("              <ArrangerAutomation>\n");
+                            body.push_str("                <Events>\n");
+                            for clip in &track.arrangement_clips {
+                                if let ClipPattern::Audio(audio_data) = &clip.pattern {
+                                    write_audio_clip_xml(
+                                        &mut body,
+                                        clip.id,
+                                        &clip.name,
+                                        &track.color_hex,
+                                        true,
+                                        0.0,
+                                        audio_data.length_beats.max(0.0625),
+                                        clip.timeline_start_beat,
+                                        clip.timeline_end_beat(),
+                                        &audio_data.file_path,
+                                        "                  ",
+                                        &mut next_id,
+                                    );
+                                }
+                            }
+                            body.push_str("                </Events>\n");
+                            body.push_str("              </ArrangerAutomation>\n");
+                            body.push_str("            </Sample>\n");
+                        }
+                        _ => {
+                            body.push_str("            <ClipTimeable>\n");
+                            body.push_str("              <ArrangerAutomation>\n");
+                            body.push_str("                <Events>\n");
+                            for clip in &track.arrangement_clips {
+                                match &clip.pattern {
+                                    ClipPattern::Midi(midi_pat) => {
+                                        write_midi_clip_xml(
+                                            &mut body,
+                                            clip.id,
+                                            &clip.name,
+                                            &track.color_hex,
+                                            true,
+                                            0.0,
+                                            midi_pat.length_beats.max(0.0625),
+                                            clip.timeline_start_beat,
+                                            clip.timeline_end_beat(),
+                                            &midi_pat.notes,
+                                            "                  ",
+                                            &mut next_id,
+                                        );
                                     }
+                                    ClipPattern::Drum(drum_pat) => {
+                                        let notes = drum_pattern_to_midi_notes(drum_pat);
+                                        write_midi_clip_xml(
+                                            &mut body,
+                                            clip.id,
+                                            &clip.name,
+                                            &track.color_hex,
+                                            true,
+                                            0.0,
+                                            drum_pat.length_beats().max(0.0625),
+                                            clip.timeline_start_beat,
+                                            clip.timeline_end_beat(),
+                                            &notes,
+                                            "                  ",
+                                            &mut next_id,
+                                        );
+                                    }
+                                    ClipPattern::Audio(_) => {}
                                 }
                             }
-                            for (pitch, steps) in drum_notes_by_key {
-                                out.push_str("                          <KeyTrack>\n");
-                                out.push_str(&format!(
-                                    "                            <MidiKey Value=\"{}\"/>\n",
-                                    pitch
-                                ));
-                                out.push_str("                            <Notes>\n");
-                                for (time, dur, vel) in steps {
-                                    out.push_str(&format!(
-                                        "                              <MidiNoteEvent Time=\"{:.4}\" Duration=\"{:.4}\" Velocity=\"{:.1}\" OffVelocity=\"64\" Probability=\"1.00\" IsEnabled=\"true\"/>\n",
-                                        time, dur, vel as f32
-                                    ));
-                                }
-                                out.push_str("                            </Notes>\n");
-                                out.push_str("                          </KeyTrack>\n");
-                            }
-                            out.push_str("                        </KeyTracks>\n");
-                            out.push_str("                      </Notes>\n");
-                            out.push_str("                    </MidiClip>\n");
-                        }
-                        ClipPattern::Audio(audio_data) => {
-                            out.push_str("                    <AudioClip>\n");
-                            out.push_str(&format!(
-                                "                      <LomId Value=\"{}\"/>\n",
-                                clip.id
-                            ));
-                            out.push_str(&format!(
-                                "                      <Name Value=\"{}\"/>\n",
-                                xml_escape(&clip.name)
-                            ));
-                            out.push_str(&format!(
-                                "                      <ColorHex Value=\"{}\"/>\n",
-                                xml_escape(&clip.color_hex)
-                            ));
-                            out.push_str("                      <Loop>\n");
-                            out.push_str(&format!(
-                                "                        <LoopOn Value=\"{}\"/>\n",
-                                clip.loop_enabled
-                            ));
-                            out.push_str(&format!(
-                                "                        <LoopStart Value=\"{:.4}\"/>\n",
-                                clip.loop_start_beat
-                            ));
-                            out.push_str(&format!(
-                                "                        <LoopEnd Value=\"{:.4}\"/>\n",
-                                clip.loop_end_beat
-                            ));
-                            out.push_str("                      </Loop>\n");
-                            out.push_str("                      <SampleRef>\n");
-                            out.push_str("                        <FileRef>\n");
-                            out.push_str(&format!(
-                                "                          <Path Value=\"{}\"/>\n",
-                                xml_escape(&audio_data.file_path)
-                            ));
-                            out.push_str(&format!(
-                                "                          <Name Value=\"{}\"/>\n",
-                                xml_escape(&audio_data.file_path)
-                            ));
-                            out.push_str("                        </FileRef>\n");
-                            out.push_str("                      </SampleRef>\n");
-                            out.push_str("                    </AudioClip>\n");
+                            body.push_str("                </Events>\n");
+                            body.push_str("              </ArrangerAutomation>\n");
+                            body.push_str("            </ClipTimeable>\n");
                         }
                     }
                 }
-                out.push_str("                  </Value>\n");
-                out.push_str("                </ClipSlot>\n");
-                out.push_str("              </ClipSlot>\n");
+                body.push_str("          </MainSequencer>\n");
             }
-            out.push_str("            </ClipSlotList>\n");
-            if !track.arrangement_clips.is_empty() {
-                match track.track_type {
-                    TrackType::Audio => {
-                        out.push_str("            <Sample>\n");
-                        out.push_str("              <ArrangerAutomation>\n");
-                        out.push_str("                <Events>\n");
-                        for clip in &track.arrangement_clips {
-                            if let ClipPattern::Audio(audio_data) = &clip.pattern {
-                                out.push_str("                  <AudioClip>\n");
-                                out.push_str(&format!("                    <LomId Value=\"{}\"/>\n", clip.id));
-                                out.push_str(&format!("                    <CurrentStart Value=\"{:.4}\"/>\n", clip.timeline_start_beat));
-                                out.push_str(&format!("                    <CurrentEnd Value=\"{:.4}\"/>\n", clip.timeline_end_beat()));
-                                out.push_str(&format!("                    <Name Value=\"{}\"/>\n", xml_escape(&clip.name)));
-                                out.push_str("                    <SampleRef><FileRef>\n");
-                                out.push_str(&format!("                      <Path Value=\"{}\"/>\n", xml_escape(&audio_data.file_path)));
-                                out.push_str(&format!("                      <RelativePath Value=\"{}\"/>\n", xml_escape(&audio_data.file_path)));
-                                out.push_str("                    </FileRef></SampleRef>\n");
-                                out.push_str("                  </AudioClip>\n");
-                            }
-                        }
-                        out.push_str("                </Events>\n");
-                        out.push_str("              </ArrangerAutomation>\n");
-                        out.push_str("            </Sample>\n");
-                    }
-                    _ => {
-                        out.push_str("            <ClipTimeable>\n");
-                        out.push_str("              <ArrangerAutomation>\n");
-                        out.push_str("                <Events>\n");
-                        for clip in &track.arrangement_clips {
-                            if let ClipPattern::Midi(midi_pat) = &clip.pattern {
-                                out.push_str("                  <MidiClip>\n");
-                                out.push_str(&format!("                    <LomId Value=\"{}\"/>\n", clip.id));
-                                out.push_str(&format!("                    <CurrentStart Value=\"{:.4}\"/>\n", clip.timeline_start_beat));
-                                out.push_str(&format!("                    <CurrentEnd Value=\"{:.4}\"/>\n", clip.timeline_end_beat()));
-                                out.push_str(&format!("                    <Name Value=\"{}\"/>\n", xml_escape(&clip.name)));
-                                out.push_str("                    <Notes><KeyTracks>\n");
-                                let mut notes_by_key: BTreeMap<u8, Vec<&MidiNote>> = BTreeMap::new();
-                                for note in &midi_pat.notes {
-                                    notes_by_key.entry(note.pitch).or_default().push(note);
-                                }
-                                for (pitch, key_notes) in notes_by_key {
-                                    out.push_str("                      <KeyTrack>\n");
-                                    out.push_str(&format!("                        <MidiKey Value=\"{}\"/>\n", pitch));
-                                    out.push_str("                        <Notes>\n");
-                                    for n in key_notes {
-                                        out.push_str(&format!(
-                                            "                          <MidiNoteEvent Time=\"{:.4}\" Duration=\"{:.4}\" Velocity=\"{:.1}\" OffVelocity=\"64\" Probability=\"{:.2}\" IsEnabled=\"true\"/>\n",
-                                            n.start_beat, n.duration_beats, n.velocity as f32, n.probability
-                                        ));
-                                    }
-                                    out.push_str("                        </Notes>\n");
-                                    out.push_str("                      </KeyTrack>\n");
-                                }
-                                out.push_str("                    </KeyTracks></Notes>\n");
-                                out.push_str("                  </MidiClip>\n");
-                            }
-                        }
-                        out.push_str("                </Events>\n");
-                        out.push_str("              </ArrangerAutomation>\n");
-                        out.push_str("            </ClipTimeable>\n");
-                    }
-                }
-            }
-            out.push_str("          </MainSequencer>\n");
 
             // Devices
-            out.push_str("          <Devices>\n");
+            body.push_str("          <Devices>\n");
             match track.track_type {
                 TrackType::DrumRack => {
-                    out.push_str("            <DrumGroupDevice>\n");
-                    out.push_str("              <UserName Value=\"909 Drum Rack\"/>\n");
-                    out.push_str("              <IsExpanded Value=\"true\"/>\n");
-                    out.push_str("            </DrumGroupDevice>\n");
+                    let dr_id = alloc_id(&mut next_id);
+                    body.push_str(&format!("            <DrumGroupDevice Id=\"{dr_id}\">\n"));
+                    body.push_str("              <UserName Value=\"909 Drum Rack\"/>\n");
+                    body.push_str("              <IsExpanded Value=\"true\"/>\n");
+                    body.push_str("            </DrumGroupDevice>\n");
                 }
                 TrackType::MidiSynth => {
-                    out.push_str("            <Wavetable>\n");
-                    out.push_str("              <UserName Value=\"Wavetable\"/>\n");
-                    out.push_str("              <IsExpanded Value=\"true\"/>\n");
-                    out.push_str("            </Wavetable>\n");
+                    let wt_id = alloc_id(&mut next_id);
+                    body.push_str(&format!("            <Wavetable Id=\"{wt_id}\">\n"));
+                    body.push_str("              <UserName Value=\"Wavetable\"/>\n");
+                    body.push_str("              <IsExpanded Value=\"true\"/>\n");
+                    body.push_str("            </Wavetable>\n");
                 }
-                TrackType::Audio => {}
+                TrackType::Audio | TrackType::Return | TrackType::Group => {}
             }
             for fx in &track.insert_fx {
-                match fx {
-                    InsertEffectConfig::Saturator { drive_db, .. } => {
-                        out.push_str(&format!(
-                            "            <Roar Drive=\"{:.2}\"><UserName Value=\"Roar\"/></Roar>\n",
-                            drive_db
-                        ));
-                    }
-                    InsertEffectConfig::TempoDelay {
-                        time_beats,
-                        feedback,
-                        ..
-                    } => {
-                        out.push_str(&format!(
-                            "            <Delay Time=\"{:.2}\" Feedback=\"{:.2}\"><UserName Value=\"Delay\"/></Delay>\n",
-                            time_beats, feedback
-                        ));
-                    }
-                    InsertEffectConfig::Reverb { decay_ms, .. } => {
-                        out.push_str(&format!(
-                            "            <Reverb Decay=\"{:.1}\"><UserName Value=\"Reverb\"/></Reverb>\n",
-                            decay_ms
-                        ));
-                    }
-                }
+                write_insert_fx_xml(&mut body, fx, "            ", &mut next_id);
             }
-            out.push_str("          </Devices>\n");
+            body.push_str("          </Devices>\n");
 
-            out.push_str("        </DeviceChain>\n");
-            out.push_str(&format!("      </{}>\n", tag));
+            body.push_str("        </DeviceChain>\n");
+
+            if !track.automation_lanes.is_empty() {
+                body.push_str("        <AutomationEnvelopes>\n");
+                body.push_str("          <Envelopes>\n");
+                for lane in &track.automation_lanes {
+                    let env_id = alloc_id(&mut next_id);
+                    let pointee_id = alloc_id(&mut next_id);
+                    let auto_meta = sanitize_xml_comment(
+                        &serde_json::json!({
+                            "parameter_id": lane.parameter_id,
+                            "parameter_name": lane.parameter_name,
+                        })
+                        .to_string(),
+                    );
+                    body.push_str(&format!("            <AutomationEnvelope Id=\"{env_id}\">\n"));
+                    body.push_str("              <EnvelopeTarget>\n");
+                    body.push_str(&format!("                <PointeeId Value=\"{pointee_id}\"/>\n"));
+                    body.push_str("              </EnvelopeTarget>\n");
+                    body.push_str(&format!("              <!-- oxide-automation:{auto_meta} -->\n"));
+                    body.push_str("              <Automation>\n");
+                    body.push_str("                <Events>\n");
+                    for pt in &lane.points {
+                        let ev_id = alloc_id(&mut next_id);
+                        let bezier_attrs = if let Some(b) = pt.bezier {
+                            format!(
+                                " CurveControl1X=\"{:.5}\" CurveControl1Y=\"{:.5}\" CurveControl2X=\"{:.5}\" CurveControl2Y=\"{:.5}\"",
+                                b.cx1, b.cy1, b.cx2, b.cy2
+                            )
+                        } else {
+                            String::new()
+                        };
+                        body.push_str(&format!(
+                            "                  <FloatEvent Id=\"{ev_id}\" Time=\"{:.4}\" Value=\"{:.6}\" Curve=\"{:.4}\"{bezier_attrs}/>\n",
+                            pt.beat, pt.value_norm, pt.curve
+                        ));
+                    }
+                    body.push_str("                </Events>\n");
+                    body.push_str("              </Automation>\n");
+                    body.push_str("            </AutomationEnvelope>\n");
+                }
+                body.push_str("          </Envelopes>\n");
+                body.push_str("        </AutomationEnvelopes>\n");
+            }
+
+            body.push_str(&format!("      </{}>\n", tag));
         }
-        out.push_str("    </Tracks>\n");
+        body.push_str("    </Tracks>\n");
 
         // Scenes
-        out.push_str("    <Scenes>\n");
+        body.push_str("    <Scenes>\n");
         for scene in &self.scenes {
-            out.push_str(&format!("      <Scene Id=\"{}\">\n", scene.id));
-            out.push_str(&format!(
+            body.push_str(&format!("      <Scene Id=\"{}\">\n", scene.id));
+            body.push_str(&format!(
                 "        <Name Value=\"{}\"/>\n",
                 xml_escape(&scene.name)
             ));
-            out.push_str(&format!(
+            body.push_str(&format!(
                 "        <Tempo Value=\"{:.4}\"/>\n",
                 self.transport.bpm
             ));
-            out.push_str("      </Scene>\n");
+            body.push_str("      </Scene>\n");
         }
-        out.push_str("    </Scenes>\n");
+        body.push_str("    </Scenes>\n");
 
+        let mut out = String::with_capacity(body.len() + 256);
+        out.push_str("<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n");
+        out.push_str("<Ableton MajorVersion=\"5\" MinorVersion=\"12.0_12049\" SchemaChangeCount=\"3\" Creator=\"Oxide Studio\" Revision=\"oxide-12.0\">\n");
+        out.push_str("  <LiveSet>\n");
+        out.push_str(&format!("    <NextPointeeId Value=\"{next_id}\"/>\n"));
+        out.push_str(&body);
         out.push_str("  </LiveSet>\n");
         out.push_str("</Ableton>\n");
 
@@ -1202,23 +1803,6 @@ impl DAWProject {
             })?
         };
 
-        let is_oxide_creator = root
-            .get_attr("Creator")
-            .map(|c| c.contains("Oxide"))
-            .unwrap_or(false);
-
-        let convert_volume = |v: f32| -> f32 {
-            if !is_oxide_creator {
-                if v <= 0.0001 {
-                    -60.0
-                } else {
-                    (20.0 * (v / 0.85).log10()).clamp(-60.0, 6.0)
-                }
-            } else {
-                v
-            }
-        };
-
         // Project metadata
         let mut metadata = ProjectMetadata::default();
         if let Some(ann) = liveset
@@ -1227,6 +1811,23 @@ impl DAWProject {
         {
             if !ann.is_empty() {
                 metadata.name = ann;
+            }
+        }
+        if let Some(meta_json) = parse_oxide_comment_json(liveset, "oxide-metadata:") {
+            if let Some(name) = meta_json.get("name").and_then(|v| v.as_str()).filter(|s| !s.is_empty()) {
+                metadata.name = name.to_string();
+            }
+            if let Some(author) = meta_json.get("author").and_then(|v| v.as_str()).filter(|s| !s.is_empty()) {
+                metadata.author = author.to_string();
+            }
+            if let Some(ver) = meta_json.get("version").and_then(|v| v.as_str()).filter(|s| !s.is_empty()) {
+                metadata.version = ver.to_string();
+            }
+            if let Some(ca) = meta_json.get("created_at_utc").and_then(|v| v.as_str()).filter(|s| !s.is_empty()) {
+                metadata.created_at_utc = ca.to_string();
+            }
+            if let Some(ma) = meta_json.get("modified_at_utc").and_then(|v| v.as_str()).filter(|s| !s.is_empty()) {
+                metadata.modified_at_utc = ma.to_string();
             }
         }
         if let Some(meta) = liveset.find_child("Metadata") {
@@ -1328,6 +1929,11 @@ impl DAWProject {
         // Master Track
         let mut master_track = MasterTrackDefinition::default();
         if let Some(mt) = liveset.find_child("MasterTrack") {
+            if let Some(master_json) = parse_oxide_comment_json(mt, "oxide-master:") {
+                if let Ok(parsed_master) = serde_json::from_value::<MasterTrackDefinition>(master_json) {
+                    master_track = parsed_master;
+                }
+            }
             if let Some(vol) = mt
                 .find_descendant("Volume")
                 .and_then(|v| {
@@ -1337,7 +1943,7 @@ impl DAWProject {
                 })
                 .and_then(|v| v.parse::<f32>().ok())
             {
-                master_track.volume_db = convert_volume(vol);
+                master_track.volume_db = ableton_linear_to_db(vol);
             }
             if let Some(pan) = mt
                 .find_descendant("Pan")
@@ -1352,156 +1958,187 @@ impl DAWProject {
             }
         }
 
-        // Tracks
+        // Tracks (including ReturnTrack and GroupTrack, plus optional ReturnTracks container)
         let mut sample_cache: HashMap<PathBuf, (u32, u16, Vec<f32>)> = HashMap::new();
         let mut tracks = Vec::new();
+        let mut raw_track_nodes: Vec<&XmlNode> = Vec::new();
         if let Some(tracks_node) = liveset.find_child("Tracks") {
-            for (idx, child) in tracks_node.children.iter().enumerate() {
-                if child.tag == "GroupTrack" {
-                    continue;
+            for child in &tracks_node.children {
+                if matches!(
+                    child.tag.as_str(),
+                    "MidiTrack" | "AudioTrack" | "ReturnTrack" | "GroupTrack"
+                ) {
+                    raw_track_nodes.push(child);
                 }
-                if child.tag != "MidiTrack"
-                    && child.tag != "AudioTrack"
-                    && child.tag != "ReturnTrack"
-                {
-                    continue;
+            }
+        }
+        if let Some(ret_tracks_node) = liveset.find_child("ReturnTracks") {
+            for child in &ret_tracks_node.children {
+                if child.tag == "ReturnTrack" {
+                    raw_track_nodes.push(child);
                 }
+            }
+        }
 
-                let track_id = child
-                    .get_attr("Id")
-                    .and_then(|v| v.parse::<u32>().ok())
-                    .unwrap_or(idx as u32 + 1);
-                let track_name = child
-                    .find_child("Name")
-                    .and_then(|n| {
-                        n.find_child("UserName")
-                            .and_then(|u| u.get_attr_or_text("Value"))
-                            .filter(|s| !s.is_empty())
-                            .or_else(|| {
-                                n.find_child("EffectiveName")
-                                    .and_then(|e| e.get_attr_or_text("Value"))
-                                    .filter(|s| !s.is_empty())
-                            })
+        for (idx, child) in raw_track_nodes.into_iter().enumerate() {
+            let track_id = child
+                .get_attr("Id")
+                .and_then(|v| v.parse::<u32>().ok())
+                .unwrap_or(idx as u32 + 1);
+            let track_name = child
+                .find_child("Name")
+                .and_then(|n| {
+                    n.find_child("UserName")
+                        .and_then(|u| u.get_attr_or_text("Value"))
+                        .filter(|s| !s.is_empty())
+                        .or_else(|| {
+                            n.find_child("EffectiveName")
+                                .and_then(|e| e.get_attr_or_text("Value"))
+                                .filter(|s| !s.is_empty())
+                        })
+                })
+                .unwrap_or_else(|| format!("Track {}", track_id));
+
+            let track_meta = parse_oxide_comment_json(child, "oxide-track:");
+            let track_type_str = child
+                .find_child("TrackType")
+                .and_then(|t| t.get_attr_or_text("Value"))
+                .or_else(|| {
+                    track_meta
+                        .as_ref()
+                        .and_then(|m| m.get("track_type").and_then(|v| v.as_str()).map(|s| s.to_string()))
+                });
+
+            let track_type = match track_type_str.as_deref() {
+                Some("Return") => TrackType::Return,
+                Some("Group") => TrackType::Group,
+                Some("Audio") => TrackType::Audio,
+                Some("DrumRack") => TrackType::DrumRack,
+                Some("MidiSynth") => TrackType::MidiSynth,
+                _ => match child.tag.as_str() {
+                    "ReturnTrack" => TrackType::Return,
+                    "GroupTrack" => TrackType::Group,
+                    "AudioTrack" => TrackType::Audio,
+                    _ => {
+                        let is_drum = child.find_descendant("DrumGroupDevice").is_some()
+                            || track_name.to_lowercase().contains("drum")
+                            || track_name.to_lowercase().contains("909");
+                        if is_drum {
+                            TrackType::DrumRack
+                        } else {
+                            TrackType::MidiSynth
+                        }
+                    }
+                },
+            };
+
+            let color_hex = child
+                .find_child("ColorHex")
+                .and_then(|c| c.get_attr_or_text("Value"))
+                .or_else(|| {
+                    track_meta
+                        .as_ref()
+                        .and_then(|m| m.get("color_hex").and_then(|v| v.as_str()).map(|s| s.to_string()))
+                })
+                .unwrap_or_else(|| match track_type {
+                    TrackType::MidiSynth => "#ffbe00".to_string(),
+                    TrackType::DrumRack => "#00d2ff".to_string(),
+                    TrackType::Audio => "#00e676".to_string(),
+                    TrackType::Return => "#00d2ff".to_string(),
+                    TrackType::Group => "#b388ff".to_string(),
+                });
+
+            let mut mixer = MixerState::default();
+            if let Some(mixer_node) = child.find_descendant("Mixer") {
+                if let Some(vol) = find_child_or_descendant(mixer_node, "Volume")
+                    .and_then(|v| {
+                        v.find_child("Manual")
+                            .and_then(|m| m.get_attr_or_text("Value"))
+                            .or_else(|| v.get_attr_or_text("Value"))
                     })
-                    .unwrap_or_else(|| format!("Track {}", track_id));
-
-                let track_type_str = child
-                    .find_child("TrackType")
-                    .and_then(|t| t.get_attr_or_text("Value"));
-                let is_drum = child.find_descendant("DrumGroupDevice").is_some()
-                    || track_name.to_lowercase().contains("drum")
-                    || track_name.to_lowercase().contains("909")
-                    || track_type_str.as_deref() == Some("DrumRack");
-
-                let track_type = if child.tag == "AudioTrack"
-                    || track_type_str.as_deref() == Some("Audio")
+                    .and_then(|v| v.parse::<f32>().ok())
                 {
-                    TrackType::Audio
-                } else if is_drum {
-                    TrackType::DrumRack
-                } else {
-                    TrackType::MidiSynth
-                };
-
-                let color_hex = child
-                    .find_child("ColorHex")
-                    .and_then(|c| c.get_attr_or_text("Value"))
-                    .unwrap_or_else(|| match track_type {
-                        TrackType::MidiSynth => "#ffbe00".to_string(),
-                        TrackType::DrumRack => "#00d2ff".to_string(),
-                        TrackType::Audio => "#00e676".to_string(),
-                    });
-
-                let mut mixer = MixerState::default();
-                if let Some(mixer_node) = child.find_descendant("Mixer") {
-                    if let Some(vol) = mixer_node
-                        .find_descendant("Volume")
-                        .and_then(|v| {
-                            v.find_child("Manual")
-                                .and_then(|m| m.get_attr_or_text("Value"))
-                                .or_else(|| v.get_attr_or_text("Value"))
-                        })
-                        .and_then(|v| v.parse::<f32>().ok())
-                    {
-                        mixer.volume_db = convert_volume(vol);
-                    }
-                    if let Some(pan) = mixer_node
-                        .find_descendant("Pan")
-                        .and_then(|p| {
-                            p.find_child("Manual")
-                                .and_then(|m| m.get_attr_or_text("Value"))
-                                .or_else(|| p.get_attr_or_text("Value"))
-                        })
-                        .and_then(|v| v.parse::<f32>().ok())
-                    {
-                        mixer.pan = pan;
-                    }
-                    if let Some(on) = mixer_node
-                        .find_descendant("On")
-                        .and_then(|o| {
-                            o.find_child("Manual")
-                                .and_then(|m| m.get_attr_or_text("Value"))
-                                .or_else(|| o.get_attr_or_text("Value"))
-                        })
-                        .and_then(|v| v.parse::<bool>().ok())
-                    {
-                        mixer.mute = !on;
-                    }
-                    if let Some(solo) = mixer_node
-                        .find_descendant("SoloSink")
-                        .and_then(|s| {
-                            s.find_child("Manual")
-                                .and_then(|m| m.get_attr_or_text("Value"))
-                                .or_else(|| s.get_attr_or_text("Value"))
-                        })
-                        .and_then(|v| v.parse::<bool>().ok())
-                    {
-                        mixer.solo = solo;
-                    }
-                    if let Some(arm) = mixer_node
-                        .find_descendant("Arm")
-                        .and_then(|a| {
-                            a.find_child("Manual")
-                                .and_then(|m| m.get_attr_or_text("Value"))
-                                .or_else(|| a.get_attr_or_text("Value"))
-                        })
-                        .and_then(|v| v.parse::<bool>().ok())
-                    {
-                        mixer.arm = arm;
-                    }
-                    if let Some(sends) = mixer_node.find_child("Sends") {
-                        let holders = sends.find_children("TrackSendHolder");
-                        if let Some(s0) = holders
-                            .first()
-                            .and_then(|h| h.find_descendant("Manual"))
+                    mixer.volume_db = ableton_linear_to_db(vol);
+                }
+                if let Some(pan) = find_child_or_descendant(mixer_node, "Pan")
+                    .and_then(|p| {
+                        p.find_child("Manual")
                             .and_then(|m| m.get_attr_or_text("Value"))
+                            .or_else(|| p.get_attr_or_text("Value"))
+                    })
+                    .and_then(|v| v.parse::<f32>().ok())
+                {
+                    mixer.pan = pan;
+                }
+                if let Some(on) = find_child_or_descendant(mixer_node, "On")
+                    .and_then(|o| {
+                        o.find_child("Manual")
+                            .and_then(|m| m.get_attr_or_text("Value"))
+                            .or_else(|| o.get_attr_or_text("Value"))
+                    })
+                    .and_then(|v| v.parse::<bool>().ok())
+                {
+                    mixer.mute = !on;
+                }
+                if let Some(solo) = find_child_or_descendant(mixer_node, "SoloSink")
+                    .and_then(|s| {
+                        s.find_child("Manual")
+                            .and_then(|m| m.get_attr_or_text("Value"))
+                            .or_else(|| s.get_attr_or_text("Value"))
+                    })
+                    .and_then(|v| v.parse::<bool>().ok())
+                {
+                    mixer.solo = solo;
+                }
+                if let Some(arm) = find_child_or_descendant(mixer_node, "Arm")
+                    .and_then(|a| {
+                        a.find_child("Manual")
+                            .and_then(|m| m.get_attr_or_text("Value"))
+                            .or_else(|| a.get_attr_or_text("Value"))
+                    })
+                    .and_then(|v| v.parse::<bool>().ok())
+                {
+                    mixer.arm = arm;
+                }
+                if let Some(sends) = mixer_node.find_child("Sends") {
+                    for (holder_idx, holder) in sends.find_children("TrackSendHolder").iter().enumerate() {
+                        let send_idx = holder
+                            .get_attr("Id")
+                            .and_then(|v| v.parse::<usize>().ok())
+                            .unwrap_or(holder_idx);
+                        if let Some(s_val) = holder
+                            .find_child("Send")
+                            .and_then(|s| {
+                                s.find_child("Manual")
+                                    .and_then(|m| m.get_attr_or_text("Value"))
+                                    .or_else(|| s.get_attr_or_text("Value"))
+                            })
+                            .or_else(|| {
+                                holder
+                                    .find_descendant("Manual")
+                                    .and_then(|m| m.get_attr_or_text("Value"))
+                            })
                             .and_then(|v| v.parse::<f32>().ok())
                         {
-                            mixer.send_a_db = s0;
-                        }
-                        if let Some(s1) = holders
-                            .get(1)
-                            .and_then(|h| h.find_descendant("Manual"))
-                            .and_then(|m| m.get_attr_or_text("Value"))
-                            .and_then(|v| v.parse::<f32>().ok())
-                        {
-                            mixer.send_b_db = s1;
+                            mixer.set_send_db(send_idx, ableton_linear_to_db(s_val));
                         }
                     }
                 }
+            }
 
-                let instrument = match track_type {
-                    TrackType::MidiSynth => InstrumentConfig::BuiltinSubtractiveSynth(
-                        SynthPatchParameters::default(),
-                    ),
-                    TrackType::DrumRack => InstrumentConfig::ElectronicDrumRack(
-                        crate::drums::DrumRackDefinition::default_909(),
-                    ),
-                    TrackType::Audio => InstrumentConfig::None,
-                };
+            let instrument = match track_type {
+                TrackType::MidiSynth => InstrumentConfig::BuiltinSubtractiveSynth(
+                    SynthPatchParameters::default(),
+                ),
+                TrackType::DrumRack => InstrumentConfig::ElectronicDrumRack(
+                    crate::drums::DrumRackDefinition::default_909(),
+                ),
+                TrackType::Audio | TrackType::Return | TrackType::Group => InstrumentConfig::None,
+            };
 
-                // 1. Session Clips
-                let mut session_clips = Vec::new();
+            // 1. Session Clips
+            let mut session_clips = Vec::new();
+            if track_type != TrackType::Return && track_type != TrackType::Group {
                 if let Some(slot_list) = child.find_descendant("ClipSlotList") {
                     for (slot_idx, slot_node) in
                         slot_list.find_children("ClipSlot").iter().enumerate()
@@ -1529,13 +2166,15 @@ impl DAWProject {
                         }
                     }
                 }
+            }
 
-                if session_clips.iter().all(|c| c.is_none()) {
-                    session_clips.clear();
-                }
+            if session_clips.iter().all(|c| c.is_none()) {
+                session_clips.clear();
+            }
 
-                // 2. Arrangement Clips
-                let mut arrangement_clips = Vec::new();
+            // 2. Arrangement Clips
+            let mut arrangement_clips = Vec::new();
+            if track_type != TrackType::Return && track_type != TrackType::Group {
                 let main_seq = child.find_descendant("MainSequencer");
                 let automation_nodes = if let Some(ms) = main_seq {
                     ms.find_descendants("ArrangerAutomation")
@@ -1565,89 +2204,62 @@ impl DAWProject {
                         }
                     }
                 }
-
-                // 3. If session_clips is empty (producer worked in Arrangement View),
-                // populate up to 8 session_clips from first distinct arrangement clips.
-                if session_clips.is_empty() && !arrangement_clips.is_empty() {
-                    let mut seen_keys = std::collections::HashSet::new();
-                    let mut auto_session = Vec::new();
-                    for arr_clip in &arrangement_clips {
-                        let key = match &arr_clip.pattern {
-                            ClipPattern::Midi(m) => format!("midi:{}:{}:{:.2}", arr_clip.name, m.notes.len(), m.length_beats),
-                            ClipPattern::Drum(d) => format!("drum:{}:{}", arr_clip.name, d.step_count),
-                            ClipPattern::Audio(a) => format!("audio:{}:{}:{:.2}", arr_clip.name, a.file_path, a.length_beats),
-                        };
-                        if seen_keys.insert(key) {
-                            let slot_idx = auto_session.len() as u32;
-                            let mut s_clip = SessionClip::new(slot_idx, arr_clip.name.clone(), arr_clip.pattern.clone());
-                            s_clip.loop_enabled = true;
-                            s_clip.loop_start_beat = 0.0;
-                            s_clip.loop_end_beat = arr_clip.duration_beats.max(4.0);
-                            s_clip.color_hex = color_hex.clone();
-                            auto_session.push(Some(s_clip));
-                            if auto_session.len() >= 8 {
-                                break;
-                            }
-                        }
-                    }
-                    session_clips = auto_session;
-                }
-
-                // Insert FX
-                let mut insert_fx = Vec::new();
-                if let Some(devs) = child.find_descendant("Devices") {
-                    for dev in &devs.children {
-                        if dev.tag == "Roar" || dev.tag == "Saturator" {
-                            let drive = dev
-                                .get_attr("Drive")
-                                .and_then(|v| v.parse::<f32>().ok())
-                                .unwrap_or(4.0);
-                            insert_fx.push(InsertEffectConfig::Saturator {
-                                drive_db: drive,
-                                curve: 0.5,
-                                output_gain_db: 0.0,
-                            });
-                        } else if dev.tag == "Delay" {
-                            let time = dev
-                                .get_attr("Time")
-                                .and_then(|v| v.parse::<f32>().ok())
-                                .unwrap_or(0.5);
-                            let fb = dev
-                                .get_attr("Feedback")
-                                .and_then(|v| v.parse::<f32>().ok())
-                                .unwrap_or(0.4);
-                            insert_fx.push(InsertEffectConfig::TempoDelay {
-                                time_beats: time,
-                                feedback: fb,
-                                mix: 0.3,
-                            });
-                        } else if dev.tag == "Reverb" {
-                            let decay = dev
-                                .get_attr("Decay")
-                                .and_then(|v| v.parse::<f32>().ok())
-                                .unwrap_or(1500.0);
-                            insert_fx.push(InsertEffectConfig::Reverb {
-                                ir_path: None,
-                                decay_ms: decay,
-                                mix: 0.25,
-                            });
-                        }
-                    }
-                }
-
-                tracks.push(TrackDefinition {
-                    id: track_id,
-                    name: track_name,
-                    color_hex,
-                    track_type,
-                    mixer,
-                    instrument,
-                    insert_fx,
-                    session_clips,
-                    arrangement_clips,
-                    automation_lanes: Vec::new(),
-                });
             }
+
+            // 3. If session_clips is empty (producer worked in Arrangement View),
+            // populate up to 8 session_clips from first distinct arrangement clips.
+            if session_clips.is_empty() && !arrangement_clips.is_empty() {
+                let mut seen_keys = std::collections::HashSet::new();
+                let mut auto_session = Vec::new();
+                for arr_clip in &arrangement_clips {
+                    let key = match &arr_clip.pattern {
+                        ClipPattern::Midi(m) => format!("midi:{}:{}:{:.2}", arr_clip.name, m.notes.len(), m.length_beats),
+                        ClipPattern::Drum(d) => format!("drum:{}:{}", arr_clip.name, d.step_count),
+                        ClipPattern::Audio(a) => format!("audio:{}:{}:{:.2}", arr_clip.name, a.file_path, a.length_beats),
+                    };
+                    if seen_keys.insert(key) {
+                        let slot_idx = auto_session.len() as u32;
+                        let mut s_clip = SessionClip::new(slot_idx, arr_clip.name.clone(), arr_clip.pattern.clone());
+                        s_clip.loop_enabled = true;
+                        s_clip.loop_start_beat = 0.0;
+                        let pat_len = match &arr_clip.pattern {
+                            ClipPattern::Midi(m) => m.length_beats,
+                            ClipPattern::Drum(d) => d.length_beats(),
+                            ClipPattern::Audio(_) => arr_clip.duration_beats,
+                        };
+                        s_clip.loop_end_beat = pat_len.max(0.0625);
+                        s_clip.color_hex = color_hex.clone();
+                        auto_session.push(Some(s_clip));
+                        if auto_session.len() >= 8 {
+                            break;
+                        }
+                    }
+                }
+                session_clips = auto_session;
+            }
+
+            // Insert FX
+            let insert_fx = if let Some(devs) = child.find_descendant("Devices") {
+                parse_insert_fx_from_devices_node(devs)
+            } else {
+                Vec::new()
+            };
+
+            // Automation Lanes
+            let automation_lanes = parse_track_automation_envelopes(child);
+
+            tracks.push(TrackDefinition {
+                id: track_id,
+                name: track_name,
+                color_hex,
+                track_type,
+                mixer,
+                instrument,
+                insert_fx,
+                session_clips,
+                arrangement_clips,
+                automation_lanes,
+            });
         }
 
         // Scenes
@@ -1859,5 +2471,227 @@ mod tests {
         assert!(res.is_err());
         let err_str = res.err().unwrap().to_string();
         assert!(err_str.contains("safety limit"));
+    }
+
+    #[test]
+    fn test_ableton_linear_db_conversion_exact_invertible() {
+        assert!((db_to_ableton_linear(0.0) - 0.85).abs() < 1e-6);
+        assert!(ableton_linear_to_db(0.85).abs() < 1e-6);
+
+        assert!((db_to_ableton_linear(-70.0) - 0.00031622776).abs() < 1e-8);
+        assert!((ableton_linear_to_db(0.00031622776) - (-70.0)).abs() < 1e-4);
+        assert!((ableton_linear_to_db(0.000316) - (-70.0)).abs() < 1e-4);
+
+        assert!((db_to_ableton_linear(6.0) - 1.0).abs() < 1e-6);
+        assert!((ableton_linear_to_db(1.0) - 6.0).abs() < 1e-4);
+
+        for db in [-60.0, -24.0, -12.0, -6.0, -3.5, 0.0, 2.5, 6.0] {
+            let lin = db_to_ableton_linear(db);
+            assert!(lin > 0.0 && lin <= 1.0);
+            let round = ableton_linear_to_db(lin);
+            assert!(
+                (round - db).abs() < 1e-3,
+                "Roundtrip mismatch for {db} dB -> {lin} -> {round} dB"
+            );
+        }
+    }
+
+    #[test]
+    fn test_als_roundtrip_return_group_drums_sends_and_2beat_loops() {
+        let mut project = DAWProject::new("Live 12 Full Roundtrip");
+        project.transport.bpm = 132.0;
+        project.master_track.volume_db = 0.0;
+
+        // 1. Synth track with 2-beat loop, muted send A (-70 dB), active send B (-12 dB), and automation
+        let mut synth = TrackDefinition::new_synth(1, "Lead Synth");
+        synth.mixer.volume_db = 0.0;
+        synth.mixer.set_send_db(0, -70.0);
+        synth.mixer.set_send_db(1, -12.0);
+
+        let mut two_beat = MidiPattern::new(2.0);
+        two_beat.add_note(MidiNote::new(60, 110, 0.0, 0.5));
+        two_beat.add_note(MidiNote::new(67, 100, 1.0, 0.5));
+        let mut sess_clip = SessionClip::new(10, "2 Beat Riff", ClipPattern::Midi(two_beat));
+        sess_clip.loop_end_beat = 2.0;
+        synth.session_clips.push(Some(sess_clip));
+
+        let mut auto = AutomationLane::new(15, "filter_frequency");
+        auto.add_point(AutomationPoint::linear(0.0, 0.25));
+        auto.add_point(AutomationPoint::linear(8.0, 0.90));
+        synth.automation_lanes.push(auto);
+        project.tracks.push(synth);
+
+        // 2. DrumRack track with Arrangement Clip (ClipPattern::Drum)
+        let mut drums = TrackDefinition::new_drum_rack(2, "909 Kit");
+        drums.mixer.volume_db = -3.0;
+        drums.mixer.set_send_db(0, -70.0);
+        drums.mixer.set_send_db(1, -70.0);
+        let mut dpat = DrumStepPattern::new_16_step();
+        dpat.toggle_step(0, 0); // Kick -> pitch 36
+        dpat.toggle_step(2, 4); // Snare -> pitch 38
+        dpat.toggle_step(6, 2); // Closed HH -> pitch 42
+        drums.arrangement_clips.push(ArrangementClip::new(
+            20,
+            "Drums Arr",
+            0.0,
+            8.0,
+            ClipPattern::Drum(dpat),
+        ));
+        project.tracks.push(drums);
+
+        // 3. Group Track
+        let mut grp = TrackDefinition::new_group(3, "Synth Bus");
+        grp.mixer.volume_db = -1.5;
+        project.tracks.push(grp);
+
+        // 4. Return Track
+        let mut ret = TrackDefinition::new_return(4, "A-Reverb");
+        ret.mixer.volume_db = 0.0;
+        ret.insert_fx.push(InsertEffectConfig::Reverb {
+            ir_path: None,
+            decay_ms: 2200.0,
+            mix: 1.0,
+        });
+        project.tracks.push(ret);
+
+        let xml = project.to_als_xml();
+
+        // Check Live 12 schema requirements
+        assert!(xml.contains("<NextPointeeId Value="));
+        assert!(xml.contains("<ReturnTrack Id=\"4\">"));
+        assert!(xml.contains("<GroupTrack Id=\"3\">"));
+        assert!(xml.contains("<KeyTrack Id="));
+        assert!(xml.contains("<MidiNoteEvent Id="));
+        assert!(xml.contains("Value=\"0.85"));
+        assert!(xml.contains("Value=\"0.000316"));
+        assert!(!xml.contains("<Metadata>"));
+        assert!(!xml.contains("<TrackType "));
+        assert!(!xml.contains("<ColorHex "));
+
+        // Parse back and verify lossless roundtrip
+        let reloaded = DAWProject::from_als_xml(&xml).expect("Reload must succeed");
+        assert_eq!(reloaded.metadata.name, "Live 12 Full Roundtrip");
+        assert!(reloaded.master_track.volume_db.abs() < 1e-3);
+        assert_eq!(reloaded.tracks.len(), 4);
+
+        // Track 0: Synth + 2-beat loop + muted send (-70 dB) + automation
+        let t0 = &reloaded.tracks[0];
+        assert_eq!(t0.track_type, TrackType::MidiSynth);
+        assert!(t0.mixer.volume_db.abs() < 1e-3);
+        assert!((t0.mixer.send_a_db - (-70.0)).abs() < 1e-3);
+        assert!((t0.mixer.send_b_db - (-12.0)).abs() < 1e-3);
+        let c0 = t0.session_clips[0].as_ref().unwrap();
+        assert!((c0.loop_end_beat - 2.0).abs() < 1e-3);
+        if let ClipPattern::Midi(mp) = &c0.pattern {
+            assert!((mp.length_beats - 2.0).abs() < 1e-3);
+        } else {
+            panic!("Expected Midi pattern");
+        }
+        assert_eq!(t0.automation_lanes.len(), 1);
+        assert_eq!(t0.automation_lanes[0].parameter_name, "filter_frequency");
+        assert_eq!(t0.automation_lanes[0].points.len(), 2);
+
+        // Track 1: DrumRack with Arrangement Clip exported and re-imported
+        let t1 = &reloaded.tracks[1];
+        assert_eq!(t1.track_type, TrackType::DrumRack);
+        assert_eq!(t1.arrangement_clips.len(), 1);
+        assert!((t1.arrangement_clips[0].duration_beats - 8.0).abs() < 1e-3);
+        if let ClipPattern::Midi(dp) = &t1.arrangement_clips[0].pattern {
+            assert_eq!(dp.notes.len(), 3);
+            assert!(dp.notes.iter().any(|n| n.pitch == 36));
+            assert!(dp.notes.iter().any(|n| n.pitch == 38));
+            assert!(dp.notes.iter().any(|n| n.pitch == 42));
+        } else {
+            panic!("Expected Drum arrangement clip imported as Midi");
+        }
+
+        // Track 2: GroupTrack
+        assert_eq!(reloaded.tracks[2].track_type, TrackType::Group);
+        assert!((reloaded.tracks[2].mixer.volume_db - (-1.5)).abs() < 1e-3);
+
+        // Track 3: ReturnTrack with Reverb
+        assert_eq!(reloaded.tracks[3].track_type, TrackType::Return);
+        assert_eq!(reloaded.tracks[3].insert_fx.len(), 1);
+    }
+
+    #[test]
+    fn test_als_import_disabled_notes_and_external_linear_sends() {
+        let xml = r#"<?xml version="1.0" encoding="UTF-8"?>
+<Ableton MajorVersion="5" MinorVersion="12.0_12203" Creator="Ableton Live 12.2">
+  <LiveSet>
+    <Tempo><Manual Value="128.0"/></Tempo>
+    <MasterTrack Id="0">
+      <DeviceChain>
+        <Mixer><Volume><Manual Value="0.85"/></Volume></Mixer>
+      </DeviceChain>
+    </MasterTrack>
+    <Tracks>
+      <MidiTrack Id="1">
+        <Name><EffectiveName Value="External Synth"/></Name>
+        <DeviceChain>
+          <Mixer>
+            <Volume><Manual Value="0.85"/></Volume>
+            <Sends>
+              <TrackSendHolder Id="0"><Send><Manual Value="0.00031622776"/></Send></TrackSendHolder>
+              <TrackSendHolder Id="1"><Send><Manual Value="0.85"/></Send></TrackSendHolder>
+            </Sends>
+          </Mixer>
+          <MainSequencer>
+            <ClipSlotList>
+              <ClipSlot Id="0">
+                <ClipSlot><Value>
+                  <MidiClip Id="1">
+                    <Loop><LoopStart Value="0.0"/><LoopEnd Value="2.0"/></Loop>
+                    <Notes><KeyTracks>
+                      <KeyTrack Id="10">
+                        <MidiKey Value="48"/>
+                        <Notes>
+                          <MidiNoteEvent Time="0.0" Duration="0.5" Velocity="100" IsEnabled="true"/>
+                          <MidiNoteEvent Time="0.5" Duration="0.5" Velocity="100" IsEnabled="false"/>
+                        </Notes>
+                      </KeyTrack>
+                    </KeyTracks></Notes>
+                  </MidiClip>
+                </Value></ClipSlot>
+              </ClipSlot>
+            </ClipSlotList>
+          </MainSequencer>
+        </DeviceChain>
+      </MidiTrack>
+      <ReturnTrack Id="2">
+        <Name><EffectiveName Value="A-Reverb"/></Name>
+        <DeviceChain>
+          <Mixer><Volume><Manual Value="0.85"/></Volume></Mixer>
+        </DeviceChain>
+      </ReturnTrack>
+      <GroupTrack Id="3">
+        <Name><EffectiveName Value="Drums Group"/></Name>
+        <DeviceChain>
+          <Mixer><Volume><Manual Value="0.85"/></Volume></Mixer>
+        </DeviceChain>
+      </GroupTrack>
+    </Tracks>
+  </LiveSet>
+</Ableton>"#;
+
+        let proj = DAWProject::from_als_xml(xml).expect("Parse external Live 12 XML");
+        assert!(proj.master_track.volume_db.abs() < 1e-3);
+        assert_eq!(proj.tracks.len(), 3);
+        assert_eq!(proj.tracks[0].track_type, TrackType::MidiSynth);
+        assert_eq!(proj.tracks[1].track_type, TrackType::Return);
+        assert_eq!(proj.tracks[2].track_type, TrackType::Group);
+
+        assert!(proj.tracks[0].mixer.volume_db.abs() < 1e-3);
+        assert!((proj.tracks[0].mixer.send_a_db - (-70.0)).abs() < 1e-3);
+        assert!(proj.tracks[0].mixer.send_b_db.abs() < 1e-3);
+
+        let clip = proj.tracks[0].session_clips[0].as_ref().unwrap();
+        assert!((clip.loop_end_beat - 2.0).abs() < 1e-3);
+        if let ClipPattern::Midi(mp) = &clip.pattern {
+            assert_eq!(mp.notes.len(), 1, "Disabled MidiNoteEvent must be ignored");
+            assert!((mp.length_beats - 2.0).abs() < 1e-3);
+        } else {
+            panic!("Expected Midi");
+        }
     }
 }

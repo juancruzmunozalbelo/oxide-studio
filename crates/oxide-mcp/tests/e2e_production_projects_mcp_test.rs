@@ -11,14 +11,34 @@
 //!    filter cutoff automation, 6 return buses, multi-track stems export, and spectral verification.
 
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use serde_json::{json, Value};
 
 use oxide_mcp::state::DawState;
 use oxide_mcp::tools::dispatch_tool_call;
 
-const PROJECTS_DIR: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../../projects");
 const ASSETS_DIR: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../../assets");
+
+struct TempDirGuard(PathBuf);
+
+impl TempDirGuard {
+    fn new(label: &str) -> Self {
+        let dir = std::env::temp_dir().join(format!("oxide_mcp_{}_{}", label, std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).expect("Failed to create temp test directory");
+        Self(dir)
+    }
+
+    fn path_str(&self, file_name: &str) -> String {
+        self.0.join(file_name).to_string_lossy().to_string()
+    }
+}
+
+impl Drop for TempDirGuard {
+    fn drop(&mut self) {
+        let _ = fs::remove_dir_all(&self.0);
+    }
+}
 
 fn get_analysis_metric(report: &Value, snake: &str, camel: &str) -> f64 {
     report.get(snake)
@@ -29,7 +49,7 @@ fn get_analysis_metric(report: &Value, snake: &str, camel: &str) -> f64 {
 
 #[test]
 fn test_mcp_build_peak_time_techno_135_gmin_project() {
-    fs::create_dir_all(PROJECTS_DIR).expect("Failed to create projects directory");
+    let out_dir = TempDirGuard::new("peak_135");
 
     let mut state = DawState::new();
 
@@ -321,17 +341,41 @@ fn test_mcp_build_peak_time_techno_135_gmin_project() {
         assert!(!ret_res.is_error);
     }
 
-    let _ = dispatch_tool_call(&mut state, "mixer_set_send", &json!({ "track_id": 0, "send_index": 0, "level_db": -12.0 }));
-    let _ = dispatch_tool_call(&mut state, "mixer_set_send", &json!({ "track_id": 0, "send_index": 1, "level_db": -15.0 }));
-    let _ = dispatch_tool_call(&mut state, "mixer_set_send", &json!({ "track_id": 4, "send_index": 1, "level_db": -9.0 }));
+    for (track_id, send_index, level_db) in [(0, 0, -12.0), (0, 1, -15.0), (4, 1, -9.0)] {
+        let send_res = dispatch_tool_call(
+            &mut state,
+            "mixer_set_send",
+            &json!({ "track_id": track_id, "send_index": send_index, "level_db": level_db }),
+        );
+        assert!(!send_res.is_error, "mixer_set_send failed: {:?}", send_res);
+    }
 
-    let _ = dispatch_tool_call(&mut state, "fx_set_saturator", &json!({ "drive_db": 2.5, "wet": 0.35, "output_gain_db": -0.5 }));
-    let _ = dispatch_tool_call(&mut state, "fx_set_delay", &json!({ "subdivision": "3/16", "feedback": 0.30, "wet": 0.15, "ping_pong": true }));
-    let _ = dispatch_tool_call(&mut state, "fx_set_reverb", &json!({ "room_size": 0.8, "decay": 0.6, "damping": 0.4, "wet": 0.15 }));
-    let _ = dispatch_tool_call(&mut state, "fx_set_limiter", &json!({ "ceiling_db": -0.3 }));
+    let add_dev_res = dispatch_tool_call(
+        &mut state,
+        "device_add_to_track",
+        &json!({ "track_id": 1, "device_name": "eq_eight" }),
+    );
+    assert!(!add_dev_res.is_error, "device_add_to_track failed: {:?}", add_dev_res);
+    let added_dev: Value = serde_json::from_str(&add_dev_res.content[0].text).unwrap();
+    let eq_idx = added_dev["device_index"].as_u64().unwrap();
+    let set_dev_res = dispatch_tool_call(
+        &mut state,
+        "device_set_param",
+        &json!({ "track_id": 1, "device_index": eq_idx, "param_index": 0, "value": 95.0 }),
+    );
+    assert!(!set_dev_res.is_error, "device_set_param failed: {:?}", set_dev_res);
 
-    // 9. Save project, Export ALS, Bounce WAV and Analyze
-    let save_json_path = format!("{}/peak_time_135_gmin.oxide.json", PROJECTS_DIR);
+    let sat_res = dispatch_tool_call(&mut state, "fx_set_saturator", &json!({ "drive_db": 2.5, "wet": 0.35, "output_gain_db": -0.5 }));
+    assert!(!sat_res.is_error);
+    let dly_res = dispatch_tool_call(&mut state, "fx_set_delay", &json!({ "subdivision": "3/16", "feedback": 0.30, "wet": 0.15, "ping_pong": true }));
+    assert!(!dly_res.is_error);
+    let rev_res = dispatch_tool_call(&mut state, "fx_set_reverb", &json!({ "room_size": 0.8, "decay": 0.6, "damping": 0.4, "wet": 0.15 }));
+    assert!(!rev_res.is_error);
+    let lim_res = dispatch_tool_call(&mut state, "fx_set_limiter", &json!({ "ceiling_db": -0.3 }));
+    assert!(!lim_res.is_error);
+
+    // 9. Save project, Export ALS, Bounce WAV and Analyze (inside temp dir)
+    let save_json_path = out_dir.path_str("peak_time_135_gmin.oxide.json");
     let save_res = dispatch_tool_call(
         &mut state,
         "project_save",
@@ -340,7 +384,23 @@ fn test_mcp_build_peak_time_techno_135_gmin_project() {
     assert!(!save_res.is_error);
     assert!(Path::new(&save_json_path).exists());
 
-    let als_out_path = format!("{}/peak_time_135_gmin.als", PROJECTS_DIR);
+    // Verify full save/load round-trip preserves sends, return tracks, insert FX, and Master FX
+    let mut reloaded_state = DawState::new();
+    let reload_res = dispatch_tool_call(
+        &mut reloaded_state,
+        "project_load",
+        &json!({ "path": save_json_path }),
+    );
+    assert!(!reload_res.is_error, "project_load failed: {:?}", reload_res);
+    assert!((reloaded_state.project.master_track.saturator_drive_db - 2.5).abs() < 0.01);
+    assert!((reloaded_state.project.master_track.reverb_mix - 0.15).abs() < 0.01);
+    assert!(
+        reloaded_state.project.tracks.iter().any(|t| t.name == "C-Echo"),
+        "Custom return track C-Echo must persist across project_save/load"
+    );
+    assert!(!reloaded_state.project.tracks[1].insert_fx.is_empty());
+
+    let als_out_path = out_dir.path_str("peak_time_135_gmin.als");
     let export_res = dispatch_tool_call(
         &mut state,
         "project_export_als",
@@ -349,7 +409,7 @@ fn test_mcp_build_peak_time_techno_135_gmin_project() {
     assert!(!export_res.is_error);
     assert!(Path::new(&als_out_path).exists());
 
-    let drop_wav_path = format!("{}/peak_time_135_gmin_drop.wav", PROJECTS_DIR);
+    let drop_wav_path = out_dir.path_str("peak_time_135_gmin_drop.wav");
     let bounce_res = dispatch_tool_call(
         &mut state,
         "bounce_wav",
@@ -375,11 +435,32 @@ fn test_mcp_build_peak_time_techno_135_gmin_project() {
 
     assert!(rms_dbfs > -30.0, "Expected rms_dbfs > -30.0, got {:.2}", rms_dbfs);
     assert!(peak_dbfs > -12.0, "Expected peak_dbfs > -12.0, got {:.2}", peak_dbfs);
+
+    // Verify soloing Track 0 (Drums) alters rendered output compared to full mix
+    assert!(!dispatch_tool_call(&mut state, "mixer_set_channel", &json!({ "track_id": 0, "solo": true })).is_error);
+    let solo_wav_path = out_dir.path_str("peak_time_135_solo_drums.wav");
+    let solo_bounce = dispatch_tool_call(
+        &mut state,
+        "bounce_wav",
+        &json!({ "output_path": solo_wav_path, "duration_seconds": 4.0, "bit_depth": 16 }),
+    );
+    assert!(!solo_bounce.is_error);
+    let solo_report_res = dispatch_tool_call(&mut state, "analyze_rendered_audio", &json!({ "wav_path": solo_wav_path }));
+    assert!(!solo_report_res.is_error);
+    let solo_report: Value = serde_json::from_str(&solo_report_res.content[0].text).unwrap();
+    let solo_rms = get_analysis_metric(&solo_report, "rms_dbfs", "rmsDbfs");
+    assert!(
+        (solo_rms - rms_dbfs).abs() > 0.05,
+        "Soloing track 0 must change bounced RMS (full={:.2}, solo={:.2})",
+        rms_dbfs,
+        solo_rms
+    );
+    assert!(!dispatch_tool_call(&mut state, "mixer_set_channel", &json!({ "track_id": 0, "solo": false })).is_error);
 }
 
 #[test]
 fn test_mcp_build_melodic_techno_126_fsharp_min_project() {
-    fs::create_dir_all(PROJECTS_DIR).expect("Failed to create projects directory");
+    let out_dir = TempDirGuard::new("melodic_126");
 
     let mut state = DawState::new();
 
@@ -653,20 +734,21 @@ fn test_mcp_build_melodic_techno_126_fsharp_min_project() {
     let _ = dispatch_tool_call(&mut state, "mixer_set_send", &json!({ "track_id": 3, "send_index": 3, "level_db": -9.0 }));
 
     for (tid, vol_db, pan) in [(0, -1.5, 0.0), (1, 0.0, 0.0), (2, -2.0, 0.0), (3, -3.5, 0.0)] {
-        let _ = dispatch_tool_call(
+        let mix_res = dispatch_tool_call(
             &mut state,
             "mixer_set_channel",
             &json!({ "track_id": tid, "volume_db": vol_db, "pan": pan }),
         );
+        assert!(!mix_res.is_error, "mixer_set_channel failed: {:?}", mix_res);
     }
 
-    let _ = dispatch_tool_call(&mut state, "fx_set_saturator", &json!({ "drive_db": 1.8, "wet": 0.25, "output_gain_db": -0.2 }));
-    let _ = dispatch_tool_call(&mut state, "fx_set_delay", &json!({ "subdivision": "1/8", "feedback": 0.25, "wet": 0.12, "ping_pong": true }));
-    let _ = dispatch_tool_call(&mut state, "fx_set_reverb", &json!({ "room_size": 1.1, "decay": 0.7, "damping": 0.35, "wet": 0.18 }));
-    let _ = dispatch_tool_call(&mut state, "fx_set_limiter", &json!({ "ceiling_db": -0.3 }));
+    assert!(!dispatch_tool_call(&mut state, "fx_set_saturator", &json!({ "drive_db": 1.8, "wet": 0.25, "output_gain_db": -0.2 })).is_error);
+    assert!(!dispatch_tool_call(&mut state, "fx_set_delay", &json!({ "subdivision": "1/8", "feedback": 0.25, "wet": 0.12, "ping_pong": true })).is_error);
+    assert!(!dispatch_tool_call(&mut state, "fx_set_reverb", &json!({ "room_size": 1.1, "decay": 0.7, "damping": 0.35, "wet": 0.18 })).is_error);
+    assert!(!dispatch_tool_call(&mut state, "fx_set_limiter", &json!({ "ceiling_db": -0.3 })).is_error);
 
-    // 5. Save project, Export ALS, Bounce WAV, Export Stems, and Verify
-    let save_path = format!("{}/melodic_techno_126_fsharp_min.oxide.json", PROJECTS_DIR);
+    // 5. Save project, Export ALS, Bounce WAV, Export Stems, and Verify (inside temp dir)
+    let save_path = out_dir.path_str("melodic_techno_126_fsharp_min.oxide.json");
     let save_res = dispatch_tool_call(
         &mut state,
         "project_save",
@@ -675,7 +757,7 @@ fn test_mcp_build_melodic_techno_126_fsharp_min_project() {
     assert!(!save_res.is_error);
     assert!(Path::new(&save_path).exists());
 
-    let als_path = format!("{}/melodic_techno_126_fsharp_min.als", PROJECTS_DIR);
+    let als_path = out_dir.path_str("melodic_techno_126_fsharp_min.als");
     let export_res = dispatch_tool_call(
         &mut state,
         "project_export_als",
@@ -684,7 +766,7 @@ fn test_mcp_build_melodic_techno_126_fsharp_min_project() {
     assert!(!export_res.is_error);
     assert!(Path::new(&als_path).exists());
 
-    let drop_path = format!("{}/melodic_techno_126_fsharp_min_drop.wav", PROJECTS_DIR);
+    let drop_path = out_dir.path_str("melodic_techno_126_fsharp_min_drop.wav");
     let bounce_res = dispatch_tool_call(
         &mut state,
         "bounce_wav",
@@ -697,7 +779,7 @@ fn test_mcp_build_melodic_techno_126_fsharp_min_project() {
     assert!(!bounce_res.is_error);
     assert!(Path::new(&drop_path).exists());
 
-    let stems_dir = format!("{}/melodic_techno_stems", PROJECTS_DIR);
+    let stems_dir = out_dir.path_str("melodic_techno_stems");
     let stems_res = dispatch_tool_call(
         &mut state,
         "bounce_export_stems",
@@ -705,6 +787,12 @@ fn test_mcp_build_melodic_techno_126_fsharp_min_project() {
     );
     assert!(!stems_res.is_error, "bounce_export_stems failed: {:?}", stems_res);
     assert!(Path::new(&stems_dir).exists(), "Stems directory must exist");
+    let stem_wavs = fs::read_dir(&stems_dir)
+        .unwrap()
+        .filter_map(|e| e.ok())
+        .filter(|e| e.path().extension().and_then(|x| x.to_str()) == Some("wav"))
+        .count();
+    assert!(stem_wavs >= 4, "Expected at least 4 stem WAVs, found {}", stem_wavs);
 
     let analyze_res = dispatch_tool_call(
         &mut state,

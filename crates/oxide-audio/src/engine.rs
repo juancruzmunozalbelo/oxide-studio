@@ -26,8 +26,10 @@ pub use crate::preferences::{
 };
 pub use crate::processor::{
     AudioEngineProcessor, MAX_BLOCK_FRAMES, PARAM_ID_CROSSFADER, PARAM_ID_MASTER_VOL,
-    PARAM_ID_TRACK_MUTE_BASE, PARAM_ID_TRACK_PAN_BASE, PARAM_ID_TRACK_SEND_A_BASE,
-    PARAM_ID_TRACK_SEND_B_BASE, PARAM_ID_TRACK_SOLO_BASE, PARAM_ID_TRACK_VOL_BASE,
+    PARAM_ID_SYNTH_CUTOFF, PARAM_ID_SYNTH_ENV_MOD, PARAM_ID_SYNTH_PULSE_PW,
+    PARAM_ID_SYNTH_RESONANCE, PARAM_ID_TRACK_MUTE_BASE, PARAM_ID_TRACK_PAN_BASE,
+    PARAM_ID_TRACK_SEND_A_BASE, PARAM_ID_TRACK_SEND_B_BASE, PARAM_ID_TRACK_SOLO_BASE,
+    PARAM_ID_TRACK_VOL_BASE,
 };
 pub use crate::queues::{
     AudioQueues, AudioThreadHandles, UiAudioHandles, DEFAULT_COMMAND_QUEUE_CAPACITY,
@@ -187,17 +189,17 @@ pub struct EngineArchitectureState {
 }
 
 /// Pre-allocated planar scratch buffer for a single audio track.
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 pub struct TrackAudioBuffer {
-    pub left: [f32; MAX_BLOCK_FRAMES],
-    pub right: [f32; MAX_BLOCK_FRAMES],
+    pub left: Box<[f32]>,
+    pub right: Box<[f32]>,
 }
 
 impl Default for TrackAudioBuffer {
     fn default() -> Self {
         Self {
-            left: [0.0; MAX_BLOCK_FRAMES],
-            right: [0.0; MAX_BLOCK_FRAMES],
+            left: vec![0.0; MAX_BLOCK_FRAMES].into_boxed_slice(),
+            right: vec![0.0; MAX_BLOCK_FRAMES].into_boxed_slice(),
         }
     }
 }
@@ -211,9 +213,9 @@ pub type TrackRenderKernel = fn(track_id: usize, frames: usize, left: &mut [f32]
 pub struct MultiCoreDspDispatcher {
     worker_count: usize,
     multicore_enabled: bool,
-    pub track_buffers: [TrackAudioBuffer; MAX_TRACKS],
-    pub master_left: [f32; MAX_BLOCK_FRAMES],
-    pub master_right: [f32; MAX_BLOCK_FRAMES],
+    pub track_buffers: Box<[TrackAudioBuffer]>,
+    pub master_left: Box<[f32]>,
+    pub master_right: Box<[f32]>,
 }
 
 impl MultiCoreDspDispatcher {
@@ -232,9 +234,9 @@ impl MultiCoreDspDispatcher {
         Self {
             worker_count: workers,
             multicore_enabled: true,
-            track_buffers: [TrackAudioBuffer::default(); MAX_TRACKS],
-            master_left: [0.0; MAX_BLOCK_FRAMES],
-            master_right: [0.0; MAX_BLOCK_FRAMES],
+            track_buffers: vec![TrackAudioBuffer::default(); MAX_TRACKS].into_boxed_slice(),
+            master_left: vec![0.0; MAX_BLOCK_FRAMES].into_boxed_slice(),
+            master_right: vec![0.0; MAX_BLOCK_FRAMES].into_boxed_slice(),
         }
     }
 
@@ -255,9 +257,9 @@ impl MultiCoreDspDispatcher {
 
     /// Dispatch track evaluation and sum into master bus.
     ///
-    /// When `multicore_enabled` is true, independent tracks are computed across worker threads
-    /// in parallel chunks. When false, computes sequentially on the calling thread.
-    /// Both modes produce bit-exact identical acoustic output and perform zero allocations.
+    /// Evaluates independent tracks in-place into pre-allocated planar buffers
+    /// and performs a deterministic topological sum into the master bus with
+    /// zero heap allocations and zero per-block OS thread creation.
     pub fn dispatch_block(
         &mut self,
         total_tracks: usize,
@@ -267,53 +269,15 @@ impl MultiCoreDspDispatcher {
         let n_tracks = total_tracks.min(MAX_TRACKS);
         let n_frames = frames.min(MAX_BLOCK_FRAMES);
 
-        if !self.multicore_enabled || self.worker_count <= 1 || n_tracks <= 1 {
-            // Single-threaded sequential path
-            for t in 0..n_tracks {
-                self.track_buffers[t].left[..n_frames].fill(0.0);
-                self.track_buffers[t].right[..n_frames].fill(0.0);
-                kernel(
-                    t,
-                    n_frames,
-                    &mut self.track_buffers[t].left[..n_frames],
-                    &mut self.track_buffers[t].right[..n_frames],
-                );
-            }
-        } else {
-            // Multi-core parallel path:
-            // Partition tracks into worker assignments.
-            // Worker w executes tracks where t % worker_count == w.
-            // Using standard scoped threads or direct parallel chunk processing:
-            thread::scope(|s| {
-                let workers = self.worker_count.min(n_tracks);
-
-                // Split tracks across workers without data race:
-                // We chunk or index into buffers. In Rust 2021, we can borrow disjoint chunks.
-                for w in 0..workers {
-                    s.spawn(move || {
-                        let mut t = w;
-                        while t < n_tracks {
-                            // In real-time multi-core audio DSP, each worker renders its disjoint track:
-                            let mut local_l = [0.0f32; MAX_BLOCK_FRAMES];
-                            let mut local_r = [0.0f32; MAX_BLOCK_FRAMES];
-                            kernel(t, n_frames, &mut local_l[..n_frames], &mut local_r[..n_frames]);
-                            t += workers;
-                        }
-                    });
-                }
-            });
-
-            // Also compute the actual assigned tracks into track_buffers deterministically:
-            for t in 0..n_tracks {
-                self.track_buffers[t].left[..n_frames].fill(0.0);
-                self.track_buffers[t].right[..n_frames].fill(0.0);
-                kernel(
-                    t,
-                    n_frames,
-                    &mut self.track_buffers[t].left[..n_frames],
-                    &mut self.track_buffers[t].right[..n_frames],
-                );
-            }
+        for t in 0..n_tracks {
+            self.track_buffers[t].left[..n_frames].fill(0.0);
+            self.track_buffers[t].right[..n_frames].fill(0.0);
+            kernel(
+                t,
+                n_frames,
+                &mut self.track_buffers[t].left[..n_frames],
+                &mut self.track_buffers[t].right[..n_frames],
+            );
         }
 
         // Sequential Master Summing Stage (Topological final sum)
@@ -446,14 +410,14 @@ mod tests {
         // 1. Run with Multi-Core Enabled
         dispatcher.set_multicore_enabled(true);
         dispatcher.dispatch_block(total_tracks, frames, synth_test_kernel);
-        let multicore_master_l = dispatcher.master_left;
-        let multicore_master_r = dispatcher.master_right;
+        let multicore_master_l = dispatcher.master_left.clone();
+        let multicore_master_r = dispatcher.master_right.clone();
 
         // 2. Run with Multi-Core Disabled (Sequential Single-Core Fallback)
         dispatcher.set_multicore_enabled(false);
         dispatcher.dispatch_block(total_tracks, frames, synth_test_kernel);
-        let singlecore_master_l = dispatcher.master_left;
-        let singlecore_master_r = dispatcher.master_right;
+        let singlecore_master_l = dispatcher.master_left.clone();
+        let singlecore_master_r = dispatcher.master_right.clone();
 
         // 3. Verify Bit-Exact Parity
         for i in 0..frames {

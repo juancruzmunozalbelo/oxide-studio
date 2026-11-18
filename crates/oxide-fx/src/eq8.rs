@@ -433,7 +433,7 @@ impl AudioEffectDevice for EQEight {
             return;
         }
 
-        let count = buffer.frame_count.min(1024);
+        let count = buffer.frame_count.min(oxide_core::MAX_BUFFER_SIZE);
         let sqrt2 = std::f32::consts::SQRT_2;
 
         match self.stereo_mode {
@@ -495,6 +495,42 @@ impl AudioEffectDevice for EQEight {
         }
 
         self.update_spectrum(buffer);
+    }
+
+    fn set_parameter(&mut self, param_id: u32, value: f32) {
+        if !value.is_finite() {
+            return;
+        }
+        let id = param_id as usize;
+        if id < 8 {
+            self.bands[id].gain_db = value.clamp(-15.0, 15.0);
+            self.bands[id].recompute(self.sample_rate);
+        } else if (10..18).contains(&id) {
+            let b = id - 10;
+            self.bands[b].freq_hz = value.clamp(20.0, 20000.0);
+            self.bands[b].recompute(self.sample_rate);
+        } else if (20..28).contains(&id) {
+            let b = id - 20;
+            self.bands[b].q = value.clamp(0.1, 18.0);
+            self.bands[b].recompute(self.sample_rate);
+        } else if (100..108).contains(&id) {
+            self.bands[id - 100].enabled = value > 0.5;
+        }
+    }
+
+    fn get_parameter(&self, param_id: u32) -> f32 {
+        let id = param_id as usize;
+        if id < 8 {
+            self.bands[id].gain_db
+        } else if (10..18).contains(&id) {
+            self.bands[id - 10].freq_hz
+        } else if (20..28).contains(&id) {
+            self.bands[id - 20].q
+        } else if (100..108).contains(&id) {
+            if self.bands[id - 100].enabled { 1.0 } else { 0.0 }
+        } else {
+            0.0
+        }
     }
 }
 

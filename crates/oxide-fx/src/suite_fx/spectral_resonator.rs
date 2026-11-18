@@ -97,7 +97,7 @@ impl AudioEffectDevice for SpectralResonator {
             return;
         }
 
-        let count = buffer.frame_count.min(1024);
+        let count = buffer.frame_count.min(oxide_core::MAX_BUFFER_SIZE);
         if count == 0 {
             return;
         }
@@ -152,6 +152,31 @@ impl AudioEffectDevice for SpectralResonator {
 
             buffer.left[i] = dry_l * (1.0 - self.dry_wet) + wet_l * self.dry_wet;
             buffer.right[i] = dry_r * (1.0 - self.dry_wet) + wet_r * self.dry_wet;
+        }
+    }
+
+    fn set_parameter(&mut self, param_id: u32, value: f32) {
+        if !value.is_finite() {
+            return;
+        }
+        match param_id {
+            0 => self.dry_wet = value.clamp(0.0, 1.0),
+            1 => self.root_hz = value.clamp(20.0, 4000.0),
+            2 => self.decay_s = value.clamp(0.05, 10.0),
+            3 => self.harmonic_count = value.round().clamp(1.0, 8.0) as usize,
+            4 => self.unison_spread = value.clamp(0.0, 1.0),
+            _ => {}
+        }
+    }
+
+    fn get_parameter(&self, param_id: u32) -> f32 {
+        match param_id {
+            0 => self.dry_wet,
+            1 => self.root_hz,
+            2 => self.decay_s,
+            3 => self.harmonic_count as f32,
+            4 => self.unison_spread,
+            _ => 0.0,
         }
     }
 }

@@ -14,6 +14,10 @@ pub struct DrumPadDefinition {
     pub pan: f32,
     pub pitch_offset_semitones: f32,
     pub decay_ms: f32,
+    #[serde(default)]
+    pub mute: bool,
+    #[serde(default)]
+    pub solo: bool,
 }
 
 impl DrumPadDefinition {
@@ -28,6 +32,8 @@ impl DrumPadDefinition {
             pan: 0.0,
             pitch_offset_semitones: 0.0,
             decay_ms: 500.0,
+            mute: false,
+            solo: false,
         }
     }
 }

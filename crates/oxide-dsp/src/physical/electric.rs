@@ -277,7 +277,7 @@ impl InstrumentDevice for ElectricDevice {
             }
         }
 
-        let frames = audio_out.frame_count.min(1024);
+        let frames = audio_out.frame_count.min(oxide_core::MAX_BUFFER_SIZE);
         for i in 0..frames {
             let (l, r) = self.process_stereo_sample();
             audio_out.left[i] += l;
@@ -295,6 +295,35 @@ impl InstrumentDevice for ElectricDevice {
 
     fn all_notes_off(&mut self) {
         self.silence_all();
+    }
+
+    fn set_parameter(&mut self, param_id: u32, value: f32) {
+        if !value.is_finite() {
+            return;
+        }
+        match param_id {
+            0 => self.master_volume = value.clamp(0.0, 2.0),
+            1 => self.hammer_hardness = value.clamp(0.0, 1.0),
+            2 => self.tine_decay = value.clamp(0.5, 8.0),
+            3 => self.bell_gain = value.clamp(0.0, 2.0),
+            4 => self.pickup_distance = value.clamp(0.1, 1.0),
+            5 => self.tremolo_rate = value.clamp(0.5, 12.0),
+            6 => self.tremolo_depth = value.clamp(0.0, 1.0),
+            _ => {}
+        }
+    }
+
+    fn get_parameter(&self, param_id: u32) -> f32 {
+        match param_id {
+            0 => self.master_volume,
+            1 => self.hammer_hardness,
+            2 => self.tine_decay,
+            3 => self.bell_gain,
+            4 => self.pickup_distance,
+            5 => self.tremolo_rate,
+            6 => self.tremolo_depth,
+            _ => 0.0,
+        }
     }
 }
 

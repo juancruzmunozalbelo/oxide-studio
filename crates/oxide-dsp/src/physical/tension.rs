@@ -338,7 +338,7 @@ impl InstrumentDevice for TensionDevice {
             }
         }
 
-        let frames = audio_out.frame_count.min(1024);
+        let frames = audio_out.frame_count.min(oxide_core::MAX_BUFFER_SIZE);
         for i in 0..frames {
             let (l, r) = self.process_stereo_sample();
             audio_out.left[i] += l;
@@ -356,6 +356,33 @@ impl InstrumentDevice for TensionDevice {
 
     fn all_notes_off(&mut self) {
         self.silence_all();
+    }
+
+    fn set_parameter(&mut self, param_id: u32, value: f32) {
+        if !value.is_finite() {
+            return;
+        }
+        match param_id {
+            0 => self.master_volume = value.clamp(0.0, 2.0),
+            1 => self.string_damping = value.clamp(0.0, 1.0),
+            2 => self.string_decay_loss = value.clamp(0.8, 0.999),
+            3 => self.string_stiffness = value.clamp(0.0, 0.8),
+            4 => self.pickup_position = value.clamp(0.0, 1.0),
+            5 => self.body_gain = value.clamp(0.0, 2.0),
+            _ => {}
+        }
+    }
+
+    fn get_parameter(&self, param_id: u32) -> f32 {
+        match param_id {
+            0 => self.master_volume,
+            1 => self.string_damping,
+            2 => self.string_decay_loss,
+            3 => self.string_stiffness,
+            4 => self.pickup_position,
+            5 => self.body_gain,
+            _ => 0.0,
+        }
     }
 }
 

@@ -1,7 +1,7 @@
-//! End-to-End Test Suite for Milestone M12: Dual-Target 76-Tool MCP Server and Ableton Live 12 LOM Bridge.
+//! End-to-End Test Suite for Milestone M12: Dual-Target 80-Tool MCP Server and Oxide Studio RPC Bridge.
 //!
 //! Verifies:
-//! - Full 76-tool registration across all 15 Groups with valid MCP schemas
+//! - Full 80-tool registration across all 15 Groups with valid MCP schemas (and 65 when filtering live12_*)
 //! - Group 2 Devices & Chains: `device_add_to_track`, `device_get_chain`
 //! - Group 3 Synths, Drums & Simpler: `synth_set_parameter`, `drums_configure_pad`, `simpler_slice_to_drum_rack`
 //! - Group 4 Browser & Similarity: `browser_search`, `browser_find_similar_sounds`
@@ -9,21 +9,81 @@
 //! - Group 6 Live 12 MIDI Transforms & Generators: `midi_transform_clip`, `midi_generate_clip`
 //! - Group 7 Audio Clips & Warping: `audio_clip_create_warped`, `audio_clip_set_warp_mode`, `audio_clip_add_warp_marker`
 //! - Group 8 Groove Pool & Comping: `groove_pool_list`, `groove_pool_apply_to_clip`, `take_lane_create`, `take_lane_comp_region`
-//! - Group 9 Mixer, Returns & Global Scale: `return_track_create`, `mixer_set_send`, `scale_set_global`
+//! - Group 9 Mixer, Returns & Global Scale: `return_track_create`, `mixer_set_channel`, `mixer_set_send`, `scale_set_global`
 //! - Group 11 Master FX: `fx_set_limiter`, `fx_set_saturator`
-//! - Group 15 Live 12 LOM Dual-Target TCP Bridge:
-//!   - Offline fallback (structured fallback to oxide-studio engine state when port 9877 is unbound)
-//!   - Online roundtrip (mock TCP server on 127.0.0.1:9877 answering live JSON-RPC 2.0 requests)
+//! - Group 15 Oxide Studio RPC Bridge:
+//!   - Offline fallback (structured fallback to oxide-studio engine state when RPC port is unbound)
+//!   - Online roundtrip (mock TCP server on ephemeral 127.0.0.1:0 answering live JSON-RPC 2.0 requests)
 
+use std::fs;
 use std::io::{BufRead, BufReader, Write};
 use std::net::TcpListener;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
 
 use serde_json::{json, Value};
-use oxide_mcp::McpServer;
+use oxide_mcp::{get_tool_definitions_filtered, McpServer};
+
+struct TempWavGuard(PathBuf);
+
+impl TempWavGuard {
+    fn create_transients(label: &str) -> Self {
+        let path = std::env::temp_dir().join(format!("oxide_e2e_{}_{}.wav", label, std::process::id()));
+        write_test_pcm_wav(&path, 44100, 44100);
+        Self(path)
+    }
+
+    fn path_str(&self) -> String {
+        self.0.to_string_lossy().to_string()
+    }
+}
+
+impl Drop for TempWavGuard {
+    fn drop(&mut self) {
+        let _ = fs::remove_file(&self.0);
+    }
+}
+
+fn write_test_pcm_wav(path: &Path, sample_rate: u32, num_frames: usize) {
+    let channels: u16 = 1;
+    let bits_per_sample: u16 = 16;
+    let byte_rate = sample_rate * channels as u32 * (bits_per_sample / 8) as u32;
+    let block_align = channels * (bits_per_sample / 8);
+    let data_bytes = (num_frames as u32) * (block_align as u32);
+    let riff_size = 36 + data_bytes;
+
+    let mut buf = Vec::with_capacity(44 + data_bytes as usize);
+    buf.extend_from_slice(b"RIFF");
+    buf.extend_from_slice(&riff_size.to_le_bytes());
+    buf.extend_from_slice(b"WAVE");
+    buf.extend_from_slice(b"fmt ");
+    buf.extend_from_slice(&16u32.to_le_bytes());
+    buf.extend_from_slice(&1u16.to_le_bytes()); // PCM
+    buf.extend_from_slice(&channels.to_le_bytes());
+    buf.extend_from_slice(&sample_rate.to_le_bytes());
+    buf.extend_from_slice(&byte_rate.to_le_bytes());
+    buf.extend_from_slice(&block_align.to_le_bytes());
+    buf.extend_from_slice(&bits_per_sample.to_le_bytes());
+    buf.extend_from_slice(b"data");
+    buf.extend_from_slice(&data_bytes.to_le_bytes());
+
+    for i in 0..num_frames {
+        // Place 4 sharp transient drum bursts across 1 second so transient detection triggers cleanly
+        let quarter = num_frames / 4;
+        let offset = i % quarter.max(1);
+        let sample = if offset < 1200 {
+            let env = 1.0 - (offset as f32 / 1200.0);
+            ((i as f32 * 0.08).sin() * env * 24000.0) as i16
+        } else {
+            0i16
+        };
+        buf.extend_from_slice(&sample.to_le_bytes());
+    }
+    fs::write(path, buf).expect("Failed to write temporary PCM WAV");
+}
 
 fn send_request(server: &mut McpServer, req: Value) -> Value {
     let line = req.to_string();
@@ -45,7 +105,7 @@ fn call_tool(server: &mut McpServer, id: u64, name: &str, arguments: Value) -> V
 }
 
 #[test]
-fn test_mcp_all_76_tools_registration() {
+fn test_mcp_all_80_tools_registration() {
     let mut server = McpServer::new();
 
     // Initialize MCP handshake
@@ -73,8 +133,13 @@ fn test_mcp_all_76_tools_registration() {
     let list_resp = send_request(&mut server, list_req);
     let tools = list_resp["result"]["tools"].as_array().expect("tools array");
 
-    // Must be exactly 76 tools
-    assert_eq!(tools.len(), 76, "Expected exactly 76 MCP tools, found {}", tools.len());
+    // Must be all 80 tools unconditionally (no argv[0] cloaking)
+    assert_eq!(tools.len(), 80, "Expected exactly 80 MCP tools, found {}", tools.len());
+
+    // Opt-in legacy Live 12 filter omits all 15 Group-15 tools cleanly (80 - 15 = 65)
+    let filtered = get_tool_definitions_filtered(true);
+    assert_eq!(filtered.len(), 65, "Expected 65 tools with legacy Live 12 tools disabled");
+    assert!(!filtered.iter().any(|t| t.name.starts_with("live12_")));
 
     // Validate that every tool has a name, description, and valid inputSchema
     for t in tools {
@@ -89,9 +154,12 @@ fn test_mcp_all_76_tools_registration() {
 
     // Verify key tools across all 15 Groups
     let expected_sample = [
-        // Group 1: Project & Transport (8 tools)
-        "project_new", "project_load", "project_save", "transport_play", "transport_stop",
-        "transport_set_bpm", "transport_set_swing", "transport_get_telemetry",
+        // Group 1: Project & Transport + ALS
+        "project_new", "project_load", "project_save", "project_import_als", "project_export_als",
+        "transport_play", "transport_stop", "transport_set_bpm", "transport_set_swing", "transport_get_telemetry",
+        // Group 13: Bounce, Stems & Analysis
+        "bounce_wav", "render_bounce_wav", "stems_separate_remix", "bounce_export_stems",
+        "analyze_rendered_audio", "preview_synth_patch",
         // Group 2: Devices & Chains (8 tools)
         "track_create_synth", "track_create_drums", "track_delete",
         "device_add_to_track", "device_remove_from_track", "device_reorder", "device_set_param", "device_get_chain",
@@ -196,12 +264,28 @@ fn test_mcp_group3_synths_drums_simpler() {
     let data2: Value = serde_json::from_str(res2["result"]["content"][0]["text"].as_str().unwrap()).unwrap();
     assert_eq!(data2["pad_index"], 0);
 
-    // Slice Simpler to drum rack
+    // Load transient audio clip & Simpler on track 0 before slicing to Drum Rack
+    let wav_guard = TempWavGuard::create_transients("simpler_slice");
+    let _ = call_tool(&mut server, 211, "device_add_to_track", json!({
+        "track_id": 0,
+        "device_name": "Simpler"
+    }));
+    let clip_res = call_tool(&mut server, 212, "audio_clip_create_warped", json!({
+        "track_id": 0,
+        "slot_id": 0,
+        "sample_path": wav_guard.path_str(),
+        "warp_mode": "beats"
+    }));
+    assert!(!clip_res["result"]["isError"].as_bool().unwrap_or(false));
+
+    // Slice Simpler / track audio transients to drum rack
     let res3 = call_tool(&mut server, 22, "simpler_slice_to_drum_rack", json!({
         "track_id": 0
     }));
+    assert!(!res3["result"]["isError"].as_bool().unwrap_or(false));
     let data3: Value = serde_json::from_str(res3["result"]["content"][0]["text"].as_str().unwrap()).unwrap();
     assert_eq!(data3["status"], "sliced_to_drum_rack");
+    assert!(data3["slices_count"].as_u64().unwrap_or(0) >= 1);
 }
 
 #[test]
@@ -336,13 +420,24 @@ fn test_mcp_live12_midi_generators_and_transforms() {
 fn test_mcp_audio_clips_and_warping() {
     let mut server = McpServer::new();
 
-    // Create warped audio clip
+    // Missing audio file must fail honestly instead of fabricating synthetic silence/DC
+    let err_res = call_tool(&mut server, 69, "audio_clip_create_warped", json!({
+        "track_id": 0,
+        "slot_id": 0,
+        "sample_path": "/nonexistent_oxide_test_audio/missing_drum_loop.wav",
+        "warp_mode": "complex_pro"
+    }));
+    assert_eq!(err_res["result"]["isError"], true);
+
+    // Create warped audio clip from a real temporary PCM WAV
+    let wav_guard = TempWavGuard::create_transients("warp_loop");
     let res1 = call_tool(&mut server, 70, "audio_clip_create_warped", json!({
         "track_id": 0,
         "slot_id": 0,
-        "sample_path": "/tmp/test_drum_loop.wav",
+        "sample_path": wav_guard.path_str(),
         "warp_mode": "complex_pro"
     }));
+    assert!(!res1["result"]["isError"].as_bool().unwrap_or(false));
     let d1: Value = serde_json::from_str(res1["result"]["content"][0]["text"].as_str().unwrap()).unwrap();
     assert_eq!(d1["status"], "created");
     assert_eq!(d1["warp_mode"], "complex_pro");
@@ -361,7 +456,7 @@ fn test_mcp_audio_clips_and_warping() {
     let res3 = call_tool(&mut server, 72, "audio_clip_add_warp_marker", json!({
         "track_id": 0,
         "slot_id": 0,
-        "sample_time": 0.9375,
+        "sample_time": 0.5,
         "beat_time": 2.0
     }));
     let d3: Value = serde_json::from_str(res3["result"]["content"][0]["text"].as_str().unwrap()).unwrap();
@@ -378,6 +473,18 @@ fn test_mcp_groove_pool_and_comping() {
     let d1: Value = serde_json::from_str(res1["result"]["content"][0]["text"].as_str().unwrap()).unwrap();
     assert!(d1["template_count"].as_u64().unwrap() >= 6);
 
+    // Ensure target clip (0, 0) exists before applying groove template
+    let mk_clip = call_tool(&mut server, 801, "clip_create_midi", json!({
+        "track_id": 0,
+        "slot_id": 0,
+        "length_beats": 4.0,
+        "notes": [
+            { "pitch": 36, "start": 0.0, "duration": 0.25, "velocity": 120 },
+            { "pitch": 36, "start": 0.25, "duration": 0.25, "velocity": 100 }
+        ]
+    }));
+    assert!(!mk_clip["result"]["isError"].as_bool().unwrap_or(false));
+
     // Apply groove to clip
     let res2 = call_tool(&mut server, 81, "groove_pool_apply_to_clip", json!({
         "track_id": 0,
@@ -385,6 +492,7 @@ fn test_mcp_groove_pool_and_comping() {
         "groove_name": "MPC 16 Swing-61",
         "amount": 0.8
     }));
+    assert!(!res2["result"]["isError"].as_bool().unwrap_or(false));
     let d2: Value = serde_json::from_str(res2["result"]["content"][0]["text"].as_str().unwrap()).unwrap();
     assert_eq!(d2["status"], "groove_applied");
 
@@ -464,17 +572,15 @@ fn test_mcp_master_fx() {
 
 #[test]
 fn test_live12_lom_offline_fallback() {
-    let mut server = McpServer::new();
-    // Use dedicated unbound port so this test never collides with parallel online mock server
-    server.state.lom_client.port = 19876;
+    let mut server = McpServer::with_lom_port(19876);
 
-    // When no Live 12 Remote Script is running on 19876, live12_* tools must return
-    // structured fallback envelopes without throwing or hanging.
+    // When no Oxide Studio GUI RPC is listening on 19876, live12_* tools must return
+    // structured fallback envelopes and mutate DawState cleanly.
     let res_status = call_tool(&mut server, 110, "live12_status", json!({}));
     let d_status: Value = serde_json::from_str(res_status["result"]["content"][0]["text"].as_str().unwrap()).unwrap();
     assert_eq!(d_status["connected"], false);
     assert_eq!(d_status["status"], "offline");
-    assert_eq!(d_status["target"], "real_ableton_live_12");
+    assert_eq!(d_status["target"], "oxide_studio_gui_rpc");
 
     let res_info = call_tool(&mut server, 111, "live12_get_song_info", json!({}));
     let d_info: Value = serde_json::from_str(res_info["result"]["content"][0]["text"].as_str().unwrap()).unwrap();
@@ -487,11 +593,14 @@ fn test_live12_lom_offline_fallback() {
     assert_eq!(d_tempo["connected"], false);
     assert_eq!(d_tempo["fallback_executed"], true);
     assert_eq!(d_tempo["result"]["tempo"], 138.0);
+    assert!((server.state.bpm - 138.0).abs() < 1e-4);
 
+    let initial_tracks = server.state.project.tracks.len();
     let res_track = call_tool(&mut server, 113, "live12_create_midi_track", json!({ "index": 0 }));
     let d_track: Value = serde_json::from_str(res_track["result"]["content"][0]["text"].as_str().unwrap()).unwrap();
     assert_eq!(d_track["connected"], false);
     assert_eq!(d_track["fallback_executed"], true);
+    assert_eq!(server.state.project.tracks.len(), initial_tracks + 1);
 
     let res_query = call_tool(&mut server, 114, "live12_exec_lom_query", json!({ "query": "live_set.tracks[0].name" }));
     let d_query: Value = serde_json::from_str(res_query["result"]["content"][0]["text"].as_str().unwrap()).unwrap();
@@ -504,14 +613,9 @@ fn test_live12_lom_online_tcp_roundtrip() {
     let running = Arc::new(AtomicBool::new(true));
     let r_clone = running.clone();
 
-    // Bind mock TCP server on 127.0.0.1:9877 to simulate active AbletonMCP remote script
-    let listener = match TcpListener::bind("127.0.0.1:9877") {
-        Ok(l) => l,
-        Err(e) => {
-            eprintln!("Skipping online TCP roundtrip test: 127.0.0.1:9877 unavailable ({})", e);
-            return;
-        }
-    };
+    // Bind mock TCP server on ephemeral 127.0.0.1:0 so parallel runs or live GUI instances never collide
+    let listener = TcpListener::bind("127.0.0.1:0").expect("Failed to bind ephemeral mock RPC port");
+    let port = listener.local_addr().unwrap().port();
     listener.set_nonblocking(true).unwrap();
 
     let server_handle = thread::spawn(move || {
@@ -534,7 +638,7 @@ fn test_live12_lom_online_tcp_roundtrip() {
                                     json!({ "bpm": bpm, "updated": true })
                                 },
                                 "create_midi_track" => json!({ "index": 0, "status": "created" }),
-                                "exec_lom_query" => json!({ "query": req["params"]["query"], "value": "Live 12 Master" }),
+                                "exec_lom_query" => json!({ "query": req["params"]["query"], "value": "Oxide Master" }),
                                 _ => json!({ "status": "ok" }),
                             };
                             let resp = json!({
@@ -557,17 +661,17 @@ fn test_live12_lom_online_tcp_roundtrip() {
         }
     });
 
-    // Allow mock server to start
-    thread::sleep(Duration::from_millis(50));
+    // Allow mock server thread to enter accept loop
+    thread::sleep(Duration::from_millis(25));
 
-    let mut server = McpServer::new();
+    let mut server = McpServer::with_lom_port(port);
 
     // 1. live12_status
     let res_status = call_tool(&mut server, 201, "live12_status", json!({}));
     let d_status: Value = serde_json::from_str(res_status["result"]["content"][0]["text"].as_str().unwrap()).unwrap();
     assert_eq!(d_status["connected"], true);
     assert_eq!(d_status["status"], "online");
-    assert_eq!(d_status["target"], "real_ableton_live_12");
+    assert_eq!(d_status["target"], "oxide_studio_gui_rpc");
 
     // 2. live12_get_song_info
     let res_info = call_tool(&mut server, 202, "live12_get_song_info", json!({}));
@@ -592,7 +696,7 @@ fn test_live12_lom_online_tcp_roundtrip() {
     let res_query = call_tool(&mut server, 205, "live12_exec_lom_query", json!({ "query": "live_set.master_track.name" }));
     let d_query: Value = serde_json::from_str(res_query["result"]["content"][0]["text"].as_str().unwrap()).unwrap();
     assert_eq!(d_query["connected"], true);
-    assert_eq!(d_query["result"]["value"], "Live 12 Master");
+    assert_eq!(d_query["result"]["value"], "Oxide Master");
 
     // Cleanup mock server
     running.store(false, Ordering::Relaxed);

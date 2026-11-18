@@ -1,38 +1,131 @@
 //! Tool catalogue, schema declarations, and dispatch logic for DAW autonomous control.
 
 use std::fs;
-use std::path::Path;
+use std::path::PathBuf;
 use serde_json::{json, Value};
 
 use oxide_bounce::{render_project_window_to_wav, DemoArrangementRenderer, WavWriter};
-use oxide_core::device::DeviceChain;
+use oxide_core::device::{DeviceCategory, DeviceChain};
 use oxide_core::scale::{GlobalScale, ScaleMode};
 use oxide_dsp::presets::{load_mapping_catalog, load_preset_catalog};
+use oxide_dsp::PARAMETER_DESCRIPTORS;
+use oxide_drums::DrumPadSource;
 use oxide_plugin_scanner::PluginScannerSupervisor;
 use oxide_project::{DAWProject, InstrumentConfig, SynthPatchParameters, TrackDefinition};
+use oxide_timeline::track::SendRoutingMode;
 use oxide_timeline::{
-    generate_euclidean, generate_rhythm, generate_seed, generate_shape, generate_stacks,
-    transform_arpeggiate, transform_connect, transform_ornament, transform_quantize,
-    transform_recombine, transform_span, transform_strum, transform_time_warp,
-    ArrangementClip, AudioClipData, AutomationLane, AutomationPoint, ClipPattern, ContourShape,
-    DrumStep, DrumStepPattern, MidiNote, MidiPattern, QuantizeMode, RhythmStyle, ScaleLock,
-    SessionClip, SpanMode, StacksChordType, StacksVoicing, StrumDirection, WarpedAudioClip,
-    WarpMode,
+    detect_transients, generate_euclidean, generate_rhythm, generate_seed, generate_shape,
+    generate_stacks, transform_arpeggiate, transform_connect, transform_ornament,
+    transform_quantize, transform_recombine, transform_span, transform_strum,
+    transform_time_warp, ArrangementClip, AudioClipData, AutomationLane, AutomationPoint,
+    ClipPattern, ContourShape, DrumStep, DrumStepPattern, MidiNote, MidiPattern, QuantizeMode,
+    RhythmStyle, ScaleLock, SessionClip, SpanMode, StacksChordType, StacksVoicing, StrumDirection,
+    WarpMode, WarpedAudioClip,
 };
 
 use crate::analysis::AudioAnalysisMetrics;
 use crate::browser::BrowserCategory;
-use crate::devices::{add_device_to_chain, dump_device_chain, instantiate_device};
+use crate::devices::{
+    add_device_to_chain, dump_device_chain_detailed, instantiate_managed_device,
+    ManagedDeviceHandle,
+};
 use crate::lilypond::{parse_lilypond, sequence_to_clip_pattern};
 use crate::music_theory::{
-    bjorklund, build_chord_notes, generate_drum_groove, get_scale_intervals,
-    parse_pitch_class, parse_roman_degree,
+    bjorklund, build_chord_notes, generate_drum_groove, get_scale_intervals, parse_pitch_class,
+    parse_roman_degree,
 };
 use crate::protocol::{Tool, ToolCallResult, ToolInputSchema};
 use crate::state::DawState;
 
+/// Expand a leading `~` or `~/` path prefix using `HOME`.
+fn expand_tilde_path(raw: &str) -> PathBuf {
+    let trimmed = raw.trim();
+    if trimmed == "~" {
+        if let Ok(home) = std::env::var("HOME") {
+            return PathBuf::from(home);
+        }
+    } else if let Some(rest) = trimmed.strip_prefix("~/") {
+        if let Ok(home) = std::env::var("HOME") {
+            return PathBuf::from(home).join(rest);
+        }
+    }
+    PathBuf::from(trimmed)
+}
+
+/// Generate a collision-free fallback path under the OS temp directory.
+fn default_temp_file(stem: &str, ext: &str) -> PathBuf {
+    std::env::temp_dir().join(format!("{}_{}.{}", stem, std::process::id(), ext))
+}
+
+fn parse_scale_mode_name(name: &str) -> ScaleMode {
+    match name.trim().to_ascii_lowercase().as_str() {
+        "minor" | "aeolian" | "natural_minor" | "natural minor" => ScaleMode::Minor,
+        "dorian" => ScaleMode::Dorian,
+        "phrygian" => ScaleMode::Phrygian,
+        "lydian" => ScaleMode::Lydian,
+        "mixolydian" => ScaleMode::Mixolydian,
+        "locrian" => ScaleMode::Locrian,
+        "harmonic_minor" | "harmonic minor" | "harmonicminor" => ScaleMode::HarmonicMinor,
+        "melodic_minor" | "melodic minor" | "melodicminor" => ScaleMode::MelodicMinor,
+        "pentatonic" => ScaleMode::Pentatonic,
+        "blues" => ScaleMode::Blues,
+        "diminished" => ScaleMode::Diminished,
+        "whole_tone" | "whole tone" | "wholetone" => ScaleMode::WholeTone,
+        _ => ScaleMode::Major,
+    }
+}
+
+fn set_track_device_param_helper(
+    state: &mut DawState,
+    track_id: u32,
+    device_index: usize,
+    param_key: &str,
+    value: f32,
+) -> Result<(String, String, f32), String> {
+    let handles = state
+        .device_handles
+        .get(&track_id)
+        .ok_or_else(|| format!("Track {} has no managed device chain", track_id))?;
+
+    let handle = handles.get_at(device_index).cloned().ok_or_else(|| {
+        format!(
+            "Device index {} out of range for track {} (count: {})",
+            device_index,
+            track_id,
+            handles.device_count()
+        )
+    })?;
+
+    let device_name = handle.name();
+    let (resolved_param, applied_value) = handle.set_parameter(param_key, value)?;
+
+    // Keep track insert_fx synchronized immediately in project state
+    if let Some(p_trk) = state.project.tracks.get_mut(track_id as usize) {
+        if let Some(track_handles) = state.device_handles.get(&track_id) {
+            p_trk.insert_fx = track_handles
+                .audio_effects
+                .iter()
+                .filter_map(|h| h.to_insert_effect_config())
+                .collect();
+        }
+    }
+
+    Ok((device_name, resolved_param, applied_value))
+}
+
 /// Return complete catalogue of all registered MCP tools.
+///
+/// Honors `OXIDE_DISABLE_LEGACY_LIVE12_TOOLS=1` (or `true`/`yes`) to omit Group-15
+/// `live12_*` bridge tools when running alongside `ableton-live12-mcp`.
 pub fn get_tool_definitions() -> Vec<Tool> {
+    let disable_legacy = std::env::var("OXIDE_DISABLE_LEGACY_LIVE12_TOOLS")
+        .map(|v| matches!(v.trim().to_ascii_lowercase().as_str(), "1" | "true" | "yes"))
+        .unwrap_or(false);
+    get_tool_definitions_filtered(disable_legacy)
+}
+
+/// Return the registered MCP tool catalogue, optionally hiding Group-15 `live12_*` bridge tools.
+pub fn get_tool_definitions_filtered(disable_legacy_live12: bool) -> Vec<Tool> {
     let mut tools = vec![
         // --- Project & Transport ---
         Tool {
@@ -125,7 +218,9 @@ pub fn get_tool_definitions() -> Vec<Tool> {
             input_schema: ToolInputSchema {
                 schema_type: "object".to_string(),
                 properties: Some(json!({
-                    "name": { "type": "string", "description": "Track name" }
+                    "name": { "type": "string", "description": "Track name" },
+                    "preset": { "type": "string", "description": "Optional initial preset filename" },
+                    "preset_name": { "type": "string", "description": "Alias for initial preset filename" }
                 })),
                 required: Some(vec!["name".to_string()]),
             },
@@ -167,7 +262,8 @@ pub fn get_tool_definitions() -> Vec<Tool> {
             input_schema: ToolInputSchema {
                 schema_type: "object".to_string(),
                 properties: Some(json!({
-                    "preset_name": { "type": "string", "description": "Preset filename, e.g. 'wowbass.preset' or 'acid.preset'" }
+                    "preset_name": { "type": "string", "description": "Preset filename, e.g. 'wowbass.preset' or 'acid.preset'" },
+                    "track_id": { "type": "integer", "description": "Optional target synth track ID" }
                 })),
                 required: Some(vec!["preset_name".to_string()]),
             },
@@ -341,6 +437,7 @@ pub fn get_tool_definitions() -> Vec<Tool> {
                 schema_type: "object".to_string(),
                 properties: Some(json!({
                     "track_id": { "type": "integer", "description": "Arrangement track index" },
+                    "slot_id": { "type": "integer", "description": "Source session clip slot index (default 0)" },
                     "clip_id": { "type": "integer", "description": "Clip ID" },
                     "start_beat": { "type": "number", "description": "Start position on timeline in musical beats" },
                     "duration_beats": { "type": "number", "description": "Length in musical beats" },
@@ -460,6 +557,7 @@ pub fn get_tool_definitions() -> Vec<Tool> {
             input_schema: ToolInputSchema {
                 schema_type: "object".to_string(),
                 properties: Some(json!({
+                    "start_beat": { "type": "number", "description": "Timeline start beat for render window (default 0.0)" },
                     "duration_seconds": { "type": "number", "description": "Duration in seconds (e.g. 4.5)" },
                     "output_path": { "type": "string", "description": "Target WAV file path" },
                     "bit_depth": { "type": "integer", "description": "16 or 32 (default 16)" }
@@ -473,6 +571,7 @@ pub fn get_tool_definitions() -> Vec<Tool> {
             input_schema: ToolInputSchema {
                 schema_type: "object".to_string(),
                 properties: Some(json!({
+                    "start_beat": { "type": "number", "description": "Timeline start beat for render window (default 0.0)" },
                     "duration_seconds": { "type": "number", "description": "Duration in seconds" },
                     "output_path": { "type": "string", "description": "Target WAV file path" },
                     "bit_depth": { "type": "integer", "description": "16 or 32" }
@@ -514,6 +613,8 @@ pub fn get_tool_definitions() -> Vec<Tool> {
                     "progression": { "type": "string", "description": "Chord progression" },
                     "rhythm_pattern": { "type": "string", "description": "'syncopated', 'driving_8ths', 'root_fifth', 'offbeat_house', 'dub', 'acid_16ths'" },
                     "octave": { "type": "integer", "description": "Bass octave (e.g. 1 or 2)" },
+                    "bars": { "type": "integer", "description": "Total bar count override" },
+                    "humanize": { "type": "number", "description": "Velocity/microtiming humanization amount [0.0..1.0]" },
                     "name": { "type": "string", "description": "Clip name" }
                 })),
                 required: Some(vec!["track_id".to_string(), "slot_id".to_string()]),
@@ -534,6 +635,7 @@ pub fn get_tool_definitions() -> Vec<Tool> {
                     "direction": { "type": "string", "description": "'up', 'down', 'up_down', 'random'" },
                     "octaves": { "type": "integer", "description": "Octave span [1..3]" },
                     "gate": { "type": "number", "description": "Gate length ratio [0.1..1.0]" },
+                    "bars": { "type": "integer", "description": "Total bar count override" },
                     "name": { "type": "string", "description": "Clip name" }
                 })),
                 required: Some(vec!["track_id".to_string(), "slot_id".to_string()]),
@@ -626,9 +728,10 @@ pub fn get_tool_definitions() -> Vec<Tool> {
                 properties: Some(json!({
                     "track_id": { "type": "integer", "description": "Target track ID" },
                     "device_type": { "type": "string", "description": "Device name or type identifier" },
+                    "device_name": { "type": "string", "description": "Alias for device_type" },
                     "position": { "type": "integer", "description": "Optional 0-based insertion index" }
                 })),
-                required: Some(vec!["track_id".to_string(), "device_type".to_string()]),
+                required: Some(vec!["track_id".to_string()]),
             },
         },
         Tool {
@@ -882,16 +985,18 @@ pub fn get_tool_definitions() -> Vec<Tool> {
                 properties: Some(json!({
                     "root_note": { "type": "string", "description": "Root pitch class (e.g. 'C', 'F#', or integer 0..11)" },
                     "scale_name": { "type": "string", "description": "Scale mode: Major, Minor, Dorian, Phrygian, Lydian, Mixolydian, Aeolian, Locrian, HarmonicMinor, MelodicMinor, Pentatonic, Blues, Diminished, WholeTone" },
+                    "scale": { "type": "string", "description": "Alias for scale_name" },
+                    "mode": { "type": "string", "description": "Alias for scale_name" },
                     "scale_lock": { "type": "boolean", "description": "Lock notes to scale" }
                 })),
-                required: Some(vec!["root_note".to_string(), "scale_name".to_string()]),
+                required: Some(vec!["root_note".to_string()]),
             },
         },
 
-        // --- Group 15: Aruston Live Studio GUI & Audio Engine RPC Bridge (15 tools) ---
+        // --- Group 15: Oxide Studio Live GUI & Audio Engine RPC Bridge (15 tools) ---
         Tool {
             name: "live12_status".to_string(),
-            description: "Check TCP connectivity to Aruston Live Studio GUI & Audio Engine on 127.0.0.1:9877.".to_string(),
+            description: "Check TCP connectivity to Oxide Studio Live GUI & Audio Engine on 127.0.0.1:9877.".to_string(),
             input_schema: ToolInputSchema {
                 schema_type: "object".to_string(),
                 properties: None,
@@ -900,7 +1005,7 @@ pub fn get_tool_definitions() -> Vec<Tool> {
         },
         Tool {
             name: "live12_get_song_info".to_string(),
-            description: "Query Aruston Live Studio Song info over TCP (127.0.0.1:9877): tempo, is_playing, song_time, scale, root, track count, return track count, scene count.".to_string(),
+            description: "Query Oxide Studio Live GUI Song info over TCP (127.0.0.1:9877): tempo, is_playing, song_time, scale, root, track count, return track count, scene count.".to_string(),
             input_schema: ToolInputSchema {
                 schema_type: "object".to_string(),
                 properties: None,
@@ -909,7 +1014,7 @@ pub fn get_tool_definitions() -> Vec<Tool> {
         },
         Tool {
             name: "live12_create_midi_track".to_string(),
-            description: "Create a new MIDI track in Aruston Live Studio GUI & Audio Engine over TCP (127.0.0.1:9877).".to_string(),
+            description: "Create a new MIDI track in Oxide Studio Live GUI & Audio Engine over TCP (127.0.0.1:9877).".to_string(),
             input_schema: ToolInputSchema {
                 schema_type: "object".to_string(),
                 properties: Some(json!({
@@ -920,7 +1025,7 @@ pub fn get_tool_definitions() -> Vec<Tool> {
         },
         Tool {
             name: "live12_create_audio_track".to_string(),
-            description: "Create a new audio track in Aruston Live Studio GUI & Audio Engine over TCP (127.0.0.1:9877).".to_string(),
+            description: "Create a new audio track in Oxide Studio Live GUI & Audio Engine over TCP (127.0.0.1:9877).".to_string(),
             input_schema: ToolInputSchema {
                 schema_type: "object".to_string(),
                 properties: Some(json!({
@@ -931,7 +1036,7 @@ pub fn get_tool_definitions() -> Vec<Tool> {
         },
         Tool {
             name: "live12_create_return_track".to_string(),
-            description: "Create a new return track in Aruston Live Studio GUI & Audio Engine over TCP (127.0.0.1:9877).".to_string(),
+            description: "Create a new return track in Oxide Studio Live GUI & Audio Engine over TCP (127.0.0.1:9877).".to_string(),
             input_schema: ToolInputSchema {
                 schema_type: "object".to_string(),
                 properties: None,
@@ -940,7 +1045,7 @@ pub fn get_tool_definitions() -> Vec<Tool> {
         },
         Tool {
             name: "live12_load_browser_item".to_string(),
-            description: "Load an instrument, sample, or effect from the browser into a track in Aruston Live Studio GUI over TCP (127.0.0.1:9877).".to_string(),
+            description: "Load an instrument, sample, or effect from the browser into a track in Oxide Studio Live GUI over TCP (127.0.0.1:9877).".to_string(),
             input_schema: ToolInputSchema {
                 schema_type: "object".to_string(),
                 properties: Some(json!({
@@ -952,7 +1057,7 @@ pub fn get_tool_definitions() -> Vec<Tool> {
         },
         Tool {
             name: "live12_create_clip".to_string(),
-            description: "Create an empty clip in a track clip slot in Aruston Live Studio GUI over TCP (127.0.0.1:9877).".to_string(),
+            description: "Create an empty clip in a track clip slot in Oxide Studio Live GUI over TCP (127.0.0.1:9877).".to_string(),
             input_schema: ToolInputSchema {
                 schema_type: "object".to_string(),
                 properties: Some(json!({
@@ -965,7 +1070,7 @@ pub fn get_tool_definitions() -> Vec<Tool> {
         },
         Tool {
             name: "live12_add_notes".to_string(),
-            description: "Add MIDI notes to an existing clip in Aruston Live Studio GUI & Audio Engine over TCP (127.0.0.1:9877).".to_string(),
+            description: "Add MIDI notes to an existing clip in Oxide Studio Live GUI & Audio Engine over TCP (127.0.0.1:9877).".to_string(),
             input_schema: ToolInputSchema {
                 schema_type: "object".to_string(),
                 properties: Some(json!({
@@ -978,7 +1083,7 @@ pub fn get_tool_definitions() -> Vec<Tool> {
         },
         Tool {
             name: "live12_fire_clip".to_string(),
-            description: "Trigger/launch a clip in Aruston Live Studio GUI & Audio Engine over TCP (127.0.0.1:9877).".to_string(),
+            description: "Trigger/launch a clip in Oxide Studio Live GUI & Audio Engine over TCP (127.0.0.1:9877).".to_string(),
             input_schema: ToolInputSchema {
                 schema_type: "object".to_string(),
                 properties: Some(json!({
@@ -990,7 +1095,7 @@ pub fn get_tool_definitions() -> Vec<Tool> {
         },
         Tool {
             name: "live12_fire_scene".to_string(),
-            description: "Trigger/launch a full scene row in Aruston Live Studio GUI & Audio Engine over TCP (127.0.0.1:9877).".to_string(),
+            description: "Trigger/launch a full scene row in Oxide Studio Live GUI & Audio Engine over TCP (127.0.0.1:9877).".to_string(),
             input_schema: ToolInputSchema {
                 schema_type: "object".to_string(),
                 properties: Some(json!({
@@ -1001,7 +1106,7 @@ pub fn get_tool_definitions() -> Vec<Tool> {
         },
         Tool {
             name: "live12_set_device_param".to_string(),
-            description: "Set a device parameter on a track in Aruston Live Studio GUI & Audio Engine over TCP (127.0.0.1:9877).".to_string(),
+            description: "Set a device parameter on a track in Oxide Studio Live GUI & Audio Engine over TCP (127.0.0.1:9877).".to_string(),
             input_schema: ToolInputSchema {
                 schema_type: "object".to_string(),
                 properties: Some(json!({
@@ -1015,7 +1120,7 @@ pub fn get_tool_definitions() -> Vec<Tool> {
         },
         Tool {
             name: "live12_get_track_devices".to_string(),
-            description: "Enumerate all devices and parameter names/ranges for a track in Aruston Live Studio GUI over TCP (127.0.0.1:9877).".to_string(),
+            description: "Enumerate all devices and parameter names/ranges for a track in Oxide Studio Live GUI over TCP (127.0.0.1:9877).".to_string(),
             input_schema: ToolInputSchema {
                 schema_type: "object".to_string(),
                 properties: Some(json!({
@@ -1026,7 +1131,7 @@ pub fn get_tool_definitions() -> Vec<Tool> {
         },
         Tool {
             name: "live12_set_tempo".to_string(),
-            description: "Set song tempo (BPM) in Aruston Live Studio GUI & Audio Engine over TCP (127.0.0.1:9877).".to_string(),
+            description: "Set song tempo (BPM) in Oxide Studio Live GUI & Audio Engine over TCP (127.0.0.1:9877).".to_string(),
             input_schema: ToolInputSchema {
                 schema_type: "object".to_string(),
                 properties: Some(json!({
@@ -1037,7 +1142,7 @@ pub fn get_tool_definitions() -> Vec<Tool> {
         },
         Tool {
             name: "live12_set_scale".to_string(),
-            description: "Set song global scale and root note in Aruston Live Studio GUI & Audio Engine over TCP (127.0.0.1:9877).".to_string(),
+            description: "Set song global scale and root note in Oxide Studio Live GUI & Audio Engine over TCP (127.0.0.1:9877).".to_string(),
             input_schema: ToolInputSchema {
                 schema_type: "object".to_string(),
                 properties: Some(json!({
@@ -1049,7 +1154,7 @@ pub fn get_tool_definitions() -> Vec<Tool> {
         },
         Tool {
             name: "live12_exec_lom_query".to_string(),
-            description: "Execute arbitrary query or expression against Aruston Live Studio GUI & Audio Engine over TCP (127.0.0.1:9877).".to_string(),
+            description: "Execute arbitrary query or expression against Oxide Studio Live GUI & Audio Engine over TCP (127.0.0.1:9877).".to_string(),
             input_schema: ToolInputSchema {
                 schema_type: "object".to_string(),
                 properties: Some(json!({
@@ -1060,57 +1165,54 @@ pub fn get_tool_definitions() -> Vec<Tool> {
         },
     ];
 
-    // Check if running under M12 regression test suite asserting strictly 76 tools
-    let is_m12_test = std::env::args().next().map_or(false, |arg| {
-        arg.contains("m12_mcp_bridge_test") || arg.contains("adversarial_m12_stress_test")
+    tools.push(Tool {
+        name: "project_import_als".to_string(),
+        description: "Import Ableton Live 12 .als project file (gzipped XML or uncompressed) into DAW state.".to_string(),
+        input_schema: ToolInputSchema {
+            schema_type: "object".to_string(),
+            properties: Some(json!({
+                "path": { "type": "string", "description": "Path to .als file on disk" }
+            })),
+            required: Some(vec!["path".to_string()]),
+        },
+    });
+    tools.push(Tool {
+        name: "project_export_als".to_string(),
+        description: "Export current DAW project as a gzip-compressed Ableton Live 12 .als file.".to_string(),
+        input_schema: ToolInputSchema {
+            schema_type: "object".to_string(),
+            properties: Some(json!({
+                "path": { "type": "string", "description": "Target output .als file path" }
+            })),
+            required: Some(vec!["path".to_string()]),
+        },
+    });
+    tools.push(Tool {
+        name: "stems_separate_remix".to_string(),
+        description: "Separate a mixed WAV audio file into 4 remix stems (drums, bass, vocals, other).".to_string(),
+        input_schema: ToolInputSchema {
+            schema_type: "object".to_string(),
+            properties: Some(json!({
+                "input_wav": { "type": "string", "description": "Input WAV file path" },
+                "output_dir": { "type": "string", "description": "Output directory for remix stems" }
+            })),
+            required: Some(vec!["input_wav".to_string(), "output_dir".to_string()]),
+        },
+    });
+    tools.push(Tool {
+        name: "bounce_export_stems".to_string(),
+        description: "Render all project tracks and 4 separated remix stems to WAV files in the specified directory.".to_string(),
+        input_schema: ToolInputSchema {
+            schema_type: "object".to_string(),
+            properties: Some(json!({
+                "output_dir": { "type": "string", "description": "Target output directory" }
+            })),
+            required: Some(vec!["output_dir".to_string()]),
+        },
     });
 
-    if !is_m12_test {
-        tools.push(Tool {
-            name: "project_import_als".to_string(),
-            description: "Import Ableton Live 12 .als project file (gzipped XML or uncompressed) into DAW state.".to_string(),
-            input_schema: ToolInputSchema {
-                schema_type: "object".to_string(),
-                properties: Some(json!({
-                    "path": { "type": "string", "description": "Path to .als file on disk" }
-                })),
-                required: Some(vec!["path".to_string()]),
-            },
-        });
-        tools.push(Tool {
-            name: "project_export_als".to_string(),
-            description: "Export current DAW project as a gzip-compressed Ableton Live 12 .als file.".to_string(),
-            input_schema: ToolInputSchema {
-                schema_type: "object".to_string(),
-                properties: Some(json!({
-                    "path": { "type": "string", "description": "Target output .als file path" }
-                })),
-                required: Some(vec!["path".to_string()]),
-            },
-        });
-        tools.push(Tool {
-            name: "stems_separate_remix".to_string(),
-            description: "Separate a mixed WAV audio file into 4 remix stems (drums, bass, vocals, other).".to_string(),
-            input_schema: ToolInputSchema {
-                schema_type: "object".to_string(),
-                properties: Some(json!({
-                    "input_wav": { "type": "string", "description": "Input WAV file path" },
-                    "output_dir": { "type": "string", "description": "Output directory for remix stems" }
-                })),
-                required: Some(vec!["input_wav".to_string(), "output_dir".to_string()]),
-            },
-        });
-        tools.push(Tool {
-            name: "bounce_export_stems".to_string(),
-            description: "Render all project tracks and 4 separated remix stems to WAV files in the specified directory.".to_string(),
-            input_schema: ToolInputSchema {
-                schema_type: "object".to_string(),
-                properties: Some(json!({
-                    "output_dir": { "type": "string", "description": "Target output directory" }
-                })),
-                required: Some(vec!["output_dir".to_string()]),
-            },
-        });
+    if disable_legacy_live12 {
+        tools.retain(|t| !t.name.starts_with("live12_"));
     }
 
     tools
@@ -1140,7 +1242,8 @@ pub fn call_tool(state: &mut DawState, name: &str, args: &Value) -> ToolCallResu
                 Some(p) => p,
                 None => return ToolCallResult::error("Missing 'path' parameter"),
             };
-            match DAWProject::load_from_file(Path::new(path_str)) {
+            let resolved_path = expand_tilde_path(path_str);
+            match DAWProject::load_from_file(&resolved_path) {
                 Ok(proj) => {
                     let tracks_count = proj.tracks.len();
                     let bpm = proj.transport.bpm;
@@ -1148,10 +1251,11 @@ pub fn call_tool(state: &mut DawState, name: &str, args: &Value) -> ToolCallResu
                     state.project = proj;
                     state.sync_state_from_project();
                     state.delay.set_tempo(bpm);
-                    state.last_saved_path = Some(path_str.to_string());
+                    let resolved_str = resolved_path.to_string_lossy().to_string();
+                    state.last_saved_path = Some(resolved_str.clone());
                     ToolCallResult::json(&json!({
                         "status": "loaded",
-                        "path": path_str,
+                        "path": resolved_str,
                         "project_name": state.project.metadata.name,
                         "tracks_count": tracks_count,
                         "bpm": bpm,
@@ -1164,17 +1268,18 @@ pub fn call_tool(state: &mut DawState, name: &str, args: &Value) -> ToolCallResu
             let target_path = args
                 .get("path")
                 .and_then(|v| v.as_str())
-                .map(|s| s.to_string())
-                .or_else(|| state.last_saved_path.clone())
-                .unwrap_or_else(|| "/tmp/ableton_session.json".to_string());
+                .map(expand_tilde_path)
+                .or_else(|| state.last_saved_path.as_deref().map(expand_tilde_path))
+                .unwrap_or_else(|| default_temp_file("oxide_session", "json"));
 
             state.sync_project_from_state();
-            match state.project.save_to_file(Path::new(&target_path)) {
+            match state.project.save_to_file(&target_path) {
                 Ok(_) => {
-                    state.last_saved_path = Some(target_path.clone());
+                    let saved_str = target_path.to_string_lossy().to_string();
+                    state.last_saved_path = Some(saved_str.clone());
                     ToolCallResult::json(&json!({
                         "status": "saved",
-                        "path": target_path,
+                        "path": saved_str,
                         "tracks": state.project.tracks.len(),
                         "bpm": state.project.transport.bpm,
                     }))
@@ -1187,7 +1292,8 @@ pub fn call_tool(state: &mut DawState, name: &str, args: &Value) -> ToolCallResu
                 Some(p) => p,
                 None => return ToolCallResult::error("Missing 'path' parameter"),
             };
-            match oxide_project::DAWProject::load_als(path_str) {
+            let resolved_path = expand_tilde_path(path_str);
+            match oxide_project::DAWProject::load_als(&resolved_path) {
                 Ok(proj) => {
                     state.bpm = proj.transport.bpm;
                     state.project = proj;
@@ -1195,7 +1301,7 @@ pub fn call_tool(state: &mut DawState, name: &str, args: &Value) -> ToolCallResu
                     state.delay.set_tempo(state.bpm);
                     ToolCallResult::json(&json!({
                         "imported": true,
-                        "path": path_str,
+                        "path": resolved_path.to_string_lossy(),
                         "bpm": state.bpm,
                         "tracks": state.project.tracks.len()
                     }))
@@ -1208,11 +1314,12 @@ pub fn call_tool(state: &mut DawState, name: &str, args: &Value) -> ToolCallResu
                 Some(p) => p,
                 None => return ToolCallResult::error("Missing 'path' parameter"),
             };
+            let resolved_path = expand_tilde_path(path_str);
             state.sync_project_from_state();
-            match state.project.save_als(path_str) {
+            match state.project.save_als(&resolved_path) {
                 Ok(()) => ToolCallResult::json(&json!({
                     "exported": true,
-                    "path": path_str,
+                    "path": resolved_path.to_string_lossy(),
                     "tracks": state.project.tracks.len()
                 })),
                 Err(e) => ToolCallResult::error(format!("Failed exporting .als file: {}", e)),
@@ -1282,11 +1389,39 @@ pub fn call_tool(state: &mut DawState, name: &str, args: &Value) -> ToolCallResu
                 .or_else(|| args.get("preset_name"))
                 .and_then(|v| v.as_str())
             {
+                let mut tmp_synth = oxide_dsp::SynthEngine::new(state.sample_rate);
+                let mut loaded = tmp_synth.load_preset(preset);
+                if !loaded {
+                    let fallback = match preset {
+                        "analogsaw.preset" | "analogsaw" => Some("osc-shapes.preset"),
+                        "aggro.preset" | "aggro" => Some("distortion.preset"),
+                        "metallic.preset" | "metallic" => Some("laser.preset"),
+                        "darkpad.preset" | "darkpad" => Some("strings.preset"),
+                        _ => None,
+                    };
+                    if let Some(fb) = fallback {
+                        loaded = tmp_synth.load_preset(fb);
+                    }
+                }
                 let mut params = SynthPatchParameters::default();
+                if loaded {
+                    for (i, desc) in PARAMETER_DESCRIPTORS.iter().enumerate() {
+                        params.set_parameter(desc.name, tmp_synth.params.values[i]);
+                    }
+                }
                 params.preset_name = Some(preset.to_string());
                 track.instrument = InstrumentConfig::BuiltinSubtractiveSynth(params);
             }
             state.project.tracks.push(track);
+            while state.matrix.tracks.len() <= id as usize {
+                let tid = state.matrix.tracks.len() as u32;
+                state.matrix.tracks.push(oxide_timeline::SessionTrack::new(tid, name, 8));
+            }
+            while state.timeline.tracks.len() <= id as usize {
+                let tid = state.timeline.tracks.len() as u32;
+                state.timeline.tracks.push(oxide_timeline::ArrangementTrack::new(tid, name, "MidiSynth"));
+            }
+            let _ = state.ensure_timeline_track_mut(id as usize);
             ToolCallResult::json(&json!({
                 "status": "created",
                 "track_id": id,
@@ -1299,6 +1434,15 @@ pub fn call_tool(state: &mut DawState, name: &str, args: &Value) -> ToolCallResu
             let id = state.project.tracks.len() as u32;
             let track = TrackDefinition::new_drum_rack(id, name);
             state.project.tracks.push(track);
+            while state.matrix.tracks.len() <= id as usize {
+                let tid = state.matrix.tracks.len() as u32;
+                state.matrix.tracks.push(oxide_timeline::SessionTrack::new(tid, name, 8));
+            }
+            while state.timeline.tracks.len() <= id as usize {
+                let tid = state.timeline.tracks.len() as u32;
+                state.timeline.tracks.push(oxide_timeline::ArrangementTrack::new(tid, name, "DrumRack"));
+            }
+            let _ = state.ensure_timeline_track_mut(id as usize);
             ToolCallResult::json(&json!({
                 "status": "created",
                 "track_id": id,
@@ -1311,15 +1455,14 @@ pub fn call_tool(state: &mut DawState, name: &str, args: &Value) -> ToolCallResu
                 Some(id) => id as usize,
                 None => return ToolCallResult::error("Missing 'track_id' parameter"),
             };
-            if track_id < state.project.tracks.len() {
-                let removed = state.project.tracks.remove(track_id);
-                ToolCallResult::json(&json!({
+            match state.delete_track_at(track_id) {
+                Ok(removed) => ToolCallResult::json(&json!({
                     "status": "deleted",
                     "track_id": track_id,
-                    "name": removed.name
-                }))
-            } else {
-                ToolCallResult::error(format!("Track index {} out of range", track_id))
+                    "name": removed.name,
+                    "remaining_tracks": state.project.tracks.len()
+                })),
+                Err(e) => ToolCallResult::error(e),
             }
         }
         "synth_list_presets" => {
@@ -1354,22 +1497,27 @@ pub fn call_tool(state: &mut DawState, name: &str, args: &Value) -> ToolCallResu
             }
             if success {
                 if let Some(tid) = args.get("track_id").and_then(|v| v.as_u64()) {
-                    if let Some(trk) = state.project.tracks.get_mut(tid as usize) {
+                    let idx = tid as usize;
+                    if let Some(trk) = state.project.tracks.get_mut(idx) {
+                        state.active_synth_track_id = idx;
                         if let InstrumentConfig::BuiltinSubtractiveSynth(ref mut p) = trk.instrument {
                             p.preset_name = Some(preset_name.to_string());
                         }
                     }
-                } else if let Some(trk) = state
+                } else if let Some(idx) = state
                     .project
                     .tracks
-                    .iter_mut()
-                    .rev()
-                    .find(|t| matches!(t.instrument, InstrumentConfig::BuiltinSubtractiveSynth(_)))
+                    .iter()
+                    .rposition(|t| matches!(t.instrument, InstrumentConfig::BuiltinSubtractiveSynth(_)))
                 {
-                    if let InstrumentConfig::BuiltinSubtractiveSynth(ref mut p) = trk.instrument {
+                    state.active_synth_track_id = idx;
+                    if let InstrumentConfig::BuiltinSubtractiveSynth(ref mut p) =
+                        state.project.tracks[idx].instrument
+                    {
                         p.preset_name = Some(preset_name.to_string());
                     }
                 }
+                state.sync_synth_params_to_project();
                 ToolCallResult::json(&json!({
                     "status": "loaded",
                     "preset": preset_name,
@@ -1395,6 +1543,7 @@ pub fn call_tool(state: &mut DawState, name: &str, args: &Value) -> ToolCallResu
                 } else {
                     state.synth.set_parameter(param_str, param_val);
                 }
+                state.sync_synth_params_to_project();
                 ToolCallResult::json(&json!({
                     "parameter": param_str,
                     "value": state.synth.params.get_value(param_str),
@@ -1408,6 +1557,7 @@ pub fn call_tool(state: &mut DawState, name: &str, args: &Value) -> ToolCallResu
                     } else {
                         state.synth.set_parameter(desc.name, param_val);
                     }
+                    state.sync_synth_params_to_project();
                     ToolCallResult::json(&json!({
                         "parameter_id": param_idx,
                         "parameter_name": desc.name,
@@ -1441,6 +1591,7 @@ pub fn call_tool(state: &mut DawState, name: &str, args: &Value) -> ToolCallResu
                     }
                 }
             }
+            state.sync_synth_params_to_project();
             ToolCallResult::json(&json!({
                 "macro_x": state.synth.macro_x,
                 "macro_y": state.synth.macro_y,
@@ -1468,12 +1619,27 @@ pub fn call_tool(state: &mut DawState, name: &str, args: &Value) -> ToolCallResu
             if let Some(choke) = args.get("choke_group").and_then(|v| v.as_u64()) {
                 state.drum_rack.pads[pad_idx].choke_group = Some(choke as u8);
             }
+            if let Some(mute) = args.get("mute").and_then(|v| v.as_bool()) {
+                state.drum_rack.pads[pad_idx].mute = mute;
+            }
+            if let Some(solo) = args.get("solo").and_then(|v| v.as_bool()) {
+                state.drum_rack.pads[pad_idx].solo = solo;
+            }
             if let Some(wav_path) = args.get("wav_path").and_then(|v| v.as_str()) {
-                if let Err(e) = state.drum_rack.load_sample_pad(pad_idx, wav_path) {
+                let resolved_wav = expand_tilde_path(wav_path);
+                if let Err(e) = state.drum_rack.load_sample_pad(pad_idx, &resolved_wav) {
                     return ToolCallResult::error(format!("Failed to load WAV into pad {}: {}", pad_idx, e));
+                }
+                if let Some(trk) = state.project.tracks.get_mut(state.active_drum_track_id) {
+                    if let InstrumentConfig::ElectronicDrumRack(ref mut dr_def) = trk.instrument {
+                        if let Some(pad_def) = dr_def.pads.get_mut(pad_idx) {
+                            pad_def.sample_path = resolved_wav.to_string_lossy().to_string();
+                        }
+                    }
                 }
             }
 
+            state.sync_drum_rack_to_project();
             let pad = &state.drum_rack.pads[pad_idx];
             ToolCallResult::json(&json!({
                 "pad_index": pad_idx,
@@ -1482,7 +1648,9 @@ pub fn call_tool(state: &mut DawState, name: &str, args: &Value) -> ToolCallResu
                 "decay_seconds": pad.decay_seconds,
                 "volume": pad.volume,
                 "pan": pad.pan,
-                "choke_group": pad.choke_group
+                "choke_group": pad.choke_group,
+                "mute": pad.mute,
+                "solo": pad.solo
             }))
         }
         "drums_trigger_pad" => {
@@ -1883,6 +2051,7 @@ pub fn call_tool(state: &mut DawState, name: &str, args: &Value) -> ToolCallResu
             if let Some(gain) = args.get("output_gain_db").and_then(|v| v.as_f64()) {
                 state.saturator.set_output_gain_db(gain as f32);
             }
+            state.master_saturator_active = true;
             ToolCallResult::json(&json!({
                 "drive_linear": state.saturator.drive_linear,
                 "wet": state.saturator.wet,
@@ -1913,6 +2082,7 @@ pub fn call_tool(state: &mut DawState, name: &str, args: &Value) -> ToolCallResu
             if let Some(damp) = args.get("damping").and_then(|v| v.as_f64()) {
                 state.delay.damping = (damp as f32).clamp(0.0, 1.0);
             }
+            state.master_delay_active = state.delay.wet > 0.0;
             ToolCallResult::json(&json!({
                 "subdivision_beats": state.delay.subdivision.beats(),
                 "feedback": state.delay.feedback,
@@ -1934,6 +2104,7 @@ pub fn call_tool(state: &mut DawState, name: &str, args: &Value) -> ToolCallResu
             if let Some(wet) = args.get("wet").and_then(|v| v.as_f64()) {
                 state.reverb.wet = (wet as f32).clamp(0.0, 1.0);
             }
+            state.master_reverb_active = state.reverb.wet > 0.0;
             ToolCallResult::json(&json!({
                 "room_size": state.reverb.room_size,
                 "decay": state.reverb.decay,
@@ -1956,7 +2127,8 @@ pub fn call_tool(state: &mut DawState, name: &str, args: &Value) -> ToolCallResu
             supervisor.manifest_cache_path = None;
             let manifest = supervisor.scan_all();
             if let Some(out_path) = args.get("output_path").and_then(|v| v.as_str()) {
-                let _ = manifest.save_to_file(Path::new(out_path));
+                let resolved = expand_tilde_path(out_path);
+                let _ = manifest.save_to_file(&resolved);
             }
             ToolCallResult::json(&json!({
                 "total_scanned": manifest.plugins.len(),
@@ -1968,10 +2140,12 @@ pub fn call_tool(state: &mut DawState, name: &str, args: &Value) -> ToolCallResu
         "bounce_wav" | "render_bounce_wav" => {
             let dur = args.get("duration_seconds").and_then(|v| v.as_f64()).unwrap_or(4.5).clamp(1.0, 300.0);
             let start_beat = args.get("start_beat").and_then(|v| v.as_f64()).unwrap_or(0.0).max(0.0);
-            let out_path_str = args
+            let out_path = args
                 .get("output_path")
                 .and_then(|v| v.as_str())
-                .unwrap_or("/tmp/oxide_bounce.wav");
+                .map(expand_tilde_path)
+                .unwrap_or_else(|| default_temp_file("oxide_bounce", "wav"));
+            let out_path_str = out_path.to_string_lossy().to_string();
             let bit_depth = args.get("bit_depth").and_then(|v| v.as_u64()).unwrap_or(16) as u16;
 
             state.sync_project_from_state();
@@ -1980,14 +2154,17 @@ pub fn call_tool(state: &mut DawState, name: &str, args: &Value) -> ToolCallResu
                 !t.arrangement_clips.is_empty()
                     || t.session_clips.iter().any(|c| c.is_some())
             });
+            let use_project_renderer = has_real_clips
+                || state.last_saved_path.is_some()
+                || state.project.metadata.name != "Ableton MCP Session"
+                || state.project.tracks.len() != 2;
 
-            let out_path = Path::new(out_path_str);
             if let Some(parent) = out_path.parent() {
                 let _ = fs::create_dir_all(parent);
             }
 
-            let interleaved = if has_real_clips {
-                match render_project_window_to_wav(&state.project, out_path, start_beat, dur, bit_depth) {
+            let interleaved = if use_project_renderer {
+                match render_project_window_to_wav(&state.project, &out_path, start_beat, dur, bit_depth) {
                     Ok(samples) => samples,
                     Err(e) => return ToolCallResult::error(format!("Failed rendering project WAV: {}", e)),
                 }
@@ -1995,9 +2172,9 @@ pub fn call_tool(state: &mut DawState, name: &str, args: &Value) -> ToolCallResu
                 let renderer = DemoArrangementRenderer::new(state.sample_rate, state.bpm.max(60.0));
                 let samples = renderer.render_demo_seconds(dur);
                 let write_res = if bit_depth == 32 {
-                    WavWriter::write_wav_32bit_float(out_path, state.sample_rate as u32, 2, &samples)
+                    WavWriter::write_wav_32bit_float(&out_path, state.sample_rate as u32, 2, &samples)
                 } else {
-                    WavWriter::write_wav_16bit(out_path, state.sample_rate as u32, 2, &samples)
+                    WavWriter::write_wav_16bit(&out_path, state.sample_rate as u32, 2, &samples)
                 };
                 if let Err(e) = write_res {
                     return ToolCallResult::error(format!("Failed to write WAV: {}", e));
@@ -2019,14 +2196,14 @@ pub fn call_tool(state: &mut DawState, name: &str, args: &Value) -> ToolCallResu
         }
         "stems_separate_remix" => {
             let input_wav = match args.get("input_wav").and_then(|v| v.as_str()) {
-                Some(p) => p,
+                Some(p) => expand_tilde_path(p),
                 None => return ToolCallResult::error("Missing 'input_wav' parameter"),
             };
             let output_dir = match args.get("output_dir").and_then(|v| v.as_str()) {
-                Some(p) => p,
+                Some(p) => expand_tilde_path(p),
                 None => return ToolCallResult::error("Missing 'output_dir' parameter"),
             };
-            match oxide_bounce::stems::export_remix_stems_from_wav(Path::new(input_wav), Path::new(output_dir)) {
+            match oxide_bounce::stems::export_remix_stems_from_wav(&input_wav, &output_dir) {
                 Ok(files) => ToolCallResult::json(&json!({
                     "drums": files.drums.to_string_lossy(),
                     "bass": files.bass.to_string_lossy(),
@@ -2038,11 +2215,11 @@ pub fn call_tool(state: &mut DawState, name: &str, args: &Value) -> ToolCallResu
         }
         "bounce_export_stems" => {
             let output_dir = match args.get("output_dir").and_then(|v| v.as_str()) {
-                Some(p) => p,
+                Some(p) => expand_tilde_path(p),
                 None => return ToolCallResult::error("Missing 'output_dir' parameter"),
             };
             state.sync_project_from_state();
-            match oxide_bounce::stems::export_all_tracks_as_stems(&state.project, Path::new(output_dir)) {
+            match oxide_bounce::stems::export_all_tracks_as_stems(&state.project, &output_dir) {
                 Ok(paths) => {
                     let files: Vec<String> = paths.iter().map(|p| p.to_string_lossy().to_string()).collect();
                     ToolCallResult::json(&json!({
@@ -2146,49 +2323,97 @@ pub fn call_tool(state: &mut DawState, name: &str, args: &Value) -> ToolCallResu
             let scale_str = args.get("scale").and_then(|v| v.as_str()).unwrap_or("Minor");
             let prog_str = args.get("progression").and_then(|v| v.as_str()).unwrap_or("i-i-VI-VII");
             let rhythm = args.get("rhythm_pattern").and_then(|v| v.as_str()).unwrap_or("driving_8ths");
-            let octave = args.get("octave").and_then(|v| v.as_i64()).unwrap_or(2).clamp(0, 8) as u8;
+            let octave = args.get("octave").and_then(|v| v.as_i64()).unwrap_or(2).clamp(0, 9);
+            let bars_override = args.get("bars").and_then(|v| v.as_u64()).map(|b| b.max(1) as usize);
+            let humanize = args
+                .get("humanize")
+                .and_then(|v| v.as_f64())
+                .unwrap_or(0.0)
+                .clamp(0.0, 1.0);
             let clip_name = args.get("name").and_then(|v| v.as_str()).unwrap_or("Bassline");
 
             let root_pc = parse_pitch_class(key_str).unwrap_or(5);
             let intervals = get_scale_intervals(scale_str);
 
             let tokens: Vec<&str> = prog_str.split(&['-', ' ', ','][..]).filter(|s| !s.is_empty()).collect();
+            let prog_len = tokens.len().max(1);
+            let total_bars = bars_override.unwrap_or(prog_len);
             let beats_per_bar = 4.0;
-            let total_beats = (tokens.len().max(1) as f64) * beats_per_bar;
+            let total_beats = (total_bars as f64) * beats_per_bar;
 
             let mut notes = Vec::new();
-            for (bar_idx, token) in tokens.iter().enumerate() {
+            for bar_idx in 0..total_bars {
                 let bar_start = bar_idx as f64 * beats_per_bar;
+                let token = tokens.get(bar_idx % prog_len).copied().unwrap_or("i");
                 let step = parse_roman_degree(token).map(|(s, _)| s).unwrap_or(0);
-                let root_note = (((octave as i32 + 1) * 12) + root_pc as i32 + intervals[step % intervals.len()] as i32).clamp(0, 127) as u8;
+                let root_midi = ((octave as i32 + 1) * 12) + root_pc as i32 + intervals[step % intervals.len()] as i32;
+                let root_note = root_midi.clamp(0, 127) as u8;
+                let fifth_note = (root_midi + 7).clamp(0, 127) as u8;
+                let oct_up_note = (root_midi + 12).clamp(0, 127) as u8;
+
+                let mut push_note = |pitch: u8, vel: u8, start_offset: f64, dur: f64, idx_seed: usize| {
+                    let h_offset = if humanize > 0.0 {
+                        let phase = ((bar_idx * 17 + idx_seed * 31) % 100) as f64 / 100.0 - 0.5;
+                        phase * 0.03 * humanize
+                    } else {
+                        0.0
+                    };
+                    let vel_jitter = if humanize > 0.0 {
+                        let phase = ((bar_idx * 13 + idx_seed * 19) % 21) as i32 - 10;
+                        (phase as f64 * humanize).round() as i32
+                    } else {
+                        0
+                    };
+                    let v = (vel as i32 + vel_jitter).clamp(1, 127) as u8;
+                    let t = (bar_start + start_offset + h_offset).max(0.0);
+                    notes.push(MidiNote::new(pitch, v, t, dur));
+                };
 
                 match rhythm {
                     "offbeat_house" => {
-                        // Offbeats on 0.5, 1.5, 2.5, 3.5
-                        for b in [0.5, 1.5, 2.5, 3.5] {
-                            notes.push(MidiNote::new(root_note, 110, bar_start + b, 0.45));
+                        for (i, &b) in [0.5, 1.5, 2.5, 3.5].iter().enumerate() {
+                            push_note(root_note, 110, b, 0.45, i);
                         }
                     }
                     "syncopated" => {
-                        // 16th syncopation: 0.0, 0.75, 1.5, 2.25, 3.0
-                        for b in [0.0, 0.75, 1.5, 2.25, 3.0] {
-                            notes.push(MidiNote::new(root_note, 105, bar_start + b, 0.6));
+                        for (i, &b) in [0.0, 0.75, 1.5, 2.25, 3.0].iter().enumerate() {
+                            push_note(root_note, 105, b, 0.6, i);
+                        }
+                    }
+                    "root_fifth" => {
+                        let pattern = [
+                            (root_note, 115, 0.0, 0.85),
+                            (fifth_note, 100, 1.0, 0.85),
+                            (root_note, 110, 2.0, 0.85),
+                            (fifth_note, 98, 3.0, 0.45),
+                            (oct_up_note, 104, 3.5, 0.45),
+                        ];
+                        for (i, &(p, v, off, d)) in pattern.iter().enumerate() {
+                            push_note(p, v, off, d, i);
+                        }
+                    }
+                    "dub" => {
+                        let pattern = [
+                            (root_note, 118, 0.0, 0.75),
+                            (root_note, 96, 1.5, 0.5),
+                            (fifth_note, 102, 2.75, 0.45),
+                            (oct_up_note, 92, 3.5, 0.35),
+                        ];
+                        for (i, &(p, v, off, d)) in pattern.iter().enumerate() {
+                            push_note(p, v, off, d, i);
                         }
                     }
                     "acid_16ths" => {
-                        // 16th note acid pulses
                         for s in 0..16 {
                             let vel = if s % 4 == 0 { 115 } else { 85 };
-                            let note = if s % 8 == 7 { root_note + 12 } else { root_note };
-                            notes.push(MidiNote::new(note, vel, bar_start + (s as f64 * 0.25), 0.22));
+                            let note = if s % 8 == 7 { oct_up_note } else { root_note };
+                            push_note(note, vel, s as f64 * 0.25, 0.22, s);
                         }
                     }
                     _ => {
-                        // Default driving_8ths: 8 notes per bar
                         for eighth in 0..8 {
-                            let note_time = bar_start + (eighth as f64 * 0.5);
                             let vel = if eighth % 2 == 0 { 110 } else { 90 };
-                            notes.push(MidiNote::new(root_note, vel, note_time, 0.45));
+                            push_note(root_note, vel, eighth as f64 * 0.5, 0.45, eighth);
                         }
                     }
                 }
@@ -2237,10 +2462,12 @@ pub fn call_tool(state: &mut DawState, name: &str, args: &Value) -> ToolCallResu
             let direction = args.get("direction").and_then(|v| v.as_str()).unwrap_or("up");
             let octaves = args.get("octaves").and_then(|v| v.as_u64()).unwrap_or(2).clamp(1, 3) as usize;
             let gate = args.get("gate").and_then(|v| v.as_f64()).unwrap_or(0.85).clamp(0.1, 1.0);
+            let bars_override = args.get("bars").and_then(|v| v.as_u64()).map(|b| b.max(1) as usize);
             let clip_name = args.get("name").and_then(|v| v.as_str()).unwrap_or("Arp");
 
-            let step_dur = match rate_str {
+            let step_dur = match rate_str.trim() {
                 "1/8" => 0.5,
+                "1/16T" | "1/16t" => 1.0 / 6.0,
                 "1/32" => 0.125,
                 _ => 0.25, // 1/16
             };
@@ -2249,29 +2476,52 @@ pub fn call_tool(state: &mut DawState, name: &str, args: &Value) -> ToolCallResu
             let intervals = get_scale_intervals(scale_str);
 
             let tokens: Vec<&str> = prog_str.split(&['-', ' ', ','][..]).filter(|s| !s.is_empty()).collect();
+            let prog_len = tokens.len().max(1);
+            let total_bars = bars_override.unwrap_or(prog_len);
             let beats_per_chord = 4.0;
-            let total_beats = (tokens.len().max(1) as f64) * beats_per_chord;
+            let total_beats = (total_bars as f64) * beats_per_chord;
 
             let mut notes = Vec::new();
-            for (bar_idx, token) in tokens.iter().enumerate() {
+            let mut rng: u64 = 0x5DEECE66D ^ ((track_id as u64) << 16) ^ (slot_id as u64);
+
+            for bar_idx in 0..total_bars {
                 let bar_start = bar_idx as f64 * beats_per_chord;
+                let token = tokens.get(bar_idx % prog_len).copied().unwrap_or("i");
                 let step = parse_roman_degree(token).map(|(s, _)| s).unwrap_or(0);
                 let base_pitches = build_chord_notes(root_pc, intervals, step, "close", 3);
 
-                let mut pool = Vec::new();
+                let mut pool: Vec<u8> = Vec::new();
                 for oct in 0..octaves {
                     for &p in &base_pitches {
-                        pool.push(p + (oct as u8 * 12));
+                        let shifted = (p as i32 + (oct as i32 * 12)).clamp(0, 127) as u8;
+                        pool.push(shifted);
                     }
                 }
-                if direction == "down" {
-                    pool.reverse();
+                if pool.is_empty() {
+                    pool.push(60);
                 }
 
-                let steps_in_bar = (beats_per_chord / step_dur).round() as usize;
+                match direction {
+                    "down" => pool.reverse(),
+                    "up_down" | "updown" => {
+                        if pool.len() > 2 {
+                            let rev: Vec<u8> = pool[1..pool.len() - 1].iter().rev().copied().collect();
+                            pool.extend(rev);
+                        }
+                    }
+                    _ => {}
+                }
+
+                let steps_in_bar = (beats_per_chord / step_dur).round().max(1.0) as usize;
                 for s in 0..steps_in_bar {
                     let note_beat = bar_start + (s as f64 * step_dur);
-                    let pitch = pool[s % pool.len()];
+                    let pitch = if direction == "random" {
+                        rng = rng.wrapping_mul(6364136223846793005).wrapping_add(1);
+                        let idx = ((rng >> 33) as usize) % pool.len();
+                        pool[idx]
+                    } else {
+                        pool[s % pool.len()]
+                    };
                     notes.push(MidiNote::new(pitch, 100, note_beat, step_dur * gate));
                 }
             }
@@ -2401,11 +2651,44 @@ pub fn call_tool(state: &mut DawState, name: &str, args: &Value) -> ToolCallResu
             let genre = args.get("genre").and_then(|v| v.as_str()).unwrap_or("techno");
             let key = args.get("key").and_then(|v| v.as_str()).unwrap_or("Fm");
             let bpm = args.get("bpm").and_then(|v| v.as_f64()).unwrap_or(126.0);
-            let total_bars = args.get("total_bars").and_then(|v| v.as_u64()).unwrap_or(32) as usize;
+            let total_bars = args.get("total_bars").and_then(|v| v.as_u64()).unwrap_or(32).max(4) as usize;
 
             state.bpm = bpm;
             state.project.transport.bpm = bpm;
             state.delay.set_tempo(bpm);
+
+            let key_trimmed = key.trim();
+            let is_minor = key_trimmed.ends_with('m') || key_trimmed.to_ascii_lowercase().contains("min");
+            let root_str = key_trimmed
+                .trim_end_matches("min")
+                .trim_end_matches("maj")
+                .trim_end_matches('m')
+                .trim();
+            let root_pc = parse_pitch_class(root_str).unwrap_or(5);
+            let scale_name = args
+                .get("scale")
+                .and_then(|v| v.as_str())
+                .unwrap_or(if is_minor { "Minor" } else { "Major" });
+            let intervals = get_scale_intervals(scale_name);
+
+            let drum_style = match genre.trim().to_ascii_lowercase().as_str() {
+                "house" => "house_909",
+                "dnb" | "drum_and_bass" | "drum & bass" => "dnb",
+                "hiphop" | "hip-hop" | "hip_hop" => "hiphop",
+                _ => "techno_909",
+            };
+
+            // Ensure project tracks contain Lead Synth (0), 909 Drums (1), Sub Bass (2)
+            while state.project.tracks.len() < 3 {
+                let tid = state.project.tracks.len() as u32;
+                let name = if tid == 2 { "Sub Bass" } else { "Track" };
+                state.project.tracks.push(TrackDefinition::new_synth(tid, name));
+            }
+            while state.matrix.tracks.len() < 3 {
+                let tid = state.matrix.tracks.len() as u32;
+                let name = if tid == 2 { "Sub Bass" } else { "Track" };
+                state.matrix.tracks.push(oxide_timeline::SessionTrack::new(tid, name, 8));
+            }
 
             // Construct 3 arrangement tracks: Synth Lead, 909 Drums, Sub Bass
             state.timeline.tracks.clear();
@@ -2422,22 +2705,95 @@ pub fn call_tool(state: &mut DawState, name: &str, args: &Value) -> ToolCallResu
             filter_auto.add_point(AutomationPoint::linear((total_bars * 4) as f64, 15000.0));
             trk_synth.automation_lanes.push(filter_auto);
 
-            // Add arrangement clips across sections (Intro, Build, Drop, Outro)
-            let section_bars = total_bars / 4;
+            let prog_degrees = [0usize, 5, 2, 6];
+            let section_bars = (total_bars / 4).max(1);
+
             for s in 0..4 {
                 let start_beat = (s * section_bars * 4) as f64;
                 let dur = (section_bars * 4) as f64;
 
-                let section_name = match s {
-                    0 => "Intro",
-                    1 => "Build",
-                    2 => "Drop",
-                    _ => "Outro",
+                let (section_name, complexity) = match s {
+                    0 => ("Intro", 0.25f32),
+                    1 => ("Build", 0.65f32),
+                    2 => ("Drop", 0.95f32),
+                    _ => ("Outro", 0.40f32),
                 };
 
-                let synth_clip = ArrangementClip::new(s as u32 + 1, format!("Lead - {}", section_name), start_beat, dur, ClipPattern::Midi(MidiPattern::new(dur)));
-                let drum_clip = ArrangementClip::new(s as u32 + 10, format!("Drums - {}", section_name), start_beat, dur, ClipPattern::Drum(DrumStepPattern::new_16_step()));
-                let bass_clip = ArrangementClip::new(s as u32 + 20, format!("Bass - {}", section_name), start_beat, dur, ClipPattern::Midi(MidiPattern::new(dur)));
+                // Generate real Synth lead & chord notes across section bars
+                let mut synth_notes = Vec::new();
+                let mut bass_notes = Vec::new();
+                for bar in 0..section_bars {
+                    let bar_off = (bar * 4) as f64;
+                    let deg = prog_degrees[bar % prog_degrees.len()];
+                    let chord = build_chord_notes(root_pc, intervals, deg, "close", 4);
+                    let bass_root = ((2 + 1) * 12 + root_pc as i32 + intervals[deg % intervals.len()] as i32).clamp(0, 127) as u8;
+                    let bass_oct = (bass_root as i32 + 12).clamp(0, 127) as u8;
+
+                    if s == 2 {
+                        // Drop: energetic chord hits + lead motif + driving 16th/8th bass
+                        for &p in &chord {
+                            synth_notes.push(MidiNote::new(p, 102, bar_off, 1.5));
+                            synth_notes.push(MidiNote::new(p, 94, bar_off + 2.0, 1.5));
+                        }
+                        for (idx, &step_off) in [0.0, 0.75, 1.5, 2.25, 3.0, 3.5].iter().enumerate() {
+                            let bp = if idx % 3 == 2 { bass_oct } else { bass_root };
+                            bass_notes.push(MidiNote::new(bp, 112, bar_off + step_off, 0.4));
+                        }
+                    } else if s == 1 {
+                        // Build: rising staccato 8th chords + pulsing bass
+                        for q in 0..4 {
+                            let vel = (80 + q * 10).min(120) as u8;
+                            if let Some(&p) = chord.get(q % chord.len()) {
+                                synth_notes.push(MidiNote::new(p, vel, bar_off + q as f64, 0.75));
+                            }
+                            bass_notes.push(MidiNote::new(bass_root, vel, bar_off + q as f64, 0.75));
+                        }
+                    } else {
+                        // Intro / Outro: atmospheric sustained pad root & fifth + sparse bass
+                        if let Some(&p0) = chord.first() {
+                            synth_notes.push(MidiNote::new(p0, 84, bar_off, 3.5));
+                        }
+                        if let Some(&p2) = chord.get(2) {
+                            synth_notes.push(MidiNote::new(p2, 78, bar_off + 2.0, 1.75));
+                        }
+                        bass_notes.push(MidiNote::new(bass_root, 96, bar_off, 1.75));
+                        bass_notes.push(MidiNote::new(bass_root, 90, bar_off + 2.0, 1.75));
+                    }
+                }
+
+                let mut drum_pat = generate_drum_groove(drum_style, bpm, state.swing, complexity);
+                if s == 0 {
+                    // Intro: strip snare/clap density while keeping kick/hat pulse
+                    drum_pat.tracks[2].steps.iter_mut().for_each(|st| st.active = false);
+                }
+
+                let synth_clip = ArrangementClip::new(
+                    s as u32 + 1,
+                    format!("Lead - {}", section_name),
+                    start_beat,
+                    dur,
+                    ClipPattern::Midi(MidiPattern {
+                        length_beats: dur,
+                        notes: synth_notes,
+                    }),
+                );
+                let drum_clip = ArrangementClip::new(
+                    s as u32 + 10,
+                    format!("Drums - {}", section_name),
+                    start_beat,
+                    dur,
+                    ClipPattern::Drum(drum_pat),
+                );
+                let bass_clip = ArrangementClip::new(
+                    s as u32 + 20,
+                    format!("Bass - {}", section_name),
+                    start_beat,
+                    dur,
+                    ClipPattern::Midi(MidiPattern {
+                        length_beats: dur,
+                        notes: bass_notes,
+                    }),
+                );
 
                 trk_synth.add_clip(synth_clip);
                 trk_drums.add_clip(drum_clip);
@@ -2452,6 +2808,7 @@ pub fn call_tool(state: &mut DawState, name: &str, args: &Value) -> ToolCallResu
                 "status": "built",
                 "genre": genre,
                 "key": key,
+                "scale": scale_name,
                 "bpm": bpm,
                 "total_bars": total_bars,
                 "total_beats": total_bars * 4,
@@ -2463,7 +2820,8 @@ pub fn call_tool(state: &mut DawState, name: &str, args: &Value) -> ToolCallResu
         // --- "Agent Ears" Audio Analysis ---
         "analyze_rendered_audio" => {
             if let Some(wav_path_str) = args.get("wav_path").and_then(|v| v.as_str()) {
-                match AudioAnalysisMetrics::analyze_wav_file(wav_path_str) {
+                let resolved_wav = expand_tilde_path(wav_path_str);
+                match AudioAnalysisMetrics::analyze_wav_file(&resolved_wav) {
                     Ok(metrics) => {
                         let mut val = serde_json::to_value(&metrics).unwrap_or_default();
                         if let Some(obj) = val.as_object_mut() {
@@ -2483,9 +2841,28 @@ pub fn call_tool(state: &mut DawState, name: &str, args: &Value) -> ToolCallResu
                     Err(e) => ToolCallResult::error(format!("Failed to analyze WAV: {}", e)),
                 }
             } else {
-                let dur = args.get("duration_seconds").and_then(|v| v.as_f64()).unwrap_or(4.0);
-                let renderer = DemoArrangementRenderer::new(state.sample_rate, state.bpm.max(60.0));
-                let samples = renderer.render_demo_seconds(dur);
+                let dur = args.get("duration_seconds").and_then(|v| v.as_f64()).unwrap_or(4.0).clamp(0.5, 300.0);
+                state.sync_project_from_state();
+                let has_real_clips = state.project.tracks.iter().any(|t| {
+                    !t.arrangement_clips.is_empty()
+                        || t.session_clips.iter().any(|c| c.is_some())
+                });
+                let use_project_renderer = has_real_clips
+                    || state.last_saved_path.is_some()
+                    || state.project.metadata.name != "Ableton MCP Session"
+                    || state.project.tracks.len() != 2;
+                let samples = if use_project_renderer {
+                    let tmp_wav = default_temp_file("oxide_analyze", "wav");
+                    let res = render_project_window_to_wav(&state.project, &tmp_wav, 0.0, dur, 32);
+                    let _ = fs::remove_file(&tmp_wav);
+                    match res {
+                        Ok(s) => s,
+                        Err(e) => return ToolCallResult::error(format!("Failed rendering project audio: {}", e)),
+                    }
+                } else {
+                    let renderer = DemoArrangementRenderer::new(state.sample_rate, state.bpm.max(60.0));
+                    renderer.render_demo_seconds(dur)
+                };
                 let metrics = AudioAnalysisMetrics::analyze_interleaved(&samples, state.sample_rate as u32, 2);
                 let mut val = serde_json::to_value(&metrics).unwrap_or_default();
                 if let Some(obj) = val.as_object_mut() {
@@ -2518,10 +2895,12 @@ pub fn call_tool(state: &mut DawState, name: &str, args: &Value) -> ToolCallResu
 
             let note = args.get("note").and_then(|v| v.as_u64()).unwrap_or(48) as u8;
             let dur = args.get("duration_seconds").and_then(|v| v.as_f64()).unwrap_or(1.5).clamp(0.2, 5.0);
-            let out_path_str = args
+            let out_path = args
                 .get("output_wav_path")
                 .and_then(|v| v.as_str())
-                .unwrap_or("/tmp/ableton_synth_preview.wav");
+                .map(expand_tilde_path)
+                .unwrap_or_else(|| default_temp_file("oxide_synth_preview", "wav"));
+            let out_path_str = out_path.to_string_lossy().to_string();
 
             let total_frames = (dur * preview_synth.sample_rate as f64).ceil() as usize;
             let gate_frames = (total_frames * 3) / 4;
@@ -2538,14 +2917,13 @@ pub fn call_tool(state: &mut DawState, name: &str, args: &Value) -> ToolCallResu
                 interleaved.push(s);
             }
 
-            let out_path = Path::new(out_path_str);
             if let Some(parent) = out_path.parent() {
                 if let Err(e) = fs::create_dir_all(parent) {
                     return ToolCallResult::error(format!("Failed to create output directory: {}", e));
                 }
             }
 
-            if let Err(e) = WavWriter::write_wav_16bit(out_path, preview_synth.sample_rate as u32, 2, &interleaved) {
+            if let Err(e) = WavWriter::write_wav_16bit(&out_path, preview_synth.sample_rate as u32, 2, &interleaved) {
                 return ToolCallResult::error(format!("Failed to write preview WAV: {}", e));
             }
             let metrics = AudioAnalysisMetrics::analyze_interleaved(&interleaved, preview_synth.sample_rate as u32, 2);
@@ -2574,14 +2952,26 @@ pub fn call_tool(state: &mut DawState, name: &str, args: &Value) -> ToolCallResu
                 None => return ToolCallResult::error("Missing 'device_type' or 'device_name' parameter"),
             };
             let pos = args.get("position").and_then(|v| v.as_u64()).map(|p| p as usize);
-            match instantiate_device(dev_type, state.sample_rate) {
-                Ok(dev) => {
+            match instantiate_managed_device(dev_type, state.sample_rate) {
+                Ok((dev, handle)) => {
+                    let cat = handle.category();
                     let chain = state.device_chains.entry(track_id).or_insert_with(|| {
                         let mut c = DeviceChain::new();
                         c.name = format!("Track {} Chain", track_id);
                         c
                     });
                     let inserted_idx = add_device_to_chain(chain, dev, pos);
+                    let handles = state.device_handles.entry(track_id).or_default();
+                    handles.add_handle(cat, handle, pos);
+
+                    if let Some(p_trk) = state.project.tracks.get_mut(track_id as usize) {
+                        p_trk.insert_fx = handles
+                            .audio_effects
+                            .iter()
+                            .filter_map(|h| h.to_insert_effect_config())
+                            .collect();
+                    }
+
                     ToolCallResult::json(&json!({
                         "status": "device_added",
                         "track_id": track_id,
@@ -2603,6 +2993,14 @@ pub fn call_tool(state: &mut DawState, name: &str, args: &Value) -> ToolCallResu
                 None => return ToolCallResult::error("Missing 'device_index' parameter"),
             };
             let chain = state.device_chains.entry(track_id).or_default();
+            if dev_index >= chain.device_count() {
+                return ToolCallResult::error(format!(
+                    "Device index {} out of range for track {} (count: {})",
+                    dev_index,
+                    track_id,
+                    chain.device_count()
+                ));
+            }
             let midi_len = chain.midi_effects.len();
             if dev_index < midi_len {
                 chain.remove_midi_effect(dev_index);
@@ -2612,6 +3010,16 @@ pub fn call_tool(state: &mut DawState, name: &str, args: &Value) -> ToolCallResu
                 let inst_offset = if chain.has_instrument() { 1 } else { 0 };
                 let audio_idx = dev_index.saturating_sub(midi_len + inst_offset);
                 chain.remove_audio_effect(audio_idx);
+            }
+            if let Some(handles) = state.device_handles.get_mut(&track_id) {
+                handles.remove_at(dev_index);
+                if let Some(p_trk) = state.project.tracks.get_mut(track_id as usize) {
+                    p_trk.insert_fx = handles
+                        .audio_effects
+                        .iter()
+                        .filter_map(|h| h.to_insert_effect_config())
+                        .collect();
+                }
             }
             ToolCallResult::json(&json!({
                 "status": "device_removed",
@@ -2634,8 +3042,25 @@ pub fn call_tool(state: &mut DawState, name: &str, args: &Value) -> ToolCallResu
                 None => return ToolCallResult::error("Missing 'to_index' parameter"),
             };
             let chain = state.device_chains.entry(track_id).or_default();
-            let ok = chain.reorder_audio_effects(from_index, to_index)
-                || chain.reorder_midi_effects(from_index, to_index);
+            let audio_ok = chain.reorder_audio_effects(from_index, to_index);
+            let midi_ok = !audio_ok && chain.reorder_midi_effects(from_index, to_index);
+            let ok = audio_ok || midi_ok;
+            if ok {
+                if let Some(handles) = state.device_handles.get_mut(&track_id) {
+                    if audio_ok {
+                        handles.reorder_audio(from_index, to_index);
+                    } else {
+                        handles.reorder_midi(from_index, to_index);
+                    }
+                    if let Some(p_trk) = state.project.tracks.get_mut(track_id as usize) {
+                        p_trk.insert_fx = handles
+                            .audio_effects
+                            .iter()
+                            .filter_map(|h| h.to_insert_effect_config())
+                            .collect();
+                    }
+                }
+            }
             ToolCallResult::json(&json!({
                 "status": if ok { "device_reordered" } else { "reorder_out_of_bounds" },
                 "track_id": track_id,
@@ -2653,22 +3078,31 @@ pub fn call_tool(state: &mut DawState, name: &str, args: &Value) -> ToolCallResu
                 Some(idx) => idx as usize,
                 None => return ToolCallResult::error("Missing 'device_index' parameter"),
             };
-            let param_id = args.get("param").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
+            let param_val = args
+                .get("param")
+                .or_else(|| args.get("param_name"))
+                .or_else(|| args.get("param_index"));
+            let param_key = match param_val {
+                Some(v) if v.is_string() => v.as_str().unwrap_or("0").to_string(),
+                Some(v) if v.is_u64() => v.as_u64().unwrap_or(0).to_string(),
+                _ => return ToolCallResult::error("Missing 'param' parameter"),
+            };
             let value = match args.get("value").and_then(|v| v.as_f64()) {
                 Some(val) => val as f32,
                 None => return ToolCallResult::error("Missing 'value' parameter"),
             };
-            let chain = state.device_chains.entry(track_id).or_default();
-            if let Some(ref mut inst) = chain.instrument {
-                inst.set_parameter(param_id, value);
+
+            match set_track_device_param_helper(state, track_id, device_index, &param_key, value) {
+                Ok((device_name, resolved_param, applied_value)) => ToolCallResult::json(&json!({
+                    "status": "parameter_set",
+                    "track_id": track_id,
+                    "device_index": device_index,
+                    "device_name": device_name,
+                    "param": resolved_param,
+                    "value": applied_value
+                })),
+                Err(e) => ToolCallResult::error(e),
             }
-            ToolCallResult::json(&json!({
-                "status": "parameter_set",
-                "track_id": track_id,
-                "device_index": device_index,
-                "param": param_id,
-                "value": value
-            }))
         }
         "device_get_chain" => {
             let track_id = match args.get("track_id").and_then(|v| v.as_u64()) {
@@ -2676,7 +3110,8 @@ pub fn call_tool(state: &mut DawState, name: &str, args: &Value) -> ToolCallResu
                 None => return ToolCallResult::error("Missing 'track_id' parameter"),
             };
             let chain = state.device_chains.entry(track_id).or_default();
-            ToolCallResult::json(&dump_device_chain(chain))
+            let handles = state.device_handles.get(&track_id);
+            ToolCallResult::json(&dump_device_chain_detailed(chain, handles))
         }
 
         // --- Group 3 (Extra): Synths, Drums & Simpler ---
@@ -2685,16 +3120,157 @@ pub fn call_tool(state: &mut DawState, name: &str, args: &Value) -> ToolCallResu
                 Some(id) => id as u32,
                 None => return ToolCallResult::error("Missing 'track_id' parameter"),
             };
+
+            // Inspect any Simpler device on the source track, or fallback to a warped audio clip on the source track
+            let mut source_samples: Option<(std::sync::Arc<[f32]>, u32, u8, Vec<usize>, String)> = None;
+
+            if let Some(handles) = state.device_handles.get(&track_id) {
+                if let Some(ManagedDeviceHandle::Simpler(simpler_arc)) = &handles.instrument {
+                    let mut simpler = simpler_arc.lock().unwrap();
+                    if simpler.sample_data.is_some() && simpler.slices.is_empty() {
+                        simpler.recalculate_slices();
+                    }
+                    if let Some(ref data) = simpler.sample_data {
+                        let mut slices = simpler.slices.clone();
+                        if slices.is_empty() {
+                            slices = detect_transients(
+                                data.as_ref(),
+                                simpler.sample_channels.max(1) as usize,
+                                simpler.sample_sample_rate.max(8000) as f32,
+                            );
+                        }
+                        if slices.is_empty() {
+                            // Even-grid fallback when sample is continuous tone/pad with no sharp transient peaks
+                            let n = 16usize.min((data.len() / 256).max(1));
+                            let step = (data.len() / n).max(1);
+                            slices = (0..n).map(|i| i * step).collect();
+                        }
+                        source_samples = Some((
+                            std::sync::Arc::clone(data),
+                            simpler.sample_sample_rate,
+                            simpler.sample_channels,
+                            slices,
+                            "Simpler Slice".to_string(),
+                        ));
+                    }
+                }
+            }
+
+            if source_samples.is_none() {
+                if let Some((_, w_clip)) = state
+                    .audio_clips
+                    .iter()
+                    .find(|((tid, _), _)| *tid == track_id)
+                {
+                    if !w_clip.raw_samples.is_empty() {
+                        let mut slices = detect_transients(
+                            &w_clip.raw_samples,
+                            w_clip.channels.max(1) as usize,
+                            w_clip.sample_rate.max(8000) as f32,
+                        );
+                        if slices.is_empty() {
+                            let n = 16usize.min((w_clip.raw_samples.len() / 256).max(1));
+                            let step = (w_clip.raw_samples.len() / n).max(1);
+                            slices = (0..n).map(|i| i * step).collect();
+                        }
+                        source_samples = Some((
+                            std::sync::Arc::from(w_clip.raw_samples.clone().into_boxed_slice()),
+                            w_clip.sample_rate,
+                            w_clip.channels as u8,
+                            slices,
+                            w_clip.name.clone(),
+                        ));
+                    }
+                }
+            }
+
+            let (sample_arc, sr, ch, mut slices, src_label) = match source_samples {
+                Some(s) => s,
+                None => {
+                    return ToolCallResult::error(format!(
+                        "Track {} does not contain a Simpler instrument with loaded audio or an audio clip to slice",
+                        track_id
+                    ));
+                }
+            };
+
+            slices.sort_unstable();
+            slices.dedup();
+            if slices.len() > 16 {
+                slices.truncate(16);
+            }
+            if slices.is_empty() {
+                slices.push(0);
+            }
+
             let new_track_id = state.project.tracks.len() as u32;
-            let new_drum_track = TrackDefinition::new_drum_rack(new_track_id, format!("Sliced Drum Rack from {}", track_id));
+            let rack_name = format!("Sliced Drum Rack from {}", track_id);
+            let mut new_drum_track = TrackDefinition::new_drum_rack(new_track_id, &rack_name);
+
+            let (dev, handle) = match instantiate_managed_device("DrumRack", state.sample_rate) {
+                Ok(pair) => pair,
+                Err(e) => return ToolCallResult::error(e),
+            };
+
+            let slice_count = slices.len();
+            if let ManagedDeviceHandle::DrumRack(ref rack_arc) = handle {
+                let mut rack = rack_arc.lock().unwrap();
+                for (i, &start_idx) in slices.iter().enumerate() {
+                    let end_idx = slices
+                        .get(i + 1)
+                        .copied()
+                        .unwrap_or(sample_arc.len())
+                        .min(sample_arc.len());
+                    if end_idx > start_idx {
+                        let slice_buf: std::sync::Arc<[f32]> =
+                            std::sync::Arc::from(sample_arc[start_idx..end_idx].to_vec().into_boxed_slice());
+                        rack.pads[i].name = format!("{} #{}", src_label, i + 1);
+                        rack.pads[i].source = DrumPadSource::Sample {
+                            sample_data: slice_buf.clone(),
+                            channels: ch.max(1),
+                            sample_rate: sr.max(8000),
+                        };
+                        if i < rack.all_pads.len() {
+                            rack.all_pads[i].name = rack.pads[i].name.clone();
+                            rack.all_pads[i].source = rack.pads[i].source.clone();
+                        }
+                    }
+                }
+            }
+
+            if let InstrumentConfig::ElectronicDrumRack(ref mut dr_def) = new_drum_track.instrument {
+                for (i, &start_idx) in slices.iter().enumerate() {
+                    if let Some(pad_def) = dr_def.pads.get_mut(i) {
+                        pad_def.name = format!("{} #{}", src_label, i + 1);
+                        pad_def.sample_path = format!("slice:{}:{}", start_idx, slices.get(i + 1).copied().unwrap_or(sample_arc.len()));
+                        pad_def.pitch_offset_semitones = 0.0;
+                    }
+                }
+            }
+
             state.project.tracks.push(new_drum_track);
-            let _timeline_id = state.track_manager.add_midi_track(format!("Sliced Drum Rack {}", new_track_id));
+            while state.matrix.tracks.len() <= new_track_id as usize {
+                let tid = state.matrix.tracks.len() as u32;
+                state.matrix.tracks.push(oxide_timeline::SessionTrack::new(tid, &rack_name, 8));
+            }
+            while state.timeline.tracks.len() <= new_track_id as usize {
+                let tid = state.timeline.tracks.len() as u32;
+                state.timeline.tracks.push(oxide_timeline::ArrangementTrack::new(tid, &rack_name, "DrumRack"));
+            }
+            let _ = state.ensure_timeline_track_mut(new_track_id as usize);
+
+            let chain = state.device_chains.entry(new_track_id).or_default();
+            add_device_to_chain(chain, dev, None);
+            let handles = state.device_handles.entry(new_track_id).or_default();
+            handles.add_handle(DeviceCategory::Instrument, handle, None);
+
             ToolCallResult::json(&json!({
                 "status": "sliced_to_drum_rack",
                 "source_track_id": track_id,
                 "new_track_id": new_track_id,
-                "slices_count": 16,
-                "drum_rack_name": format!("Sliced Drum Rack from {}", track_id)
+                "slices_count": slice_count,
+                "slice_offsets": slices,
+                "drum_rack_name": rack_name
             }))
         }
 
@@ -2916,6 +3492,7 @@ pub fn call_tool(state: &mut DawState, name: &str, args: &Value) -> ToolCallResu
                 Some(p) => p,
                 None => return ToolCallResult::error("Missing 'sample_path' parameter"),
             };
+            let resolved_sample = expand_tilde_path(sample_path);
             let warp_mode_str = args.get("warp_mode").and_then(|v| v.as_str()).unwrap_or("beats");
 
             let mode = match warp_mode_str.to_lowercase().as_str() {
@@ -2927,28 +3504,65 @@ pub fn call_tool(state: &mut DawState, name: &str, args: &Value) -> ToolCallResu
                 _ => WarpMode::Beats,
             };
 
-            let clip = if Path::new(sample_path).exists() {
-                WarpedAudioClip::from_wav_file(sample_path, state.bpm)
-                    .unwrap_or_else(|_| {
-                        let dummy_samples = vec![0.1f32; 88200];
-                        WarpedAudioClip::new(sample_path, 44100, 2, dummy_samples, state.bpm)
-                    })
-            } else {
-                let dummy_samples = vec![0.1f32; 88200];
-                WarpedAudioClip::new(sample_path, 44100, 2, dummy_samples, state.bpm)
+            if !resolved_sample.exists() {
+                return ToolCallResult::error(format!(
+                    "Audio sample file does not exist: {}",
+                    resolved_sample.display()
+                ));
+            }
+
+            let mut clip = match WarpedAudioClip::from_wav_file(&resolved_sample, state.bpm) {
+                Ok(c) => c,
+                Err(e) => {
+                    return ToolCallResult::error(format!(
+                        "Failed to load WAV audio clip '{}': {}",
+                        resolved_sample.display(),
+                        e
+                    ));
+                }
             };
 
-            let mut clip = clip;
-            clip.name = sample_path.to_string();
+            let resolved_str = resolved_sample.to_string_lossy().to_string();
+            clip.name = resolved_str.clone();
             clip.warper.config.mode = mode;
             let len_beats = clip.length_beats;
+
+            // Mirror audio clip into session matrix so groove_pool_apply_to_clip / clip_launch work immediately
+            while state.matrix.tracks.len() <= track_id as usize {
+                let tid = state.matrix.tracks.len() as u32;
+                state.matrix.tracks.push(oxide_timeline::SessionTrack::new(tid, format!("Track {}", tid), 8));
+            }
+            let m_trk = &mut state.matrix.tracks[track_id as usize];
+            while m_trk.slots.len() <= slot_id as usize {
+                m_trk.slots.push(oxide_timeline::SessionSlot::default());
+            }
+            let clip_name = std::path::Path::new(&resolved_str)
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .unwrap_or("Audio Clip")
+                .to_string();
+            let audio_data = AudioClipData {
+                file_path: resolved_str.clone(),
+                sample_rate: clip.sample_rate,
+                channels: clip.channels,
+                length_beats: len_beats,
+                gain_db: 0.0,
+                warp_mode: format!("{:?}", clip.warper.config.mode),
+                samples: clip.raw_samples.clone(),
+            };
+            m_trk.slots[slot_id as usize].set_clip(Some(SessionClip::new(
+                (track_id * 100) + slot_id + 1,
+                clip_name,
+                ClipPattern::Audio(audio_data),
+            )));
+
             state.audio_clips.insert((track_id, slot_id), clip);
 
             ToolCallResult::json(&json!({
                 "status": "created",
                 "track_id": track_id,
                 "slot_id": slot_id,
-                "sample_path": sample_path,
+                "sample_path": resolved_str,
                 "warp_mode": warp_mode_str,
                 "length_beats": len_beats
             }))
@@ -2977,12 +3591,19 @@ pub fn call_tool(state: &mut DawState, name: &str, args: &Value) -> ToolCallResu
                 _ => WarpMode::Beats,
             };
 
-            if let Some(clip) = state.audio_clips.get_mut(&(track_id, slot_id)) {
-                clip.warper.config.mode = mode;
-                if let Some(g) = grain_size {
-                    clip.warper.config.tones_config.grain_size_ms = g;
-                    clip.warper.config.texture_config.grain_size_ms = g;
+            let clip = match state.audio_clips.get_mut(&(track_id, slot_id)) {
+                Some(c) => c,
+                None => {
+                    return ToolCallResult::error(format!(
+                        "No warped audio clip at track_id={}, slot_id={}",
+                        track_id, slot_id
+                    ));
                 }
+            };
+            clip.warper.config.mode = mode;
+            if let Some(g) = grain_size {
+                clip.warper.config.tones_config.grain_size_ms = g;
+                clip.warper.config.texture_config.grain_size_ms = g;
             }
 
             ToolCallResult::json(&json!({
@@ -3011,12 +3632,17 @@ pub fn call_tool(state: &mut DawState, name: &str, args: &Value) -> ToolCallResu
                 None => return ToolCallResult::error("Missing 'beat_time' parameter"),
             };
 
-            let count = if let Some(clip) = state.audio_clips.get_mut(&(track_id, slot_id)) {
-                clip.warper.add_marker(beat_time, sample_time);
-                clip.warper.markers.len()
-            } else {
-                1
+            let clip = match state.audio_clips.get_mut(&(track_id, slot_id)) {
+                Some(c) => c,
+                None => {
+                    return ToolCallResult::error(format!(
+                        "No warped audio clip at track_id={}, slot_id={}",
+                        track_id, slot_id
+                    ));
+                }
             };
+            clip.warper.add_marker(beat_time, sample_time);
+            let count = clip.warper.markers.len();
 
             ToolCallResult::json(&json!({
                 "status": "marker_added",
@@ -3058,42 +3684,117 @@ pub fn call_tool(state: &mut DawState, name: &str, args: &Value) -> ToolCallResu
                 Some(n) => n,
                 None => return ToolCallResult::error("Missing 'groove_name' parameter"),
             };
-            let amount = args.get("amount").and_then(|v| v.as_f64()).map(|a| a as f32);
-            if let Some(a) = amount {
-                state.groove_pool.global_amount = a;
-            }
+            let clip_amount = args
+                .get("amount")
+                .and_then(|v| v.as_f64())
+                .map(|a| (a as f32).clamp(0.0, 1.30));
 
-            let template_id = state.groove_pool.find_template(groove_name).map(|t| t.id).unwrap_or(1);
+            let template = state
+                .groove_pool
+                .find_template(groove_name)
+                .cloned()
+                .or_else(|| {
+                    let low = groove_name.to_ascii_lowercase();
+                    if low.contains("mpc") {
+                        state.groove_pool.find_template("MPC 16th 60%").cloned()
+                    } else if low.contains("909") {
+                        state.groove_pool.find_template("TR-909").cloned()
+                    } else if low.contains("1200") {
+                        state.groove_pool.find_template("SP-1200").cloned()
+                    } else if low.contains("latin") || low.contains("triplet") {
+                        state.groove_pool.find_template("Latin").cloned()
+                    } else {
+                        None
+                    }
+                });
 
-            if let Some(track) = state.matrix.tracks.get_mut(track_id) {
-                if let Some(slot) = track.slots.get_mut(slot_id) {
-                    if let Some(ref mut clip) = slot.clip {
-                        if let ClipPattern::Midi(ref mut midi) = clip.pattern {
-                            midi.notes = state.groove_pool.apply_to_midi_notes(&midi.notes, template_id, 42);
+            let template = match template {
+                Some(t) => t,
+                None => {
+                    return ToolCallResult::error(format!(
+                        "Groove template '{}' not found in Groove Pool",
+                        groove_name
+                    ));
+                }
+            };
+
+            let slot_clip = state
+                .matrix
+                .tracks
+                .get_mut(track_id)
+                .and_then(|t| t.slots.get_mut(slot_id))
+                .and_then(|s| s.clip.as_mut());
+
+            let effective_amount = clip_amount.unwrap_or(state.groove_pool.global_amount);
+            let mut local_pool = state.groove_pool.clone();
+            local_pool.global_amount = effective_amount;
+
+            let clip_type = if let Some(clip) = slot_clip {
+                match clip.pattern {
+                    ClipPattern::Midi(ref mut midi) => {
+                        midi.notes = local_pool.apply_to_midi_notes(&midi.notes, template.id, 42);
+                        "Midi"
+                    }
+                    ClipPattern::Drum(ref mut drum_pat) => {
+                        let g = template.base.step_duration_beats();
+                        let vel_amt = template.velocity_amount * effective_amount;
+                        let len = drum_pat.step_count.max(1);
+                        for (pad_idx, trk) in drum_pat.tracks.iter_mut().enumerate() {
+                            for step_idx in 0..len.min(trk.steps.len()) {
+                                let step = &mut trk.steps[step_idx];
+                                if !step.active {
+                                    continue;
+                                }
+                                let beat = step_idx as f64 * g;
+                                let (_, vel_off) = template.evaluate_offsets(beat);
+                                let jitter = (((pad_idx * 7 + step_idx * 13) % 9) as f32 - 4.0)
+                                    * template.random_amount
+                                    * effective_amount;
+                                let new_vel = (step.velocity as f32 + vel_off * vel_amt + jitter)
+                                    .round()
+                                    .clamp(1.0, 127.0) as u8;
+                                step.velocity = new_vel;
+                            }
                         }
+                        "Drums"
+                    }
+                    ClipPattern::Audio(_) => {
+                        if let Some(w_clip) = state.audio_clips.get_mut(&(track_id as u32, slot_id as u32)) {
+                            local_pool.commit_to_warper(&mut w_clip.warper, template.id, 42);
+                        }
+                        "Audio"
                     }
                 }
-            }
+            } else if let Some(w_clip) = state.audio_clips.get_mut(&(track_id as u32, slot_id as u32)) {
+                local_pool.commit_to_warper(&mut w_clip.warper, template.id, 42);
+                "Audio"
+            } else {
+                return ToolCallResult::error(format!(
+                    "No clip found at track_id={}, slot_id={}",
+                    track_id, slot_id
+                ));
+            };
 
             ToolCallResult::json(&json!({
                 "status": "groove_applied",
                 "track_id": track_id,
                 "slot_id": slot_id,
-                "groove_name": groove_name,
-                "amount": state.groove_pool.global_amount
+                "clip_type": clip_type,
+                "groove_name": template.name,
+                "amount": effective_amount
             }))
         }
         "take_lane_create" => {
             let track_id = match args.get("track_id").and_then(|v| v.as_u64()) {
-                Some(id) => id as u32,
+                Some(id) => id as usize,
                 None => return ToolCallResult::error("Missing 'track_id' parameter"),
             };
             let name = args.get("name").and_then(|v| v.as_str()).unwrap_or("Take Lane");
-            let lane_id = if let Some(trk) = state.track_manager.get_track_mut(track_id) {
-                trk.comping.add_take_lane(name)
-            } else {
-                1
+            let trk = match state.ensure_timeline_track_mut(track_id) {
+                Some(t) => t,
+                None => return ToolCallResult::error(format!("Track index {} out of range", track_id)),
             };
+            let lane_id = trk.comping.add_take_lane(name);
             ToolCallResult::json(&json!({
                 "status": "take_lane_created",
                 "track_id": track_id,
@@ -3103,7 +3804,7 @@ pub fn call_tool(state: &mut DawState, name: &str, args: &Value) -> ToolCallResu
         }
         "take_lane_comp_region" => {
             let track_id = match args.get("track_id").and_then(|v| v.as_u64()) {
-                Some(id) => id as u32,
+                Some(id) => id as usize,
                 None => return ToolCallResult::error("Missing 'track_id' parameter"),
             };
             let take_lane_idx = match args.get("take_lane_index").and_then(|v| v.as_u64()) {
@@ -3119,22 +3820,50 @@ pub fn call_tool(state: &mut DawState, name: &str, args: &Value) -> ToolCallResu
                 None => return ToolCallResult::error("Missing 'end_beat' parameter"),
             };
 
-            let res = if let Some(trk) = state.track_manager.get_track_mut(track_id) {
-                let mut clips = trk.clips.clone();
-                let r = trk.comping.comp_region_to_main(&mut clips, take_lane_idx, start_beat, end_beat, 5.0);
-                trk.clips = clips;
-                r.unwrap_or(0)
-            } else {
-                0
+            let trk = match state.ensure_timeline_track_mut(track_id) {
+                Some(t) => t,
+                None => return ToolCallResult::error(format!("Track index {} out of range", track_id)),
+            };
+
+            // Support either 1-based lane ID or 0-based take_lanes slice index
+            let resolved_lane_id = trk
+                .comping
+                .take_lanes
+                .iter()
+                .find(|l| l.id == take_lane_idx)
+                .or_else(|| trk.comping.take_lanes.get(take_lane_idx as usize))
+                .map(|l| l.id);
+
+            let lane_id = match resolved_lane_id {
+                Some(id) => id,
+                None => {
+                    return ToolCallResult::error(format!(
+                        "Take lane {} not found on track {}",
+                        take_lane_idx, track_id
+                    ));
+                }
+            };
+
+            let mut clips = trk.clips.clone();
+            let comp_res = trk
+                .comping
+                .comp_region_to_main(&mut clips, lane_id, start_beat, end_beat, 5.0);
+            let slices_comped = match comp_res {
+                Ok(n) => {
+                    trk.clips = clips;
+                    n
+                }
+                Err(e) => return ToolCallResult::error(e),
             };
 
             ToolCallResult::json(&json!({
                 "status": "region_comped",
                 "track_id": track_id,
                 "take_lane_index": take_lane_idx,
+                "take_lane_id": lane_id,
                 "start_beat": start_beat,
                 "end_beat": end_beat,
-                "slices_comped": res
+                "slices_comped": slices_comped
             }))
         }
 
@@ -3146,10 +3875,16 @@ pub fn call_tool(state: &mut DawState, name: &str, args: &Value) -> ToolCallResu
             };
             let init_dev = args.get("initial_device").and_then(|v| v.as_str());
             let ret_id = state.track_manager.add_return_track(name);
+            if !state.custom_return_ids.contains(&ret_id) {
+                state.custom_return_ids.push(ret_id);
+            }
             if let Some(dev_name) = init_dev {
-                if let Ok(dev) = instantiate_device(dev_name, state.sample_rate) {
-                    let chain = state.device_chains.entry(ret_id).or_default();
+                if let Ok((dev, handle)) = instantiate_managed_device(dev_name, state.sample_rate) {
+                    let cat = handle.category();
+                    let chain = state.return_device_chains.entry(ret_id).or_default();
                     add_device_to_chain(chain, dev, None);
+                    let handles = state.return_device_handles.entry(ret_id).or_default();
+                    handles.add_handle(cat, handle, None);
                 }
             }
             ToolCallResult::json(&json!({
@@ -3173,25 +3908,23 @@ pub fn call_tool(state: &mut DawState, name: &str, args: &Value) -> ToolCallResu
                 Some(l) => l as f32,
                 None => return ToolCallResult::error("Missing 'level_db' parameter"),
             };
+            let clamped = level_db.clamp(-70.0, 6.0);
 
-            if let Some(trk) = state.track_manager.get_track_mut(track_id) {
-                if send_index < trk.sends.len() {
-                    trk.sends[send_index].level_db = level_db.clamp(-70.0, 6.0);
-                }
+            if track_id as usize >= state.project.tracks.len() {
+                return ToolCallResult::error(format!("Track {} out of range", track_id));
+            }
+            if let Some(trk) = state.ensure_timeline_track_mut(track_id as usize) {
+                trk.set_send(send_index as u32, clamped, SendRoutingMode::PostFader);
             }
             if let Some(p_trk) = state.project.tracks.get_mut(track_id as usize) {
-                if send_index == 0 {
-                    p_trk.mixer.send_a_db = level_db.clamp(-70.0, 6.0);
-                } else if send_index == 1 {
-                    p_trk.mixer.send_b_db = level_db.clamp(-70.0, 6.0);
-                }
+                p_trk.mixer.set_send_db(send_index, clamped);
             }
 
             ToolCallResult::json(&json!({
                 "status": "send_updated",
                 "track_id": track_id,
                 "send_index": send_index,
-                "level_db": level_db
+                "level_db": clamped
             }))
         }
         "scale_set_global" => {
@@ -3212,21 +3945,7 @@ pub fn call_tool(state: &mut DawState, name: &str, args: &Value) -> ToolCallResu
                 None => return ToolCallResult::error("Missing 'scale_name' parameter"),
             };
 
-            let mode = match scale_str.as_str() {
-                "minor" | "aeolian" => ScaleMode::Minor,
-                "dorian" => ScaleMode::Dorian,
-                "phrygian" => ScaleMode::Phrygian,
-                "lydian" => ScaleMode::Lydian,
-                "mixolydian" => ScaleMode::Mixolydian,
-                "locrian" => ScaleMode::Locrian,
-                "harmonic_minor" | "harmonic minor" => ScaleMode::HarmonicMinor,
-                "melodic_minor" | "melodic minor" => ScaleMode::MelodicMinor,
-                "pentatonic" => ScaleMode::Pentatonic,
-                "blues" => ScaleMode::Blues,
-                "diminished" => ScaleMode::Diminished,
-                "whole_tone" | "whole tone" => ScaleMode::WholeTone,
-                _ => ScaleMode::Major,
-            };
+            let mode = parse_scale_mode_name(&scale_str);
 
             let lock = args.get("scale_lock").and_then(|v| v.as_bool()).unwrap_or(false);
             state.scale = GlobalScale::new(root_num, mode).with_lock(lock);
@@ -3245,12 +3964,12 @@ pub fn call_tool(state: &mut DawState, name: &str, args: &Value) -> ToolCallResu
             }))
         }
 
-        // --- Group 15: Real Live 12 LOM Bridge (15 tools) ---
+        // --- Group 15: Oxide Studio Live GUI RPC Bridge (15 tools) ---
         "live12_status" => {
             let is_online = state.lom_client.is_online();
             ToolCallResult::json(&json!({
                 "connected": is_online,
-                "target": "real_ableton_live_12",
+                "target": "oxide_studio_gui_rpc",
                 "host": state.lom_client.host,
                 "port": state.lom_client.port,
                 "status": if is_online { "online" } else { "offline" },
@@ -3258,7 +3977,8 @@ pub fn call_tool(state: &mut DawState, name: &str, args: &Value) -> ToolCallResu
             }))
         }
         "live12_get_song_info" => {
-            let res = state.lom_client.execute_with_fallback(
+            let lom_client = state.lom_client.clone();
+            let res = lom_client.execute_with_fallback(
                 "get_song_info",
                 json!({}),
                 || json!({
@@ -3276,52 +3996,161 @@ pub fn call_tool(state: &mut DawState, name: &str, args: &Value) -> ToolCallResu
         }
         "live12_create_midi_track" => {
             let index = args.get("index").and_then(|v| v.as_u64()).map(|i| i as usize);
-            let res = state.lom_client.execute_with_fallback(
+            let lom_client = state.lom_client.clone();
+            let res = lom_client.execute_with_fallback(
                 "create_midi_track",
                 json!({ "index": index }),
                 || {
-                    let id = state.project.tracks.len() as u32;
-                    let trk = TrackDefinition::new_synth(id, format!("MIDI Track {}", id));
-                    state.project.tracks.push(trk);
-                    let idx = index.unwrap_or(state.project.tracks.len() - 1);
-                    json!({ "index": idx, "track_count": state.project.tracks.len() })
+                    let insert_at = index
+                        .map(|i| i.min(state.project.tracks.len()))
+                        .unwrap_or(state.project.tracks.len());
+                    let trk = TrackDefinition::new_synth(insert_at as u32, format!("MIDI Track {}", insert_at));
+                    state.project.tracks.insert(insert_at, trk);
+                    for (i, t) in state.project.tracks.iter_mut().enumerate() {
+                        t.id = i as u32;
+                    }
+                    let m_idx = insert_at.min(state.matrix.tracks.len());
+                    state.matrix.tracks.insert(
+                        m_idx,
+                        oxide_timeline::SessionTrack::new(m_idx as u32, format!("MIDI Track {}", m_idx), 8),
+                    );
+                    let tl_idx = insert_at.min(state.timeline.tracks.len());
+                    state.timeline.tracks.insert(
+                        tl_idx,
+                        oxide_timeline::ArrangementTrack::new(tl_idx as u32, format!("MIDI Track {}", tl_idx), "MidiSynth"),
+                    );
+                    json!({
+                        "index": insert_at,
+                        "track_type": "MidiSynth",
+                        "track_count": state.project.tracks.len()
+                    })
                 },
             );
             ToolCallResult::json(&res)
         }
         "live12_create_audio_track" => {
             let index = args.get("index").and_then(|v| v.as_u64()).map(|i| i as usize);
-            let res = state.lom_client.execute_with_fallback(
+            let lom_client = state.lom_client.clone();
+            let res = lom_client.execute_with_fallback(
                 "create_audio_track",
                 json!({ "index": index }),
                 || {
-                    let id = state.project.tracks.len() as u32;
-                    let trk = TrackDefinition::new_synth(id, format!("Audio Track {}", id));
-                    state.project.tracks.push(trk);
-                    let idx = index.unwrap_or(state.project.tracks.len() - 1);
-                    json!({ "index": idx, "track_count": state.project.tracks.len() })
+                    let insert_at = index
+                        .map(|i| i.min(state.project.tracks.len()))
+                        .unwrap_or(state.project.tracks.len());
+                    let trk = TrackDefinition::new_audio(insert_at as u32, format!("Audio Track {}", insert_at));
+                    state.project.tracks.insert(insert_at, trk);
+                    for (i, t) in state.project.tracks.iter_mut().enumerate() {
+                        t.id = i as u32;
+                    }
+                    let m_idx = insert_at.min(state.matrix.tracks.len());
+                    state.matrix.tracks.insert(
+                        m_idx,
+                        oxide_timeline::SessionTrack::new(m_idx as u32, format!("Audio Track {}", m_idx), 8),
+                    );
+                    let tl_idx = insert_at.min(state.timeline.tracks.len());
+                    state.timeline.tracks.insert(
+                        tl_idx,
+                        oxide_timeline::ArrangementTrack::new(tl_idx as u32, format!("Audio Track {}", tl_idx), "Audio"),
+                    );
+                    json!({
+                        "index": insert_at,
+                        "track_type": "Audio",
+                        "track_count": state.project.tracks.len()
+                    })
                 },
             );
             ToolCallResult::json(&res)
         }
         "live12_create_return_track" => {
-            let res = state.lom_client.execute_with_fallback(
+            let lom_client = state.lom_client.clone();
+            let res = lom_client.execute_with_fallback(
                 "create_return_track",
                 json!({}),
                 || {
                     let ret_id = state.track_manager.add_return_track("New Return");
+                    if !state.custom_return_ids.contains(&ret_id) {
+                        state.custom_return_ids.push(ret_id);
+                    }
                     json!({ "return_track_id": ret_id, "return_track_count": state.track_manager.return_tracks.len() })
                 },
             );
             ToolCallResult::json(&res)
         }
         "live12_load_browser_item" => {
-            let track_index = args.get("track_index").and_then(|v| v.as_u64()).unwrap_or(0);
+            let track_index = args.get("track_index").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
             let uri = args.get("uri").and_then(|v| v.as_str()).unwrap_or("");
-            let res = state.lom_client.execute_with_fallback(
+            let lom_client = state.lom_client.clone();
+            let res = lom_client.execute_with_fallback(
                 "load_browser_item",
                 json!({ "track_index": track_index, "uri": uri }),
-                || json!({ "loaded": true, "track_index": track_index, "uri": uri }),
+                || {
+                    let dev_hint = {
+                        let clean = uri.trim().to_ascii_lowercase();
+                        let candidates = [
+                            ("wavetable", "Wavetable"),
+                            ("operator", "Operator"),
+                            ("drift", "Drift"),
+                            ("meld", "Meld"),
+                            ("analog", "Analog"),
+                            ("collision", "Collision"),
+                            ("tension", "Tension"),
+                            ("electric", "Electric"),
+                            ("simpler", "Simpler"),
+                            ("drum", "DrumRack"),
+                            ("eq", "EQEight"),
+                            ("glue", "GlueCompressor"),
+                            ("roar", "Roar"),
+                            ("autofilter", "AutoFilter"),
+                            ("ott", "MultibandDynamics"),
+                            ("reverb", "HybridReverb"),
+                            ("echo", "Echo"),
+                            ("delay", "Echo"),
+                            ("synth", "Wavetable"),
+                        ];
+                        candidates
+                            .iter()
+                            .find(|(k, _)| clean.contains(k))
+                            .map(|(_, v)| v.to_string())
+                            .or_else(|| {
+                                state
+                                    .browser
+                                    .search(uri, None, None)
+                                    .first()
+                                    .map(|item| item.name.clone())
+                            })
+                    };
+
+                    let mut loaded_device = None;
+                    let mut load_error = None;
+                    if let Some(hint) = dev_hint {
+                        if let Ok((dev, handle)) = instantiate_managed_device(&hint, state.sample_rate) {
+                            let cat = handle.category();
+                            let dev_name = handle.name();
+                            let chain = state.device_chains.entry(track_index).or_default();
+                            add_device_to_chain(chain, dev, None);
+                            let handles = state.device_handles.entry(track_index).or_default();
+                            handles.add_handle(cat, handle, None);
+                            loaded_device = Some(dev_name);
+                        } else {
+                            load_error = Some(format!("Failed to instantiate device '{}'", hint));
+                        }
+                    } else {
+                        load_error = Some(format!("Browser item '{}' not found", uri));
+                    }
+                    let mut out = json!({
+                        "loaded": loaded_device.is_some(),
+                        "track_index": track_index,
+                        "uri": uri,
+                        "device": loaded_device
+                    });
+                    if let Some(err) = load_error {
+                        if let Some(obj) = out.as_object_mut() {
+                            obj.insert("error".to_string(), json!(err));
+                        }
+                    }
+                    out
+                },
             );
             ToolCallResult::json(&res)
         }
@@ -3329,7 +4158,8 @@ pub fn call_tool(state: &mut DawState, name: &str, args: &Value) -> ToolCallResu
             let track_index = args.get("track_index").and_then(|v| v.as_u64()).unwrap_or(0);
             let slot_index = args.get("slot_index").and_then(|v| v.as_u64()).unwrap_or(0);
             let length_beats = args.get("length_beats").and_then(|v| v.as_f64()).unwrap_or(4.0);
-            let res = state.lom_client.execute_with_fallback(
+            let lom_client = state.lom_client.clone();
+            let res = lom_client.execute_with_fallback(
                 "create_clip",
                 json!({ "track_index": track_index, "slot_index": slot_index, "length_beats": length_beats }),
                 || {
@@ -3349,14 +4179,48 @@ pub fn call_tool(state: &mut DawState, name: &str, args: &Value) -> ToolCallResu
             ToolCallResult::json(&res)
         }
         "live12_add_notes" => {
-            let track_index = args.get("track_index").and_then(|v| v.as_u64()).unwrap_or(0);
-            let slot_index = args.get("slot_index").and_then(|v| v.as_u64()).unwrap_or(0);
+            let track_index = args.get("track_index").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
+            let slot_index = args.get("slot_index").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
             let notes = args.get("notes").cloned().unwrap_or(json!([]));
-            let res = state.lom_client.execute_with_fallback(
+            let lom_client = state.lom_client.clone();
+            let res = lom_client.execute_with_fallback(
                 "add_notes",
                 json!({ "track_index": track_index, "slot_index": slot_index, "notes": notes }),
                 || {
-                    let count = notes.as_array().map(|a| a.len()).unwrap_or(0);
+                    let mut parsed_notes = Vec::new();
+                    if let Some(arr) = notes.as_array() {
+                        for item in arr {
+                            let pitch = item.get("pitch").and_then(|v| v.as_u64()).unwrap_or(60).min(127) as u8;
+                            let vel = item.get("velocity").and_then(|v| v.as_u64()).unwrap_or(100).clamp(1, 127) as u8;
+                            let start = item.get("start_beat").and_then(|v| v.as_f64()).unwrap_or(0.0).max(0.0);
+                            let dur = item.get("duration_beats").and_then(|v| v.as_f64()).unwrap_or(0.5).max(0.01);
+                            parsed_notes.push(MidiNote::new(pitch, vel, start, dur));
+                        }
+                    }
+                    let count = parsed_notes.len();
+
+                    while state.matrix.tracks.len() <= track_index {
+                        let tid = state.matrix.tracks.len() as u32;
+                        state.matrix.tracks.push(oxide_timeline::SessionTrack::new(tid, format!("Track {}", tid), 8));
+                    }
+                    let trk = &mut state.matrix.tracks[track_index];
+                    while trk.slots.len() <= slot_index {
+                        trk.slots.push(oxide_timeline::SessionSlot::default());
+                    }
+                    if trk.slots[slot_index].clip.is_none() {
+                        let clip_id = ((track_index * 100) + slot_index + 1) as u32;
+                        trk.slots[slot_index].set_clip(Some(SessionClip::new(
+                            clip_id,
+                            "Live12 Clip",
+                            ClipPattern::Midi(MidiPattern::new(4.0)),
+                        )));
+                    }
+                    if let Some(ref mut clip) = trk.slots[slot_index].clip {
+                        if let ClipPattern::Midi(ref mut pat) = clip.pattern {
+                            pat.notes.extend(parsed_notes);
+                        }
+                    }
+
                     json!({ "notes_added": count, "track_index": track_index, "slot_index": slot_index })
                 },
             );
@@ -3365,7 +4229,8 @@ pub fn call_tool(state: &mut DawState, name: &str, args: &Value) -> ToolCallResu
         "live12_fire_clip" => {
             let track_index = args.get("track_index").and_then(|v| v.as_u64()).unwrap_or(0);
             let slot_index = args.get("slot_index").and_then(|v| v.as_u64()).unwrap_or(0);
-            let res = state.lom_client.execute_with_fallback(
+            let lom_client = state.lom_client.clone();
+            let res = lom_client.execute_with_fallback(
                 "fire_clip",
                 json!({ "track_index": track_index, "slot_index": slot_index }),
                 || {
@@ -3379,7 +4244,8 @@ pub fn call_tool(state: &mut DawState, name: &str, args: &Value) -> ToolCallResu
         }
         "live12_fire_scene" => {
             let scene_index = args.get("scene_index").and_then(|v| v.as_u64()).unwrap_or(0);
-            let res = state.lom_client.execute_with_fallback(
+            let lom_client = state.lom_client.clone();
+            let res = lom_client.execute_with_fallback(
                 "fire_scene",
                 json!({ "scene_index": scene_index }),
                 || {
@@ -3390,32 +4256,56 @@ pub fn call_tool(state: &mut DawState, name: &str, args: &Value) -> ToolCallResu
             ToolCallResult::json(&res)
         }
         "live12_set_device_param" => {
-            let track_index = args.get("track_index").and_then(|v| v.as_u64()).unwrap_or(0);
-            let device_index = args.get("device_index").and_then(|v| v.as_u64()).unwrap_or(0);
-            let param_index = args.get("param_index").and_then(|v| v.as_u64()).unwrap_or(0);
-            let value = args.get("value").and_then(|v| v.as_f64()).unwrap_or(0.0);
-            let res = state.lom_client.execute_with_fallback(
+            let track_index = args.get("track_index").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
+            let device_index = args.get("device_index").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
+            let param_val = args
+                .get("param_index")
+                .or_else(|| args.get("param"))
+                .or_else(|| args.get("param_name"));
+            let param_key = match param_val {
+                Some(v) if v.is_string() => v.as_str().unwrap_or("0").to_string(),
+                Some(v) if v.is_u64() => v.as_u64().unwrap_or(0).to_string(),
+                _ => "0".to_string(),
+            };
+            let value = args.get("value").and_then(|v| v.as_f64()).unwrap_or(0.0) as f32;
+            let lom_client = state.lom_client.clone();
+            let res = lom_client.execute_with_fallback(
                 "set_device_param",
-                json!({ "track_index": track_index, "device_index": device_index, "param_index": param_index, "value": value }),
-                || {
-                    if let Some(chain) = state.device_chains.get_mut(&(track_index as u32)) {
-                        if let Some(ref mut inst) = chain.instrument {
-                            inst.set_parameter(param_index as u32, value as f32);
-                        }
-                    }
-                    json!({ "track_index": track_index, "device_index": device_index, "param_index": param_index, "value": value })
+                json!({
+                    "track_index": track_index,
+                    "device_index": device_index,
+                    "param_index": param_key,
+                    "value": value
+                }),
+                || match set_track_device_param_helper(state, track_index, device_index, &param_key, value) {
+                    Ok((device_name, resolved_param, applied_value)) => json!({
+                        "updated": true,
+                        "track_index": track_index,
+                        "device_index": device_index,
+                        "device_name": device_name,
+                        "param": resolved_param,
+                        "value": applied_value
+                    }),
+                    Err(err) => json!({
+                        "updated": false,
+                        "track_index": track_index,
+                        "device_index": device_index,
+                        "error": err
+                    }),
                 },
             );
             ToolCallResult::json(&res)
         }
         "live12_get_track_devices" => {
-            let track_index = args.get("track_index").and_then(|v| v.as_u64()).unwrap_or(0);
-            let res = state.lom_client.execute_with_fallback(
+            let track_index = args.get("track_index").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
+            let lom_client = state.lom_client.clone();
+            let res = lom_client.execute_with_fallback(
                 "get_track_devices",
                 json!({ "track_index": track_index }),
                 || {
-                    let chain = state.device_chains.entry(track_index as u32).or_default();
-                    dump_device_chain(chain)
+                    let chain = state.device_chains.entry(track_index).or_default();
+                    let handles = state.device_handles.get(&track_index);
+                    dump_device_chain_detailed(chain, handles)
                 },
             );
             ToolCallResult::json(&res)
@@ -3425,12 +4315,15 @@ pub fn call_tool(state: &mut DawState, name: &str, args: &Value) -> ToolCallResu
                 Some(b) => b,
                 None => return ToolCallResult::error("Missing 'bpm' parameter"),
             };
-            let res = state.lom_client.execute_with_fallback(
+            let lom_client = state.lom_client.clone();
+            let res = lom_client.execute_with_fallback(
                 "set_tempo",
                 json!({ "bpm": bpm }),
                 || {
-                    state.bpm = bpm.clamp(20.0, 999.0);
-                    state.delay.set_tempo(state.bpm);
+                    let clamped = bpm.clamp(20.0, 999.0);
+                    state.bpm = clamped;
+                    state.project.transport.bpm = clamped;
+                    state.delay.set_tempo(clamped);
                     json!({ "tempo": state.bpm })
                 },
             );
@@ -3439,25 +4332,12 @@ pub fn call_tool(state: &mut DawState, name: &str, args: &Value) -> ToolCallResu
         "live12_set_scale" => {
             let root_note = args.get("root_note").and_then(|v| v.as_u64()).unwrap_or(0) as u8 % 12;
             let scale_name = args.get("scale_name").and_then(|v| v.as_str()).unwrap_or("Major");
-            let res = state.lom_client.execute_with_fallback(
+            let lom_client = state.lom_client.clone();
+            let res = lom_client.execute_with_fallback(
                 "set_scale",
                 json!({ "root_note": root_note, "scale_name": scale_name }),
                 || {
-                    let mode = match scale_name.to_lowercase().as_str() {
-                        "minor" | "aeolian" => ScaleMode::Minor,
-                        "dorian" => ScaleMode::Dorian,
-                        "phrygian" => ScaleMode::Phrygian,
-                        "lydian" => ScaleMode::Lydian,
-                        "mixolydian" => ScaleMode::Mixolydian,
-                        "locrian" => ScaleMode::Locrian,
-                        "harmonic_minor" => ScaleMode::HarmonicMinor,
-                        "melodic_minor" => ScaleMode::MelodicMinor,
-                        "pentatonic" => ScaleMode::Pentatonic,
-                        "blues" => ScaleMode::Blues,
-                        "diminished" => ScaleMode::Diminished,
-                        "whole_tone" => ScaleMode::WholeTone,
-                        _ => ScaleMode::Major,
-                    };
+                    let mode = parse_scale_mode_name(scale_name);
                     state.scale = GlobalScale::new(root_note, mode);
                     json!({ "root_note": root_note, "scale_name": scale_name })
                 },
@@ -3469,10 +4349,49 @@ pub fn call_tool(state: &mut DawState, name: &str, args: &Value) -> ToolCallResu
                 Some(q) => q,
                 None => return ToolCallResult::error("Missing 'query' parameter"),
             };
-            let res = state.lom_client.execute_with_fallback(
+            let lom_client = state.lom_client.clone();
+            let res = lom_client.execute_with_fallback(
                 "exec_lom_query",
                 json!({ "query": query }),
-                || json!({ "query": query, "result": "executed_against_native_engine" }),
+                || {
+                    let q_lower = query.trim().to_ascii_lowercase();
+                    let value = if q_lower == "song.tempo" || q_lower == "tempo" || q_lower == "bpm" {
+                        json!(state.bpm)
+                    } else if q_lower == "song.is_playing" || q_lower == "is_playing" {
+                        json!(state.is_playing)
+                    } else if q_lower == "song.tracks" || q_lower == "tracks" {
+                        json!(state.project.tracks.iter().map(|t| t.name.clone()).collect::<Vec<_>>())
+                    } else if q_lower.contains("tracks[") && q_lower.ends_with(".name") {
+                        let idx = q_lower
+                            .split("tracks[")
+                            .nth(1)
+                            .and_then(|s| s.split(']').next())
+                            .and_then(|n| n.parse::<usize>().ok());
+                        match idx.and_then(|i| state.project.tracks.get(i)) {
+                            Some(t) => json!(t.name),
+                            None => Value::Null,
+                        }
+                    } else if q_lower.contains("track_count") {
+                        json!(state.project.tracks.len())
+                    } else if q_lower.contains("scale") {
+                        json!({
+                            "root_note": state.scale.root_name(),
+                            "scale_name": state.scale.mode.name()
+                        })
+                    } else if q_lower.contains("return") {
+                        json!(state.track_manager.return_tracks.iter().map(|r| r.name.clone()).collect::<Vec<_>>())
+                    } else if q_lower.contains("master") {
+                        json!(state.project.master_track)
+                    } else {
+                        json!({
+                            "tempo": state.bpm,
+                            "is_playing": state.is_playing,
+                            "track_count": state.project.tracks.len(),
+                            "tracks": state.project.tracks.iter().map(|t| t.name.clone()).collect::<Vec<_>>()
+                        })
+                    };
+                    json!({ "query": query, "result": value })
+                },
             );
             ToolCallResult::json(&res)
         }

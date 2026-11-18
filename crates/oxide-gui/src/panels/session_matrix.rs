@@ -232,9 +232,9 @@ pub fn render_session_matrix(
     let scene_count = matrix.scenes.len().max(8);
 
     // Track and clip selection state from persistent ui.data
-    let selected_track_id = egui::Id::new("aruston_selected_track");
+    let selected_track_id = egui::Id::new("oxide_selected_track");
     let mut selected_track: usize = ui.data(|d| d.get_temp(selected_track_id)).unwrap_or(0);
-    let selected_slot_id = egui::Id::new("aruston_selected_slot");
+    let selected_slot_id = egui::Id::new("oxide_selected_slot");
     let selected_slot: Option<(usize, usize)> = ui.data(|d| d.get_temp(selected_slot_id));
 
     // Top Session Toolbar: Mixer Sections Toggles, Launch Quantize, & Studio Hint
@@ -645,7 +645,7 @@ pub fn render_session_matrix(
                             }
 
                             // 5. Crisp Rectangular Track Activator / Solo / Arm Row
-                            let arm_id = egui::Id::new("aruston_track_arm").with(track_idx);
+                            let arm_id = egui::Id::new("oxide_track_arm").with(track_idx);
                             let mut is_armed: bool =
                                 ui.data(|d| d.get_temp(arm_id)).unwrap_or(track_idx == 0);
 
@@ -1951,8 +1951,8 @@ mod tests {
         let _ = ctx.run(egui::RawInput::default(), |ctx| {
             egui::CentralPanel::default().show(ctx, |ui| {
                 ui.data_mut(|d| {
-                    d.insert_temp(egui::Id::new("aruston_selected_track"), 0usize);
-                    d.insert_temp(egui::Id::new("aruston_selected_slot"), Some((0usize, 0usize)));
+                    d.insert_temp(egui::Id::new("oxide_selected_track"), 0usize);
+                    d.insert_temp(egui::Id::new("oxide_selected_slot"), Some((0usize, 0usize)));
                 });
 
                 let action = render_session_matrix(

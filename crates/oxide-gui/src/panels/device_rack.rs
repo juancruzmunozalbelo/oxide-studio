@@ -52,7 +52,7 @@ mod tests {
 
         let _ = ctx.run(egui::RawInput::default(), |ctx| {
             egui::CentralPanel::default().show(ctx, |ui| {
-                ui.data_mut(|d| d.insert_temp(egui::Id::new("aruston_selected_track"), 2usize));
+                ui.data_mut(|d| d.insert_temp(egui::Id::new("oxide_selected_track"), 2usize));
                 let act = render_device_chain_view(ui, &mut chain, &bins);
                 assert!(act.toggle_bypass.is_none());
             });

@@ -141,14 +141,14 @@ impl WarpPrng {
 /// Pre-allocated Radix-2 2048-point FFT helper for zero-allocation execution.
 #[derive(Clone)]
 pub struct Radix2Fft2048 {
-    bit_rev: [u16; FFT_SIZE],
-    twiddle_cos: [f32; FFT_SIZE / 2],
-    twiddle_sin: [f32; FFT_SIZE / 2],
+    bit_rev: Box<[u16]>,
+    twiddle_cos: Box<[f32]>,
+    twiddle_sin: Box<[f32]>,
 }
 
 impl Radix2Fft2048 {
     pub fn new() -> Self {
-        let mut bit_rev = [0u16; FFT_SIZE];
+        let mut bit_rev = vec![0u16; FFT_SIZE].into_boxed_slice();
         for i in 0..FFT_SIZE {
             let mut rev = 0u16;
             for b in 0..11 {
@@ -159,8 +159,8 @@ impl Radix2Fft2048 {
             bit_rev[i] = rev;
         }
 
-        let mut twiddle_cos = [0.0f32; FFT_SIZE / 2];
-        let mut twiddle_sin = [0.0f32; FFT_SIZE / 2];
+        let mut twiddle_cos = vec![0.0f32; FFT_SIZE / 2].into_boxed_slice();
+        let mut twiddle_sin = vec![0.0f32; FFT_SIZE / 2].into_boxed_slice();
         for k in 0..(FFT_SIZE / 2) {
             let angle = -2.0 * PI * (k as f32) / (FFT_SIZE as f32);
             twiddle_cos[k] = angle.cos();
@@ -174,7 +174,10 @@ impl Radix2Fft2048 {
         }
     }
 
-    pub fn forward(&self, real: &mut [f32; FFT_SIZE], imag: &mut [f32; FFT_SIZE]) {
+    pub fn forward(&self, real: &mut [f32], imag: &mut [f32]) {
+        if real.len() < FFT_SIZE || imag.len() < FFT_SIZE {
+            return;
+        }
         for i in 0..FFT_SIZE {
             let j = self.bit_rev[i] as usize;
             if i < j {
@@ -208,7 +211,10 @@ impl Radix2Fft2048 {
         }
     }
 
-    pub fn inverse(&self, real: &mut [f32; FFT_SIZE], imag: &mut [f32; FFT_SIZE]) {
+    pub fn inverse(&self, real: &mut [f32], imag: &mut [f32]) {
+        if real.len() < FFT_SIZE || imag.len() < FFT_SIZE {
+            return;
+        }
         for i in 0..FFT_SIZE {
             let j = self.bit_rev[i] as usize;
             if i < j {
@@ -252,11 +258,11 @@ impl Radix2Fft2048 {
 /// Pre-allocated double-buffered disk streaming cache for audio clips.
 #[derive(Clone)]
 pub struct StreamingDiskCache {
-    page_a: [f32; PAGE_SIZE],
+    page_a: Box<[f32]>,
     page_a_offset: usize,
     page_a_valid: bool,
 
-    page_b: [f32; PAGE_SIZE],
+    page_b: Box<[f32]>,
     page_b_offset: usize,
     page_b_valid: bool,
 }
@@ -270,10 +276,10 @@ impl Default for StreamingDiskCache {
 impl StreamingDiskCache {
     pub fn new() -> Self {
         Self {
-            page_a: [0.0; PAGE_SIZE],
+            page_a: vec![0.0; PAGE_SIZE].into_boxed_slice(),
             page_a_offset: 0,
             page_a_valid: false,
-            page_b: [0.0; PAGE_SIZE],
+            page_b: vec![0.0; PAGE_SIZE].into_boxed_slice(),
             page_b_offset: 0,
             page_b_valid: false,
         }
@@ -380,16 +386,16 @@ pub struct SpectralWarpProcessor {
 
     // Pre-allocated DSP buffers
     fft: Radix2Fft2048,
-    hann_window: [f32; FFT_SIZE],
-    fft_real: [f32; FFT_SIZE],
-    fft_imag: [f32; FFT_SIZE],
-    mag: [f32; FFT_SIZE],
-    phase: [f32; FFT_SIZE],
-    synth_phase: [f32; FFT_SIZE],
-    prev_anal_phase: [f32; FFT_SIZE],
-    envelope_orig: [f32; FFT_SIZE / 2],
-    envelope_shifted: [f32; FFT_SIZE / 2],
-    ola_buffer: [f32; MAX_WARP_BUFFER],
+    hann_window: Box<[f32]>,
+    fft_real: Box<[f32]>,
+    fft_imag: Box<[f32]>,
+    mag: Box<[f32]>,
+    phase: Box<[f32]>,
+    synth_phase: Box<[f32]>,
+    prev_anal_phase: Box<[f32]>,
+    envelope_orig: Box<[f32]>,
+    envelope_shifted: Box<[f32]>,
+    ola_buffer: Box<[f32]>,
     ola_read_pos: usize,
     ola_write_pos: usize,
 
@@ -404,7 +410,7 @@ pub struct SpectralWarpProcessor {
 
 impl SpectralWarpProcessor {
     pub fn new(sample_rate: f32) -> Self {
-        let mut hann_window = [0.0f32; FFT_SIZE];
+        let mut hann_window = vec![0.0f32; FFT_SIZE].into_boxed_slice();
         for i in 0..FFT_SIZE {
             hann_window[i] = 0.5 * (1.0 - (2.0 * PI * (i as f32) / (FFT_SIZE as f32)).cos());
         }
@@ -420,15 +426,15 @@ impl SpectralWarpProcessor {
 
             fft: Radix2Fft2048::new(),
             hann_window,
-            fft_real: [0.0; FFT_SIZE],
-            fft_imag: [0.0; FFT_SIZE],
-            mag: [0.0; FFT_SIZE],
-            phase: [0.0; FFT_SIZE],
-            synth_phase: [0.0; FFT_SIZE],
-            prev_anal_phase: [0.0; FFT_SIZE],
-            envelope_orig: [0.0; FFT_SIZE / 2],
-            envelope_shifted: [0.0; FFT_SIZE / 2],
-            ola_buffer: [0.0; MAX_WARP_BUFFER],
+            fft_real: vec![0.0; FFT_SIZE].into_boxed_slice(),
+            fft_imag: vec![0.0; FFT_SIZE].into_boxed_slice(),
+            mag: vec![0.0; FFT_SIZE].into_boxed_slice(),
+            phase: vec![0.0; FFT_SIZE].into_boxed_slice(),
+            synth_phase: vec![0.0; FFT_SIZE].into_boxed_slice(),
+            prev_anal_phase: vec![0.0; FFT_SIZE].into_boxed_slice(),
+            envelope_orig: vec![0.0; FFT_SIZE / 2].into_boxed_slice(),
+            envelope_shifted: vec![0.0; FFT_SIZE / 2].into_boxed_slice(),
+            ola_buffer: vec![0.0; MAX_WARP_BUFFER].into_boxed_slice(),
             ola_read_pos: 0,
             ola_write_pos: 0,
 
