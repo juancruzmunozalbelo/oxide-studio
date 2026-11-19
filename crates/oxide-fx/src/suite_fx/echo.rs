@@ -54,9 +54,29 @@ impl Echo {
     }
 
     pub fn set_sample_rate(&mut self, sample_rate: f32) {
-        if sample_rate > 0.0 {
-            *self = Self::new(sample_rate);
+        if sample_rate.is_finite() && sample_rate > 0.0 {
+            let max_samples = ((sample_rate * 2.5) as usize).max(1024);
+            self.sample_rate = sample_rate;
+            self.buf_l = vec![0.0; max_samples];
+            self.buf_r = vec![0.0; max_samples];
+            self.write_pos = 0;
+            self.wow_phase = 0.0;
+            self.flutter_phase = 0.0;
+            self.duck_envelope = 0.0;
+            self.filter_state_l = 0.0;
+            self.filter_state_r = 0.0;
         }
+    }
+
+    #[inline(always)]
+    fn read_linear(buf: &[f32], write_pos: usize, delay_samples: f32) -> f32 {
+        let len = buf.len();
+        let d = delay_samples.clamp(1.0, (len - 2) as f32);
+        let idx_int = d.floor() as usize;
+        let frac = d - idx_int as f32;
+        let i0 = (write_pos + len - idx_int) % len;
+        let i1 = (write_pos + len - idx_int - 1) % len;
+        buf[i0] + frac * (buf[i1] - buf[i0])
     }
 }
 
@@ -124,11 +144,8 @@ impl AudioEffectDevice for Echo {
             let delay_samples_l = (base_delay_l + wow_mod + flutter_mod).clamp(1.0, (buf_len - 2) as f32);
             let delay_samples_r = (base_delay_r - wow_mod + flutter_mod).clamp(1.0, (buf_len - 2) as f32);
 
-            let read_idx_l = ((self.write_pos as f32 - delay_samples_l + buf_len as f32) as usize) % buf_len;
-            let read_idx_r = ((self.write_pos as f32 - delay_samples_r + buf_len as f32) as usize) % buf_len;
-
-            let delayed_l = self.buf_l[read_idx_l];
-            let delayed_r = self.buf_r[read_idx_r];
+            let delayed_l = Self::read_linear(&self.buf_l, self.write_pos, delay_samples_l);
+            let delayed_r = Self::read_linear(&self.buf_r, self.write_pos, delay_samples_r);
 
             // Feedback damping filter
             self.filter_state_l = self.filter_state_l * 0.4 + delayed_l * 0.6;

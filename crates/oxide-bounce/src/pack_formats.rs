@@ -196,6 +196,12 @@ impl AlpPackArchive {
         ]) as usize;
         offset += 4;
 
+        let remaining = payload_len.saturating_sub(offset);
+        let min_entry_bytes = num_entries.checked_mul(12).ok_or(AlpError::UnexpectedEof)?;
+        if min_entry_bytes > remaining {
+            return Err(AlpError::UnexpectedEof);
+        }
+
         let mut entries = Vec::with_capacity(num_entries);
 
         for _ in 0..num_entries {
@@ -211,11 +217,12 @@ impl AlpPackArchive {
             ]) as usize;
             offset += 4;
 
-            if offset + path_len > payload_len {
+            if offset.checked_add(path_len).map_or(true, |end| end > payload_len) {
                 return Err(AlpError::UnexpectedEof);
             }
             let path = String::from_utf8(bytes[offset..offset + path_len].to_vec())
                 .map_err(|e| AlpError::CorruptedData(format!("Invalid entry path UTF-8: {}", e)))?;
+            validate_alp_entry_path(&path)?;
             offset += path_len;
 
             // Data length and CRC
@@ -238,7 +245,7 @@ impl AlpPackArchive {
             ]);
             offset += 4;
 
-            if offset + data_len > payload_len {
+            if offset.checked_add(data_len).map_or(true, |end| end > payload_len) {
                 return Err(AlpError::UnexpectedEof);
             }
             let data = bytes[offset..offset + data_len].to_vec();
@@ -261,6 +268,33 @@ impl AlpPackArchive {
             entries,
         })
     }
+}
+
+fn validate_alp_entry_path(path: &str) -> Result<(), AlpError> {
+    if path.is_empty()
+        || path.contains('\0')
+        || path.starts_with('/')
+        || path.starts_with('\\')
+        || path.contains('\\')
+    {
+        return Err(AlpError::CorruptedData(format!("Invalid ALP entry path: {}", path)));
+    }
+    let bytes = path.as_bytes();
+    if bytes.len() >= 2 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':' {
+        return Err(AlpError::CorruptedData(format!(
+            "Absolute drive path rejected in ALP entry: {}",
+            path
+        )));
+    }
+    for component in path.split('/') {
+        if component == ".." || component == "." || component.is_empty() {
+            return Err(AlpError::CorruptedData(format!(
+                "Unsafe path traversal component in ALP entry: {}",
+                path
+            )));
+        }
+    }
+    Ok(())
 }
 
 // =============================================================================
@@ -329,7 +363,7 @@ impl DawProjectExchange {
               <artist>Oxide Producer</artist>\n  \
               <originator>Oxide Studio Live 12.4.6</originator>\n\
             </metadata>",
-            project.title
+            xml_escape(&project.title)
         );
 
         let mut project_xml = String::new();
@@ -343,13 +377,13 @@ impl DawProjectExchange {
         for track in &project.tracks {
             project_xml.push_str(&format!(
                 "    <track name=\"{}\" volume=\"{:.2}\" pan=\"{:.2}\" mute=\"{}\">\n",
-                track.name, track.volume_db, track.pan, track.is_muted
+                xml_escape(&track.name), track.volume_db, track.pan, track.is_muted
             ));
 
             for clip in &track.clips {
                 project_xml.push_str(&format!(
                     "      <clip name=\"{}\" start=\"{:.3}\" duration=\"{:.3}\">\n",
-                    clip.name, clip.start_beat, clip.duration_beats
+                    xml_escape(&clip.name), clip.start_beat, clip.duration_beats
                 ));
 
                 for note in &clip.notes {
@@ -374,92 +408,64 @@ impl DawProjectExchange {
         project_xml: &str,
         metadata_xml: &str,
     ) -> Result<DawProject, DawProjectError> {
-        let title = extract_tag_value(metadata_xml, "title")
+        let meta_nodes = parse_xml_document(metadata_xml)?;
+        let title = find_element_text(&meta_nodes, "title")
+            .filter(|s| !s.is_empty())
             .unwrap_or_else(|| "Untitled DAWproject".to_string());
 
-        let tempo_str = extract_tag_value(project_xml, "tempo")
+        let project_nodes = parse_xml_document(project_xml)?;
+        let tempo_str = find_element_text(&project_nodes, "tempo")
             .ok_or_else(|| DawProjectError::MissingField("tempo".into()))?;
         let tempo: f64 = tempo_str
+            .trim()
             .parse()
             .map_err(|_| DawProjectError::XmlParseError("Invalid tempo format".into()))?;
 
-        let time_sig_str = extract_tag_value(project_xml, "timeSignature")
+        let time_sig_str = find_element_text(&project_nodes, "timeSignature")
             .unwrap_or_else(|| "4/4".to_string());
         let time_signature = parse_time_signature(&time_sig_str);
 
-        let mut tracks = Vec::new();
+        let mut track_elems = Vec::new();
+        collect_elements_by_name(&project_nodes, "track", &mut track_elems);
 
-        // Extract track blocks
-        let mut cur_pos = 0;
-        while let Some(track_start) = project_xml[cur_pos..].find("<track ") {
-            let abs_track_start = cur_pos + track_start;
-            let tag_close = match project_xml[abs_track_start..].find('>') {
-                Some(idx) => abs_track_start + idx,
-                None => break,
-            };
-            let track_header = &project_xml[abs_track_start..tag_close];
-
-            let track_end = match project_xml[abs_track_start..].find("</track>") {
-                Some(idx) => abs_track_start + idx + 8,
-                None => break,
-            };
-            let track_body = &project_xml[tag_close + 1..track_end - 8];
-
-            let name = extract_attr_value(track_header, "name").unwrap_or_else(|| "Track".into());
-            let volume_db: f32 = extract_attr_value(track_header, "volume")
+        let mut tracks = Vec::with_capacity(track_elems.len());
+        for t_el in track_elems {
+            let name = t_el.attr("name").unwrap_or("Track").to_string();
+            let volume_db: f32 = t_el
+                .attr("volume")
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(0.0);
-            let pan: f32 = extract_attr_value(track_header, "pan")
+            let pan: f32 = t_el
+                .attr("pan")
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(0.0);
-            let is_muted: bool = extract_attr_value(track_header, "mute")
-                .map(|v| v == "true")
-                .unwrap_or(false);
+            let is_muted: bool = t_el.attr("mute").map(|v| v == "true").unwrap_or(false);
 
             let mut clips = Vec::new();
-            let mut clip_pos = 0;
-            while let Some(c_start) = track_body[clip_pos..].find("<clip ") {
-                let abs_clip_start = clip_pos + c_start;
-                let c_tag_close = match track_body[abs_clip_start..].find('>') {
-                    Some(idx) => abs_clip_start + idx,
-                    None => break,
-                };
-                let clip_header = &track_body[abs_clip_start..c_tag_close];
-
-                let clip_end = match track_body[abs_clip_start..].find("</clip>") {
-                    Some(idx) => abs_clip_start + idx + 7,
-                    None => break,
-                };
-                let clip_body = &track_body[c_tag_close + 1..clip_end - 7];
-
-                let clip_name = extract_attr_value(clip_header, "name").unwrap_or_else(|| "Clip".into());
-                let clip_start: f64 = extract_attr_value(clip_header, "start")
+            for c_el in t_el.children.iter().filter(|c| c.name == "clip") {
+                let clip_name = c_el.attr("name").unwrap_or("Clip").to_string();
+                let clip_start: f64 = c_el
+                    .attr("start")
                     .and_then(|v| v.parse().ok())
                     .unwrap_or(0.0);
-                let clip_duration: f64 = extract_attr_value(clip_header, "duration")
+                let clip_duration: f64 = c_el
+                    .attr("duration")
                     .and_then(|v| v.parse().ok())
                     .unwrap_or(4.0);
 
                 let mut notes = Vec::new();
-                let mut note_pos = 0;
-                while let Some(n_start) = clip_body[note_pos..].find("<note ") {
-                    let abs_note_start = note_pos + n_start;
-                    let n_tag_close = match clip_body[abs_note_start..].find("/>") {
-                        Some(idx) => abs_note_start + idx + 2,
-                        None => break,
-                    };
-                    let note_str = &clip_body[abs_note_start..n_tag_close];
-
-                    let key: u8 = extract_attr_value(note_str, "key")
-                        .and_then(|v| v.parse().ok())
-                        .unwrap_or(60);
-                    let velocity: u8 = extract_attr_value(note_str, "velocity")
+                for n_el in c_el.children.iter().filter(|n| n.name == "note") {
+                    let key: u8 = n_el.attr("key").and_then(|v| v.parse().ok()).unwrap_or(60);
+                    let velocity: u8 = n_el
+                        .attr("velocity")
                         .and_then(|v| v.parse().ok())
                         .unwrap_or(100);
-                    let start_beat: f64 = extract_attr_value(note_str, "start")
+                    let start_beat: f64 = n_el
+                        .attr("start")
                         .and_then(|v| v.parse().ok())
                         .unwrap_or(0.0);
-                    let duration_beats: f64 = extract_attr_value(note_str, "duration")
+                    let duration_beats: f64 = n_el
+                        .attr("duration")
                         .and_then(|v| v.parse().ok())
                         .unwrap_or(1.0);
 
@@ -469,8 +475,6 @@ impl DawProjectExchange {
                         start_beat,
                         duration_beats,
                     });
-
-                    note_pos = n_tag_close;
                 }
 
                 clips.push(DawClip {
@@ -479,8 +483,6 @@ impl DawProjectExchange {
                     duration_beats: clip_duration,
                     notes,
                 });
-
-                clip_pos = clip_end;
             }
 
             tracks.push(DawTrack {
@@ -490,8 +492,6 @@ impl DawProjectExchange {
                 is_muted,
                 clips,
             });
-
-            cur_pos = track_end;
         }
 
         Ok(DawProject {
@@ -503,19 +503,278 @@ impl DawProjectExchange {
     }
 }
 
-fn extract_tag_value(xml: &str, tag: &str) -> Option<String> {
-    let open_tag = format!("<{}>", tag);
-    let close_tag = format!("</{}>", tag);
-    let start = xml.find(&open_tag)? + open_tag.len();
-    let end = xml[start..].find(&close_tag)? + start;
-    Some(xml[start..end].trim().to_string())
+#[derive(Debug, Clone)]
+struct XmlElement {
+    name: String,
+    attrs: Vec<(String, String)>,
+    text: String,
+    children: Vec<XmlElement>,
 }
 
-fn extract_attr_value(tag_str: &str, attr: &str) -> Option<String> {
-    let pattern = format!("{}=\"", attr);
-    let start = tag_str.find(&pattern)? + pattern.len();
-    let end = tag_str[start..].find('"')? + start;
-    Some(tag_str[start..end].to_string())
+impl XmlElement {
+    fn attr(&self, key: &str) -> Option<&str> {
+        self.attrs
+            .iter()
+            .find(|(k, _)| k == key)
+            .map(|(_, v)| v.as_str())
+    }
+}
+
+fn xml_escape(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for ch in s.chars() {
+        match ch {
+            '&' => out.push_str("&amp;"),
+            '<' => out.push_str("&lt;"),
+            '>' => out.push_str("&gt;"),
+            '"' => out.push_str("&quot;"),
+            '\'' => out.push_str("&apos;"),
+            _ => out.push(ch),
+        }
+    }
+    out
+}
+
+fn xml_unescape(s: &str) -> Result<String, DawProjectError> {
+    if !s.contains('&') {
+        return Ok(s.to_string());
+    }
+    let mut out = String::with_capacity(s.len());
+    let mut rest = s;
+    while let Some(amp) = rest.find('&') {
+        out.push_str(&rest[..amp]);
+        let after = &rest[amp + 1..];
+        let semi = after
+            .find(';')
+            .ok_or_else(|| DawProjectError::XmlParseError("Unterminated XML entity".into()))?;
+        let entity = &after[..semi];
+        match entity {
+            "amp" => out.push('&'),
+            "lt" => out.push('<'),
+            "gt" => out.push('>'),
+            "quot" => out.push('"'),
+            "apos" => out.push('\''),
+            _ if entity.starts_with("#x") || entity.starts_with("#X") => {
+                let code = u32::from_str_radix(&entity[2..], 16)
+                    .ok()
+                    .and_then(char::from_u32)
+                    .ok_or_else(|| DawProjectError::XmlParseError(format!("Invalid XML entity &{};", entity)))?;
+                out.push(code);
+            }
+            _ if entity.starts_with('#') => {
+                let code = entity[1..]
+                    .parse::<u32>()
+                    .ok()
+                    .and_then(char::from_u32)
+                    .ok_or_else(|| DawProjectError::XmlParseError(format!("Invalid XML entity &{};", entity)))?;
+                out.push(code);
+            }
+            _ => {
+                return Err(DawProjectError::XmlParseError(format!(
+                    "Unknown XML entity &{};",
+                    entity
+                )))
+            }
+        }
+        rest = &after[semi + 1..];
+    }
+    out.push_str(rest);
+    Ok(out)
+}
+
+fn find_tag_end_respecting_quotes(s: &str) -> Option<usize> {
+    let bytes = s.as_bytes();
+    let mut i = 0;
+    let mut quote: Option<u8> = None;
+    while i < bytes.len() {
+        let b = bytes[i];
+        match quote {
+            Some(q) => {
+                if b == q {
+                    quote = None;
+                }
+            }
+            None => {
+                if b == b'"' || b == b'\'' {
+                    quote = Some(b);
+                } else if b == b'>' {
+                    return Some(i);
+                }
+            }
+        }
+        i += 1;
+    }
+    None
+}
+
+fn parse_start_tag_and_attrs(tag_inner: &str) -> Result<(String, Vec<(String, String)>, bool), DawProjectError> {
+    let trimmed_end = tag_inner.trim_end();
+    let (body, self_closing) = if let Some(stripped) = trimmed_end.strip_suffix('/') {
+        (stripped.trim(), true)
+    } else {
+        (trimmed_end.trim(), false)
+    };
+    if body.is_empty() {
+        return Err(DawProjectError::XmlParseError("Empty XML tag name".into()));
+    }
+
+    let name_end = body
+        .find(|c: char| c.is_ascii_whitespace())
+        .unwrap_or(body.len());
+    let name = body[..name_end].to_string();
+    let mut rest = body[name_end..].trim_start();
+    let mut attrs = Vec::new();
+
+    while !rest.is_empty() {
+        let eq = rest
+            .find('=')
+            .ok_or_else(|| DawProjectError::XmlParseError(format!("Malformed attribute in <{}>", name)))?;
+        let attr_name = rest[..eq].trim();
+        if attr_name.is_empty() || attr_name.contains(char::is_whitespace) {
+            return Err(DawProjectError::XmlParseError(format!("Invalid attribute name in <{}>", name)));
+        }
+        rest = rest[eq + 1..].trim_start();
+        let quote = rest
+            .chars()
+            .next()
+            .filter(|&c| c == '"' || c == '\'')
+            .ok_or_else(|| DawProjectError::XmlParseError(format!("Missing quote for attribute '{}'", attr_name)))?;
+        rest = &rest[1..];
+        let val_end = rest
+            .find(quote)
+            .ok_or_else(|| DawProjectError::XmlParseError(format!("Unterminated attribute '{}' value", attr_name)))?;
+        let attr_val = xml_unescape(&rest[..val_end])?;
+        attrs.push((attr_name.to_string(), attr_val));
+        rest = rest[val_end + 1..].trim_start();
+    }
+
+    Ok((name, attrs, self_closing))
+}
+
+fn parse_xml_document(xml: &str) -> Result<Vec<XmlElement>, DawProjectError> {
+    let mut roots = Vec::new();
+    let mut stack: Vec<XmlElement> = Vec::new();
+    let mut rest = xml.trim_start_matches('\u{feff}');
+
+    while !rest.is_empty() {
+        if let Some(lt) = rest.find('<') {
+            if lt > 0 {
+                let text = xml_unescape(&rest[..lt])?;
+                if let Some(top) = stack.last_mut() {
+                    top.text.push_str(&text);
+                } else if !text.trim().is_empty() {
+                    return Err(DawProjectError::XmlParseError("Unexpected text outside root element".into()));
+                }
+            }
+            rest = &rest[lt..];
+
+            if let Some(comment_rest) = rest.strip_prefix("<!--") {
+                let end = comment_rest
+                    .find("-->")
+                    .ok_or_else(|| DawProjectError::XmlParseError("Unterminated XML comment".into()))?;
+                rest = &comment_rest[end + 3..];
+            } else if let Some(cdata_rest) = rest.strip_prefix("<![CDATA[") {
+                let end = cdata_rest
+                    .find("]]>")
+                    .ok_or_else(|| DawProjectError::XmlParseError("Unterminated CDATA section".into()))?;
+                if let Some(top) = stack.last_mut() {
+                    top.text.push_str(&cdata_rest[..end]);
+                }
+                rest = &cdata_rest[end + 3..];
+            } else if let Some(pi_rest) = rest.strip_prefix("<?") {
+                let end = pi_rest
+                    .find("?>")
+                    .ok_or_else(|| DawProjectError::XmlParseError("Unterminated XML processing instruction".into()))?;
+                rest = &pi_rest[end + 2..];
+            } else if let Some(doctype_rest) = rest.strip_prefix("<!") {
+                let end = doctype_rest
+                    .find('>')
+                    .ok_or_else(|| DawProjectError::XmlParseError("Unterminated XML declaration".into()))?;
+                rest = &doctype_rest[end + 1..];
+            } else if let Some(close_rest) = rest.strip_prefix("</") {
+                let end = close_rest
+                    .find('>')
+                    .ok_or_else(|| DawProjectError::XmlParseError("Unterminated closing XML tag".into()))?;
+                let close_name = close_rest[..end].trim();
+                let popped = stack.pop().ok_or_else(|| {
+                    DawProjectError::XmlParseError(format!("Unexpected closing tag </{}>", close_name))
+                })?;
+                if popped.name != close_name {
+                    return Err(DawProjectError::XmlParseError(format!(
+                        "Mismatched closing tag: expected </{}>, found </{}>",
+                        popped.name, close_name
+                    )));
+                }
+                if let Some(parent) = stack.last_mut() {
+                    parent.children.push(popped);
+                } else {
+                    roots.push(popped);
+                }
+                rest = &close_rest[end + 1..];
+            } else {
+                let after_lt = &rest[1..];
+                let end = find_tag_end_respecting_quotes(after_lt)
+                    .ok_or_else(|| DawProjectError::XmlParseError("Unterminated XML start tag".into()))?;
+                let inner = &after_lt[..end];
+                let (name, attrs, self_closing) = parse_start_tag_and_attrs(inner)?;
+                let el = XmlElement {
+                    name,
+                    attrs,
+                    text: String::new(),
+                    children: Vec::new(),
+                };
+                if self_closing {
+                    if let Some(parent) = stack.last_mut() {
+                        parent.children.push(el);
+                    } else {
+                        roots.push(el);
+                    }
+                } else {
+                    stack.push(el);
+                }
+                rest = &after_lt[end + 1..];
+            }
+        } else {
+            if !rest.trim().is_empty() {
+                if let Some(top) = stack.last_mut() {
+                    top.text.push_str(&xml_unescape(rest)?);
+                } else {
+                    return Err(DawProjectError::XmlParseError("Unexpected trailing text outside XML root".into()));
+                }
+            }
+            break;
+        }
+    }
+
+    if let Some(unclosed) = stack.pop() {
+        return Err(DawProjectError::XmlParseError(format!(
+            "Unclosed XML tag <{}>",
+            unclosed.name
+        )));
+    }
+
+    Ok(roots)
+}
+
+fn find_element_text(nodes: &[XmlElement], target: &str) -> Option<String> {
+    for node in nodes {
+        if node.name == target {
+            return Some(node.text.trim().to_string());
+        }
+        if let Some(found) = find_element_text(&node.children, target) {
+            return Some(found);
+        }
+    }
+    None
+}
+
+fn collect_elements_by_name<'a>(nodes: &'a [XmlElement], target: &str, out: &mut Vec<&'a XmlElement>) {
+    for node in nodes {
+        if node.name == target {
+            out.push(node);
+        }
+        collect_elements_by_name(&node.children, target, out);
+    }
 }
 
 fn parse_time_signature(sig: &str) -> (u8, u8) {
@@ -597,14 +856,19 @@ impl BitWriter {
     }
 
     fn write_rice(&mut self, u: u32, k: u8) {
-        let q = u >> k;
-        let rem = u & ((1 << k) - 1);
+        let shift = k.min(31);
+        let q = u >> shift;
+        let rem = if shift == 0 {
+            0
+        } else {
+            u & (((1u64 << shift) - 1) as u32)
+        };
         for _ in 0..q {
             self.write_bit(false);
         }
         self.write_bit(true);
-        if k > 0 {
-            self.write_bits(rem, k);
+        if shift > 0 {
+            self.write_bits(rem, shift);
         }
     }
 
@@ -654,6 +918,12 @@ impl<'a> BitReader<'a> {
     }
 
     fn read_rice(&mut self, k: u8) -> Result<u32, FreezeCodecError> {
+        if k > 31 {
+            return Err(FreezeCodecError::CorruptData(format!(
+                "Invalid Rice parameter k={}",
+                k
+            )));
+        }
         let mut q = 0u32;
         while !self.read_bit()? {
             q += 1;
@@ -666,7 +936,11 @@ impl<'a> BitReader<'a> {
         } else {
             0
         };
-        Ok((q << k) | rem)
+        let shifted = (q as u64) << (k as u32);
+        let combined = shifted | (rem as u64);
+        u32::try_from(combined).map_err(|_| {
+            FreezeCodecError::CorruptData("Rice sample overflows u32".into())
+        })
     }
 }
 
@@ -742,7 +1016,18 @@ impl LosslessFreezeCodec {
         }
 
         let k = bytes[8];
+        if k > 31 {
+            return Err(FreezeCodecError::CorruptData(format!(
+                "Invalid Rice parameter k={}",
+                k
+            )));
+        }
         let bitstream = &bytes[12..];
+        let min_bits_per_sample = 1usize + k as usize;
+        let max_possible_samples = bitstream.len().saturating_mul(8) / min_bits_per_sample;
+        if num_samples > max_possible_samples {
+            return Err(FreezeCodecError::UnexpectedEof);
+        }
         let mut reader = BitReader::new(bitstream);
 
         let mut samples = Vec::with_capacity(num_samples);
@@ -962,5 +1247,84 @@ mod tests {
         let meta = "<?xml version=\"1.0\"?><metadata><title>Test</title></metadata>";
         let res = DawProjectExchange::import_dawproject_xml(invalid_xml, meta);
         assert!(matches!(res, Err(DawProjectError::MissingField(f)) if f == "tempo"));
+    }
+
+    #[test]
+    fn test_alp_rejects_path_traversal_and_oom_entry_count() {
+        let mut pack = AlpPackArchive::new("Evil Pack");
+        pack.add_entry("../../etc/passwd", b"x".to_vec());
+        let bundled = pack.bundle_alp();
+        assert!(matches!(
+            AlpPackArchive::extract_alp(&bundled),
+            Err(AlpError::CorruptedData(_))
+        ));
+
+        // Craft header with huge num_entries (u32::MAX) + valid global CRC
+        let mut crafted = Vec::new();
+        crafted.extend_from_slice(AlpPackArchive::MAGIC);
+        crafted.extend_from_slice(&1u32.to_le_bytes()); // version
+        crafted.extend_from_slice(&1u32.to_le_bytes()); // name len
+        crafted.push(b'a');
+        crafted.extend_from_slice(&u32::MAX.to_le_bytes()); // huge num_entries
+        let crc = calculate_crc32(&crafted);
+        crafted.extend_from_slice(&crc.to_le_bytes());
+        assert_eq!(AlpPackArchive::extract_alp(&crafted), Err(AlpError::UnexpectedEof));
+    }
+
+    #[test]
+    fn test_dawproject_xml_escaping_comments_and_attr_angle_brackets() {
+        let project = DawProject {
+            title: "Acid & <Lead> \"303\" 'Set'".to_string(),
+            tempo: 132.0,
+            time_signature: (3, 4),
+            tracks: vec![DawTrack {
+                name: "Track <1> & \"Main\"".to_string(),
+                volume_db: -1.5,
+                pan: 0.0,
+                is_muted: false,
+                clips: vec![DawClip {
+                    name: "Clip <A> & 'B'".to_string(),
+                    start_beat: 0.0,
+                    duration_beats: 4.0,
+                    notes: Vec::new(),
+                }],
+            }],
+        };
+        let (px, mx) = DawProjectExchange::export_dawproject_xml(&project);
+        assert!(mx.contains("Acid &amp; &lt;Lead&gt;"));
+        let imported = DawProjectExchange::import_dawproject_xml(&px, &mx).unwrap();
+        assert_eq!(imported.title, project.title);
+        assert_eq!(imported.tracks[0].name, project.tracks[0].name);
+        assert_eq!(imported.tracks[0].clips[0].name, project.tracks[0].clips[0].name);
+
+        // Comments containing <track .../> and self-closing <track/> must parse safely
+        let commented = "<?xml version=\"1.0\"?>\n<project><transport><tempo>125</tempo><timeSignature>4/4</timeSignature></transport><tracks><!-- <track name=\"Fake\"/> --><track name='Real' volume='0.0' pan='0.0' mute='true' /></tracks></project>";
+        let parsed = DawProjectExchange::import_dawproject_xml(commented, "<metadata><title>X</title></metadata>").unwrap();
+        assert_eq!(parsed.tracks.len(), 1);
+        assert_eq!(parsed.tracks[0].name, "Real");
+        assert!(parsed.tracks[0].is_muted);
+    }
+
+    #[test]
+    fn test_lossless_freeze_codec_rejects_large_k_and_oom_num_samples() {
+        let mut bad_k = Vec::new();
+        bad_k.extend_from_slice(b"FRZ1");
+        bad_k.extend_from_slice(&1u32.to_le_bytes()); // num_samples = 1
+        bad_k.extend_from_slice(&[32, 0, 0, 0]); // k = 32 (> 31!)
+        bad_k.push(0x80);
+        assert!(matches!(
+            LosslessFreezeCodec::decode_lossless_pcm(&bad_k),
+            Err(FreezeCodecError::CorruptData(_))
+        ));
+
+        let mut huge_n = Vec::new();
+        huge_n.extend_from_slice(b"FRZ1");
+        huge_n.extend_from_slice(&u32::MAX.to_le_bytes());
+        huge_n.extend_from_slice(&[4, 0, 0, 0]);
+        huge_n.push(0xFF);
+        assert_eq!(
+            LosslessFreezeCodec::decode_lossless_pcm(&huge_n),
+            Err(FreezeCodecError::UnexpectedEof)
+        );
     }
 }

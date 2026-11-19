@@ -153,9 +153,8 @@ impl BandDynamics {
     }
 
     #[inline(always)]
-    pub fn process_sample(&mut self, in_val: f32, time_scale: f32, sr: f32) -> f32 {
-        let in_mag = in_val.abs().max(1e-6);
-        let in_db = 20.0 * in_mag.log10();
+    fn compute_gain_db(&mut self, in_mag: f32, time_scale: f32, sr: f32) -> f32 {
+        let in_db = 20.0 * in_mag.max(1e-6).log10();
 
         // Calculate dual-threshold target gain modification in dB
         let mut target_db = 0.0f32;
@@ -187,8 +186,21 @@ impl BandDynamics {
             self.envelope_db = alpha_r * self.envelope_db + (1.0 - alpha_r) * target_db;
         }
 
-        let total_linear = 10.0_f32.powf((self.envelope_db + self.gain_db) / 20.0);
+        10.0_f32.powf((self.envelope_db + self.gain_db) / 20.0)
+    }
+
+    #[inline(always)]
+    pub fn process_sample(&mut self, in_val: f32, time_scale: f32, sr: f32) -> f32 {
+        let total_linear = self.compute_gain_db(in_val.abs(), time_scale, sr);
         in_val * total_linear
+    }
+
+    /// Process a stereo frame using a single stereo-linked peak envelope step per frame.
+    #[inline(always)]
+    pub fn process_stereo(&mut self, in_l: f32, in_r: f32, time_scale: f32, sr: f32) -> (f32, f32) {
+        let peak = in_l.abs().max(in_r.abs());
+        let total_linear = self.compute_gain_db(peak, time_scale, sr);
+        (in_l * total_linear, in_r * total_linear)
     }
 
     pub fn current_gain_db(&self) -> f32 {
@@ -358,15 +370,13 @@ impl AudioEffectDevice for MultibandDynamics {
             let high_l = self.crossover_high_hp_l.process(rest_l);
             let high_r = self.crossover_high_hp_r.process(rest_r);
 
-            // Process dynamic compression/expansion per band
-            let proc_low_l = self.low_band.process_sample(low_l, self.time_macro, self.sample_rate);
-            let proc_low_r = self.low_band.process_sample(low_r, self.time_macro, self.sample_rate);
-
-            let proc_mid_l = self.mid_band.process_sample(mid_l, self.time_macro, self.sample_rate);
-            let proc_mid_r = self.mid_band.process_sample(mid_r, self.time_macro, self.sample_rate);
-
-            let proc_high_l = self.high_band.process_sample(high_l, self.time_macro, self.sample_rate);
-            let proc_high_r = self.high_band.process_sample(high_r, self.time_macro, self.sample_rate);
+            // Process stereo-linked dynamic compression/expansion once per frame per band
+            let (proc_low_l, proc_low_r) =
+                self.low_band.process_stereo(low_l, low_r, self.time_macro, self.sample_rate);
+            let (proc_mid_l, proc_mid_r) =
+                self.mid_band.process_stereo(mid_l, mid_r, self.time_macro, self.sample_rate);
+            let (proc_high_l, proc_high_r) =
+                self.high_band.process_stereo(high_l, high_r, self.time_macro, self.sample_rate);
 
             // Sum bands
             let wet_l = (proc_low_l + proc_mid_l + proc_high_l) * out_gain;

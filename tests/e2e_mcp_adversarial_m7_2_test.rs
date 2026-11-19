@@ -76,21 +76,16 @@ fn test_stress_all_8_scales_across_all_12_roots() {
     );
     assert_eq!(successful_chords, total_combinations);
 
-    // Stress: Empty scale intervals
-    let unwind_empty_scale = panic::catch_unwind(AssertUnwindSafe(|| {
-        build_chord_notes(0, &[], 0, "close", 3)
-    }));
-    if unwind_empty_scale.is_err() {
-        println!("[BUG DETECTED] build_chord_notes panicked on empty scale_intervals: divisor by zero");
-    }
+    // Stress: Empty scale intervals & extreme octave must safely guard without panicking
+    let empty_notes = build_chord_notes(0, &[], 0, "close", 3);
+    assert!(empty_notes.is_empty(), "Empty scale_intervals must return empty vec safely");
 
-    // Stress: Extreme base_octave >= 21 causes u8 overflow
-    let unwind_overflow_oct = panic::catch_unwind(AssertUnwindSafe(|| {
-        build_chord_notes(0, &[0, 2, 4, 5, 7, 9, 11], 0, "close", 25)
-    }));
-    if unwind_overflow_oct.is_err() {
-        println!("[BUG DETECTED] build_chord_notes panicked on base_octave=25: u8 overflow");
-    }
+    let clamped_oct_notes = build_chord_notes(0, &[0, 2, 4, 5, 7, 9, 11], 0, "close", 25);
+    assert!(
+        !clamped_oct_notes.is_empty() && clamped_oct_notes.iter().all(|&n| n <= 127),
+        "Extreme base_octave=25 must clamp safely without u8 overflow: {:?}",
+        clamped_oct_notes
+    );
 }
 
 
@@ -280,13 +275,10 @@ fn test_stress_drum_groove_styles_and_extreme_complexities() {
             }
         }
 
-        // Test NaN complexity
-        let unwind_nan = panic::catch_unwind(AssertUnwindSafe(|| {
-            generate_drum_groove(style, 128.0, 0.5, f32::NAN)
-        }));
-        if unwind_nan.is_err() {
-            println!("[BUG DETECTED] generate_drum_groove panicked on NaN complexity for style {}", style);
-        }
+        // NaN complexity must be clamped safely without panicking
+        let nan_pat = generate_drum_groove(style, 128.0, 0.5, f32::NAN);
+        assert_eq!(nan_pat.step_count, 16);
+        assert_eq!(nan_pat.tracks.len(), 16);
     }
 
 
@@ -519,12 +511,23 @@ fn test_stress_audio_analysis_edge_case_buffers() {
     let m_inf = AudioAnalysisMetrics::analyze_interleaved(&inf_buf, 44100, 1);
     assert!(!m_inf.spectral_centroid_hz.is_nan());
 
-    // 8. Buffer smaller than FFT_SIZE (e.g. 512 frames < 1024)
-    let short_buf = vec![0.3f32; 512];
-    let m_short = AudioAnalysisMetrics::analyze_interleaved(&short_buf, 44100, 1);
+    // 8. Buffer smaller than FFT_SIZE (e.g. 512 frames < 1024): real zero-padded spectral math
+    let short_sine_440: Vec<f32> = (0..512)
+        .map(|i| (2.0 * std::f32::consts::PI * 440.0 * (i as f32 / 44100.0)).sin() * 0.6)
+        .collect();
+    let m_short = AudioAnalysisMetrics::analyze_interleaved(&short_sine_440, 44100, 1);
     assert_eq!(m_short.total_samples, 512);
-    assert_eq!(m_short.spectral_centroid_hz, 1000.0); // fallback
-    assert_eq!(m_short.spectral_bands.sub_bass_energy_pct, 25.0);
+    assert!(
+        m_short.spectral_centroid_hz.is_finite()
+            && (m_short.spectral_centroid_hz - 440.0).abs() < 250.0,
+        "Short 512-sample 440 Hz sine must measure real ~440 Hz spectral centroid, got {}",
+        m_short.spectral_centroid_hz
+    );
+    assert!(
+        m_short.spectral_bands.low_mid_energy_pct > 60.0,
+        "440 Hz sine must concentrate energy in low-mid band (250-1000 Hz), got {}%",
+        m_short.spectral_bands.low_mid_energy_pct
+    );
 
     // 9. Malformed WAV files through analyze_wav_file
     let pid = std::process::id();

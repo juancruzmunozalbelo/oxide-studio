@@ -33,7 +33,6 @@ impl ScaleLock {
     }
 
     pub fn quantize(&self, note: u8) -> u8 {
-        let octave = note / 12;
         let pc = (note % 12 + 12 - self.root % 12) % 12;
         if (self.degree_mask & (1 << pc)) != 0 {
             return note;
@@ -41,11 +40,17 @@ impl ScaleLock {
         for d in 1..=6 {
             let lower = (pc + 12 - d) % 12;
             if (self.degree_mask & (1 << lower)) != 0 {
-                return ((octave as i16 * 12 + (lower + self.root) as i16).clamp(0, 127)) as u8;
+                let candidate = note as i16 - d as i16;
+                if (0..=127).contains(&candidate) {
+                    return candidate as u8;
+                }
             }
             let upper = (pc + d) % 12;
             if (self.degree_mask & (1 << upper)) != 0 {
-                return ((octave as i16 * 12 + (upper + self.root) as i16).clamp(0, 127)) as u8;
+                let candidate = note as i16 + d as i16;
+                if (0..=127).contains(&candidate) {
+                    return candidate as u8;
+                }
             }
         }
         note
@@ -87,27 +92,36 @@ pub fn generate_seed(
     scale: Option<ScaleLock>,
     seed: u64,
 ) -> MidiPattern {
-    let mut pat = MidiPattern::new(length_beats);
+    let len = if length_beats.is_finite() { length_beats.max(0.0) } else { 0.0 };
+    let mut pat = MidiPattern::new(len);
     let mut rng = Rng::new(seed);
-    let step = step_size_beats.max(0.125);
-    let num_steps = (length_beats / step).floor() as usize;
+    let step = if step_size_beats.is_finite() { step_size_beats.max(0.125) } else { 0.25 };
+    let safe_density = if density.is_finite() { density.clamp(0.0, 1.0) } else { 0.0 };
+    let d_min = if duration_min.is_finite() { duration_min.max(0.0625) } else { 0.125 };
+    let d_max = if duration_max.is_finite() { duration_max.max(d_min) } else { d_min };
+    let num_steps = (len / step).floor() as usize;
 
-    let p_min = pitch_min.min(pitch_max);
-    let p_max = pitch_min.max(pitch_max);
-    let v_min = velocity_min.min(velocity_max);
-    let v_max = velocity_min.max(velocity_max);
+    let p_min = pitch_min.min(pitch_max) as u16;
+    let p_max = pitch_min.max(pitch_max) as u16;
+    let v_min = velocity_min.min(velocity_max) as u16;
+    let v_max = velocity_min.max(velocity_max) as u16;
+
+    let pitch_span = p_max - p_min + 1;
+    let vel_span = v_max - v_min + 1;
 
     for s in 0..num_steps {
-        if rng.next_f32() < density {
+        if rng.next_f32() < safe_density {
             let start = s as f64 * step;
-            let raw_p = p_min + (rng.next_f32() * (p_max - p_min + 1) as f32) as u8;
+            let p_off = ((rng.next_f32() * pitch_span as f32) as u16).min(pitch_span - 1);
+            let raw_p = (p_min + p_off).min(127) as u8;
             let pitch = if let Some(ref sc) = scale {
                 sc.quantize(raw_p)
             } else {
                 raw_p
             };
-            let vel = v_min + (rng.next_f32() * (v_max - v_min + 1) as f32) as u8;
-            let dur = duration_min + rng.next_f32() as f64 * (duration_max - duration_min).max(0.0625);
+            let v_off = ((rng.next_f32() * vel_span as f32) as u16).min(vel_span - 1);
+            let vel = (v_min + v_off).clamp(1, 127) as u8;
+            let dur = d_min + rng.next_f32() as f64 * (d_max - d_min).max(0.0625);
             pat.add_note(MidiNote::new(pitch, vel, start, dur));
         }
     }
@@ -380,5 +394,17 @@ mod tests {
         let roots = [60, 62, 64]; // C4, D4, E4
         let pat = generate_stacks(&roots, StacksChordType::Maj7, StacksVoicing::Closed, 0, 1.0, 100);
         assert_eq!(pat.notes.len(), 12); // 3 chords * 4 notes
+    }
+
+    #[test]
+    fn test_scale_lock_b_major_octave_wrap_and_generate_seed_full_u8_range() {
+        // B Major (root = 11): B(11), C#(1), D#(3), E(4), F#(6), G#(8), A#(10)
+        let b_maj = ScaleLock::major(11);
+        assert_eq!(b_maj.quantize(60), 59); // C4 -> B3 (not B4=71!)
+
+        // Full 0..=255 range in velocity/pitch must not overflow u8
+        let pat = generate_seed(2.0, 0.25, 1.0, 0, 255, 0, 255, 0.1, 0.2, None, 123);
+        assert!(!pat.notes.is_empty());
+        assert!(pat.notes.iter().all(|n| n.pitch <= 127 && n.velocity >= 1 && n.velocity <= 127));
     }
 }

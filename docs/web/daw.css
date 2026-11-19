@@ -1880,3 +1880,30 @@ html, body {
   height: 72px;
   display: block;
 }
+
+.mini-meter-bar {
+  display: inline-block;
+  width: 4px;
+  height: 4px;
+  min-height: 2px;
+  background: var(--meter-green);
+  border-radius: 1px;
+  box-shadow: 0 0 4px var(--meter-green-glow);
+  transition: height 60ms linear;
+}
+
+.arr-clip-block.active-block {
+  outline: 1.5px solid var(--signal-amber);
+  box-shadow: 0 0 8px rgba(255, 190, 0, 0.35);
+}
+
+.loop-handle {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 6px;
+  background: var(--signal-amber);
+  cursor: ew-resize;
+}
+.loop-handle.left { left: 0; }
+.loop-handle.right { right: 0; }

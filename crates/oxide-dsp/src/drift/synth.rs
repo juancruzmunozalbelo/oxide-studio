@@ -106,7 +106,7 @@ impl DriftVoice {
         let theta = 1.5; // Mean reversion rate
         let sigma = 12.0 * drift_intensity; // Noise amplitude
 
-        let d_w = (self.rng.next_f32() - 0.5) * 2.0;
+        let d_w = (self.rng.next_f32_unit() - 0.5) * 2.0;
         let d_drift = -theta * self.drift_pitch_cents * dt + sigma * d_w * dt.sqrt();
         self.drift_pitch_cents = (self.drift_pitch_cents + d_drift).clamp(-25.0, 25.0);
 
@@ -262,6 +262,11 @@ impl DriftDevice {
         v.note = note;
         v.velocity = velocity as f32 / 127.0;
         v.age = self.voice_counter;
+        v.pitch_bend_semitones = 0.0;
+        v.slide = 0.0;
+        v.pressure = 0.0;
+        v.drift_pitch_cents = 0.0;
+        v.drift_cutoff_hz = 0.0;
         v.amp_env.trigger_attack();
         v.env2.trigger_attack();
         v.cycle_phase = 0.0;

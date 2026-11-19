@@ -36,7 +36,7 @@ pub struct SharedDevice<T> {
 
 impl<T: Device> SharedDevice<T> {
     pub fn new(inner: Arc<Mutex<T>>) -> Self {
-        let name = inner.lock().unwrap().name().to_string();
+        let name = inner.lock().unwrap_or_else(|e| e.into_inner()).name().to_string();
         Self { name, inner }
     }
 }
@@ -47,23 +47,23 @@ impl<T: Device> Device for SharedDevice<T> {
     }
 
     fn category(&self) -> DeviceCategory {
-        self.inner.lock().unwrap().category()
+        self.inner.lock().unwrap_or_else(|e| e.into_inner()).category()
     }
 
     fn is_enabled(&self) -> bool {
-        self.inner.lock().unwrap().is_enabled()
+        self.inner.lock().unwrap_or_else(|e| e.into_inner()).is_enabled()
     }
 
     fn set_enabled(&mut self, enabled: bool) {
-        self.inner.lock().unwrap().set_enabled(enabled);
+        self.inner.lock().unwrap_or_else(|e| e.into_inner()).set_enabled(enabled);
     }
 
     fn reset(&mut self) {
-        self.inner.lock().unwrap().reset();
+        self.inner.lock().unwrap_or_else(|e| e.into_inner()).reset();
     }
 
     fn latency_samples(&self) -> usize {
-        self.inner.lock().unwrap().latency_samples()
+        self.inner.lock().unwrap_or_else(|e| e.into_inner()).latency_samples()
     }
 }
 
@@ -76,7 +76,7 @@ impl<T: MidiEffectDevice> MidiEffectDevice for SharedDevice<T> {
     ) {
         self.inner
             .lock()
-            .unwrap()
+            .unwrap_or_else(|e| e.into_inner())
             .process_midi(events_in, events_out, time);
     }
 }
@@ -90,42 +90,42 @@ impl<T: InstrumentDevice> InstrumentDevice for SharedDevice<T> {
     ) {
         self.inner
             .lock()
-            .unwrap()
+            .unwrap_or_else(|e| e.into_inner())
             .process(midi_in, audio_out, time);
     }
 
     fn note_on(&mut self, note: u8, velocity: u8) {
-        self.inner.lock().unwrap().note_on(note, velocity);
+        self.inner.lock().unwrap_or_else(|e| e.into_inner()).note_on(note, velocity);
     }
 
     fn note_off(&mut self, note: u8) {
-        self.inner.lock().unwrap().note_off(note);
+        self.inner.lock().unwrap_or_else(|e| e.into_inner()).note_off(note);
     }
 
     fn all_notes_off(&mut self) {
-        self.inner.lock().unwrap().all_notes_off();
+        self.inner.lock().unwrap_or_else(|e| e.into_inner()).all_notes_off();
     }
 
     fn set_parameter(&mut self, param_id: u32, value: f32) {
-        self.inner.lock().unwrap().set_parameter(param_id, value);
+        self.inner.lock().unwrap_or_else(|e| e.into_inner()).set_parameter(param_id, value);
     }
 
     fn get_parameter(&self, param_id: u32) -> f32 {
-        self.inner.lock().unwrap().get_parameter(param_id)
+        self.inner.lock().unwrap_or_else(|e| e.into_inner()).get_parameter(param_id)
     }
 }
 
 impl<T: AudioEffectDevice> AudioEffectDevice for SharedDevice<T> {
     fn process_audio(&mut self, buffer: &mut AudioBuffer, time: &MusicalTime) {
-        self.inner.lock().unwrap().process_audio(buffer, time);
+        self.inner.lock().unwrap_or_else(|e| e.into_inner()).process_audio(buffer, time);
     }
 
     fn set_parameter(&mut self, param_id: u32, value: f32) {
-        self.inner.lock().unwrap().set_parameter(param_id, value);
+        self.inner.lock().unwrap_or_else(|e| e.into_inner()).set_parameter(param_id, value);
     }
 
     fn get_parameter(&self, param_id: u32) -> f32 {
-        self.inner.lock().unwrap().get_parameter(param_id)
+        self.inner.lock().unwrap_or_else(|e| e.into_inner()).get_parameter(param_id)
     }
 }
 
@@ -217,14 +217,16 @@ impl ManagedChainHandles {
                 self.midi_effects.len()
             }
             DeviceCategory::AudioEffect => {
-                if let Some(pos) = position {
+                let prefix = self.midi_effects.len() + usize::from(self.instrument.is_some());
+                let local_idx = if let Some(pos) = position {
                     let clamped = pos.min(self.audio_effects.len());
                     self.audio_effects.insert(clamped, handle);
                     clamped
                 } else {
                     self.audio_effects.push(handle);
                     self.audio_effects.len() - 1
-                }
+                };
+                prefix + local_idx
             }
         }
     }
@@ -299,33 +301,33 @@ impl ManagedDeviceHandle {
 
     pub fn name(&self) -> String {
         match self {
-            Self::Wavetable(d) => d.lock().unwrap().name().to_string(),
-            Self::Operator(d) => d.lock().unwrap().name().to_string(),
-            Self::Drift(d) => d.lock().unwrap().name().to_string(),
-            Self::Meld(d) => d.lock().unwrap().name().to_string(),
-            Self::Analog(d) => d.lock().unwrap().name().to_string(),
-            Self::Collision(d) => d.lock().unwrap().name().to_string(),
-            Self::Tension(d) => d.lock().unwrap().name().to_string(),
-            Self::Electric(d) => d.lock().unwrap().name().to_string(),
-            Self::Simpler(d) => d.lock().unwrap().name().to_string(),
-            Self::DrumRack(d) => d.lock().unwrap().name().to_string(),
-            Self::EqEight { dev, .. } => dev.lock().unwrap().name().to_string(),
-            Self::GlueCompressor(d) => d.lock().unwrap().name().to_string(),
-            Self::Roar(d) => d.lock().unwrap().name().to_string(),
-            Self::AutoFilter(d) => d.lock().unwrap().name().to_string(),
-            Self::MultibandDynamics(d) => d.lock().unwrap().name().to_string(),
-            Self::HybridReverb(d) => d.lock().unwrap().name().to_string(),
-            Self::SpectralResonator(d) => d.lock().unwrap().name().to_string(),
-            Self::Echo(d) => d.lock().unwrap().name().to_string(),
-            Self::BeatRepeat(d) => d.lock().unwrap().name().to_string(),
-            Self::Corpus(d) => d.lock().unwrap().name().to_string(),
-            Self::Redux(d) => d.lock().unwrap().name().to_string(),
-            Self::Utility(d) => d.lock().unwrap().name().to_string(),
-            Self::MasterLimiter(d) => d.lock().unwrap().name().to_string(),
-            Self::Arpeggiator(d) => d.lock().unwrap().name().to_string(),
-            Self::Chord(d) => d.lock().unwrap().name().to_string(),
-            Self::Scale(d) => d.lock().unwrap().name().to_string(),
-            Self::Velocity(d) => d.lock().unwrap().name().to_string(),
+            Self::Wavetable(d) => d.lock().unwrap_or_else(|e| e.into_inner()).name().to_string(),
+            Self::Operator(d) => d.lock().unwrap_or_else(|e| e.into_inner()).name().to_string(),
+            Self::Drift(d) => d.lock().unwrap_or_else(|e| e.into_inner()).name().to_string(),
+            Self::Meld(d) => d.lock().unwrap_or_else(|e| e.into_inner()).name().to_string(),
+            Self::Analog(d) => d.lock().unwrap_or_else(|e| e.into_inner()).name().to_string(),
+            Self::Collision(d) => d.lock().unwrap_or_else(|e| e.into_inner()).name().to_string(),
+            Self::Tension(d) => d.lock().unwrap_or_else(|e| e.into_inner()).name().to_string(),
+            Self::Electric(d) => d.lock().unwrap_or_else(|e| e.into_inner()).name().to_string(),
+            Self::Simpler(d) => d.lock().unwrap_or_else(|e| e.into_inner()).name().to_string(),
+            Self::DrumRack(d) => d.lock().unwrap_or_else(|e| e.into_inner()).name().to_string(),
+            Self::EqEight { dev, .. } => dev.lock().unwrap_or_else(|e| e.into_inner()).name().to_string(),
+            Self::GlueCompressor(d) => d.lock().unwrap_or_else(|e| e.into_inner()).name().to_string(),
+            Self::Roar(d) => d.lock().unwrap_or_else(|e| e.into_inner()).name().to_string(),
+            Self::AutoFilter(d) => d.lock().unwrap_or_else(|e| e.into_inner()).name().to_string(),
+            Self::MultibandDynamics(d) => d.lock().unwrap_or_else(|e| e.into_inner()).name().to_string(),
+            Self::HybridReverb(d) => d.lock().unwrap_or_else(|e| e.into_inner()).name().to_string(),
+            Self::SpectralResonator(d) => d.lock().unwrap_or_else(|e| e.into_inner()).name().to_string(),
+            Self::Echo(d) => d.lock().unwrap_or_else(|e| e.into_inner()).name().to_string(),
+            Self::BeatRepeat(d) => d.lock().unwrap_or_else(|e| e.into_inner()).name().to_string(),
+            Self::Corpus(d) => d.lock().unwrap_or_else(|e| e.into_inner()).name().to_string(),
+            Self::Redux(d) => d.lock().unwrap_or_else(|e| e.into_inner()).name().to_string(),
+            Self::Utility(d) => d.lock().unwrap_or_else(|e| e.into_inner()).name().to_string(),
+            Self::MasterLimiter(d) => d.lock().unwrap_or_else(|e| e.into_inner()).name().to_string(),
+            Self::Arpeggiator(d) => d.lock().unwrap_or_else(|e| e.into_inner()).name().to_string(),
+            Self::Chord(d) => d.lock().unwrap_or_else(|e| e.into_inner()).name().to_string(),
+            Self::Scale(d) => d.lock().unwrap_or_else(|e| e.into_inner()).name().to_string(),
+            Self::Velocity(d) => d.lock().unwrap_or_else(|e| e.into_inner()).name().to_string(),
         }
     }
 
@@ -333,7 +335,7 @@ impl ManagedDeviceHandle {
     pub fn get_params(&self) -> Vec<(String, f32)> {
         match self {
             Self::Wavetable(d) => {
-                let d = d.lock().unwrap();
+                let d = d.lock().unwrap_or_else(|e| e.into_inner());
                 vec![
                     ("filter1_cutoff".into(), d.filter1_cutoff),
                     ("filter1_res".into(), d.filter1_res),
@@ -352,7 +354,7 @@ impl ManagedDeviceHandle {
                 ]
             }
             Self::Operator(d) => {
-                let d = d.lock().unwrap();
+                let d = d.lock().unwrap_or_else(|e| e.into_inner());
                 vec![
                     ("filter_cutoff".into(), d.filter_cutoff),
                     ("filter_resonance".into(), d.filter_resonance),
@@ -369,7 +371,7 @@ impl ManagedDeviceHandle {
                 ]
             }
             Self::Drift(d) => {
-                let d = d.lock().unwrap();
+                let d = d.lock().unwrap_or_else(|e| e.into_inner());
                 vec![
                     ("lp_cutoff".into(), d.lp_cutoff),
                     ("lp_resonance".into(), d.lp_resonance),
@@ -386,7 +388,7 @@ impl ManagedDeviceHandle {
                 ]
             }
             Self::Meld(d) => {
-                let d = d.lock().unwrap();
+                let d = d.lock().unwrap_or_else(|e| e.into_inner());
                 vec![
                     ("filter_a_cutoff".into(), d.filter_a_cutoff),
                     ("filter_a_res".into(), d.filter_a_res),
@@ -405,7 +407,7 @@ impl ManagedDeviceHandle {
                 ]
             }
             Self::Analog(d) => {
-                let d = d.lock().unwrap();
+                let d = d.lock().unwrap_or_else(|e| e.into_inner());
                 vec![
                     ("filter1_cutoff".into(), d.filter1_cutoff),
                     ("filter1_res".into(), d.filter1_res),
@@ -423,7 +425,7 @@ impl ManagedDeviceHandle {
                 ]
             }
             Self::Collision(d) => {
-                let d = d.lock().unwrap();
+                let d = d.lock().unwrap_or_else(|e| e.into_inner());
                 vec![
                     ("mallet_stiffness".into(), d.mallet_stiffness),
                     ("mallet_noise".into(), d.mallet_noise),
@@ -438,7 +440,7 @@ impl ManagedDeviceHandle {
                 ]
             }
             Self::Tension(d) => {
-                let d = d.lock().unwrap();
+                let d = d.lock().unwrap_or_else(|e| e.into_inner());
                 vec![
                     ("string_damping".into(), d.string_damping),
                     ("string_decay_loss".into(), d.string_decay_loss),
@@ -450,7 +452,7 @@ impl ManagedDeviceHandle {
                 ]
             }
             Self::Electric(d) => {
-                let d = d.lock().unwrap();
+                let d = d.lock().unwrap_or_else(|e| e.into_inner());
                 vec![
                     ("hammer_hardness".into(), d.hammer_hardness),
                     ("tine_decay".into(), d.tine_decay),
@@ -465,7 +467,7 @@ impl ManagedDeviceHandle {
                 ]
             }
             Self::Simpler(d) => {
-                let d = d.lock().unwrap();
+                let d = d.lock().unwrap_or_else(|e| e.into_inner());
                 vec![
                     ("filter_cutoff".into(), d.filter_cutoff),
                     ("filter_res".into(), d.filter_res),
@@ -481,18 +483,21 @@ impl ManagedDeviceHandle {
                 ]
             }
             Self::DrumRack(d) => {
-                let d = d.lock().unwrap();
-                vec![
+                let d = d.lock().unwrap_or_else(|e| e.into_inner());
+                let mut out = vec![
                     ("return_a_level".into(), d.return_a_level),
                     ("return_b_level".into(), d.return_b_level),
-                    ("pad0_volume".into(), d.pads[0].volume),
-                    ("pad0_pan".into(), d.pads[0].pan),
-                    ("pad0_pitch".into(), d.pads[0].pitch_semitones),
-                    ("pad0_decay".into(), d.pads[0].decay_seconds),
-                ]
+                ];
+                for i in 0..d.pads.len().min(16) {
+                    out.push((format!("pad{}_volume", i), d.pads[i].volume));
+                    out.push((format!("pad{}_pan", i), d.pads[i].pan));
+                    out.push((format!("pad{}_pitch", i), d.pads[i].pitch_semitones));
+                    out.push((format!("pad{}_decay", i), d.pads[i].decay_seconds));
+                }
+                out
             }
             Self::EqEight { dev, .. } => {
-                let d = dev.lock().unwrap();
+                let d = dev.lock().unwrap_or_else(|e| e.into_inner());
                 let mut out = Vec::with_capacity(32);
                 for (i, b) in d.bands.iter().enumerate() {
                     let n = i + 1;
@@ -504,7 +509,7 @@ impl ManagedDeviceHandle {
                 out
             }
             Self::GlueCompressor(d) => {
-                let d = d.lock().unwrap();
+                let d = d.lock().unwrap_or_else(|e| e.into_inner());
                 vec![
                     ("threshold_db".into(), d.threshold_db),
                     ("ratio".into(), d.ratio),
@@ -517,7 +522,7 @@ impl ManagedDeviceHandle {
                 ]
             }
             Self::Roar(d) => {
-                let d = d.lock().unwrap();
+                let d = d.lock().unwrap_or_else(|e| e.into_inner());
                 vec![
                     ("drive_db".into(), d.stage1.drive_db),
                     ("bias".into(), d.stage1.bias),
@@ -531,7 +536,7 @@ impl ManagedDeviceHandle {
                 ]
             }
             Self::AutoFilter(d) => {
-                let d = d.lock().unwrap();
+                let d = d.lock().unwrap_or_else(|e| e.into_inner());
                 vec![
                     ("cutoff_hz".into(), d.cutoff_hz),
                     ("resonance".into(), d.resonance),
@@ -544,7 +549,7 @@ impl ManagedDeviceHandle {
                 ]
             }
             Self::MultibandDynamics(d) => {
-                let d = d.lock().unwrap();
+                let d = d.lock().unwrap_or_else(|e| e.into_inner());
                 vec![
                     ("amount".into(), d.amount),
                     ("time_macro".into(), d.time_macro),
@@ -556,7 +561,7 @@ impl ManagedDeviceHandle {
                 ]
             }
             Self::HybridReverb(d) => {
-                let d = d.lock().unwrap();
+                let d = d.lock().unwrap_or_else(|e| e.into_inner());
                 vec![
                     ("decay_s".into(), d.decay_s),
                     ("size".into(), d.size),
@@ -567,7 +572,7 @@ impl ManagedDeviceHandle {
                 ]
             }
             Self::SpectralResonator(d) => {
-                let d = d.lock().unwrap();
+                let d = d.lock().unwrap_or_else(|e| e.into_inner());
                 vec![
                     ("root_hz".into(), d.root_hz),
                     ("decay_s".into(), d.decay_s),
@@ -576,7 +581,7 @@ impl ManagedDeviceHandle {
                 ]
             }
             Self::Echo(d) => {
-                let d = d.lock().unwrap();
+                let d = d.lock().unwrap_or_else(|e| e.into_inner());
                 vec![
                     ("delay_time_l_ms".into(), d.delay_time_l_ms),
                     ("delay_time_r_ms".into(), d.delay_time_r_ms),
@@ -589,7 +594,7 @@ impl ManagedDeviceHandle {
                 ]
             }
             Self::BeatRepeat(d) => {
-                let d = d.lock().unwrap();
+                let d = d.lock().unwrap_or_else(|e| e.into_inner());
                 vec![
                     ("interval_beats".into(), d.interval_beats as f32),
                     ("grid_beats".into(), d.grid_beats as f32),
@@ -600,7 +605,7 @@ impl ManagedDeviceHandle {
                 ]
             }
             Self::Corpus(d) => {
-                let d = d.lock().unwrap();
+                let d = d.lock().unwrap_or_else(|e| e.into_inner());
                 vec![
                     ("tune_hz".into(), d.tune_hz),
                     ("decay_s".into(), d.decay_s),
@@ -609,7 +614,7 @@ impl ManagedDeviceHandle {
                 ]
             }
             Self::Redux(d) => {
-                let d = d.lock().unwrap();
+                let d = d.lock().unwrap_or_else(|e| e.into_inner());
                 vec![
                     ("downsample".into(), d.downsample as f32),
                     ("bit_depth".into(), d.bit_depth as f32),
@@ -618,7 +623,7 @@ impl ManagedDeviceHandle {
                 ]
             }
             Self::Utility(d) => {
-                let d = d.lock().unwrap();
+                let d = d.lock().unwrap_or_else(|e| e.into_inner());
                 vec![
                     ("gain_db".into(), d.gain_db),
                     ("pan".into(), d.pan),
@@ -629,11 +634,12 @@ impl ManagedDeviceHandle {
                 ]
             }
             Self::MasterLimiter(d) => {
-                let d = d.lock().unwrap();
-                vec![("ceiling".into(), d.ceiling)]
+                let d = d.lock().unwrap_or_else(|e| e.into_inner());
+                let db = 20.0 * d.ceiling.max(1e-5).log10();
+                vec![("ceiling_db".into(), db)]
             }
             Self::Arpeggiator(d) => {
-                let d = d.lock().unwrap();
+                let d = d.lock().unwrap_or_else(|e| e.into_inner());
                 vec![
                     ("rate_beats".into(), d.rate_beats as f32),
                     ("gate".into(), d.gate),
@@ -642,7 +648,7 @@ impl ManagedDeviceHandle {
                 ]
             }
             Self::Chord(d) => {
-                let d = d.lock().unwrap();
+                let d = d.lock().unwrap_or_else(|e| e.into_inner());
                 d.shifts
                     .iter()
                     .enumerate()
@@ -650,14 +656,14 @@ impl ManagedDeviceHandle {
                     .collect()
             }
             Self::Scale(d) => {
-                let d = d.lock().unwrap();
+                let d = d.lock().unwrap_or_else(|e| e.into_inner());
                 vec![
                     ("base_note".into(), d.base_note as f32),
                     ("transpose".into(), d.transpose as f32),
                 ]
             }
             Self::Velocity(d) => {
-                let d = d.lock().unwrap();
+                let d = d.lock().unwrap_or_else(|e| e.into_inner());
                 vec![
                     ("drive".into(), d.drive),
                     ("compand".into(), d.compand),
@@ -671,6 +677,14 @@ impl ManagedDeviceHandle {
 
     /// Set any parameter on this live device handle by canonical name, alias, or numeric index.
     pub fn set_parameter(&self, key: &str, value: f32) -> Result<(String, f32), String> {
+        if !value.is_finite() {
+            return Err(format!(
+                "Parameter '{}' on device '{}' requires a finite value, got {}",
+                key,
+                self.name(),
+                value
+            ));
+        }
         let params = self.get_params();
         let resolved_key = if let Ok(idx) = key.trim().parse::<usize>() {
             params
@@ -691,7 +705,7 @@ impl ManagedDeviceHandle {
         let k = resolved_key.as_str();
         match self {
             Self::Wavetable(dev) => {
-                let mut d = dev.lock().unwrap();
+                let mut d = dev.lock().unwrap_or_else(|e| e.into_inner());
                 let applied = match k {
                     "filter1_cutoff" | "cutoff" | "cutoff_hz" => {
                         d.filter1_cutoff = value.clamp(20.0, 20000.0);
@@ -754,7 +768,7 @@ impl ManagedDeviceHandle {
                 Ok((k.to_string(), applied))
             }
             Self::Operator(dev) => {
-                let mut d = dev.lock().unwrap();
+                let mut d = dev.lock().unwrap_or_else(|e| e.into_inner());
                 let applied = match k {
                     "filter_cutoff" | "cutoff" | "cutoff_hz" => {
                         d.filter_cutoff = value.clamp(20.0, 20000.0);
@@ -809,7 +823,7 @@ impl ManagedDeviceHandle {
                 Ok((k.to_string(), applied))
             }
             Self::Drift(dev) => {
-                let mut d = dev.lock().unwrap();
+                let mut d = dev.lock().unwrap_or_else(|e| e.into_inner());
                 let applied = match k {
                     "lp_cutoff" | "cutoff" | "cutoff_hz" => {
                         d.lp_cutoff = value.clamp(20.0, 20000.0);
@@ -864,7 +878,7 @@ impl ManagedDeviceHandle {
                 Ok((k.to_string(), applied))
             }
             Self::Meld(dev) => {
-                let mut d = dev.lock().unwrap();
+                let mut d = dev.lock().unwrap_or_else(|e| e.into_inner());
                 let applied = match k {
                     "filter_a_cutoff" | "cutoff" | "cutoff_hz" => {
                         d.filter_a_cutoff = value.clamp(20.0, 20000.0);
@@ -927,7 +941,7 @@ impl ManagedDeviceHandle {
                 Ok((k.to_string(), applied))
             }
             Self::Analog(dev) => {
-                let mut d = dev.lock().unwrap();
+                let mut d = dev.lock().unwrap_or_else(|e| e.into_inner());
                 let applied = match k {
                     "filter1_cutoff" | "cutoff" | "cutoff_hz" => {
                         d.filter1_cutoff = value.clamp(20.0, 20000.0);
@@ -986,7 +1000,7 @@ impl ManagedDeviceHandle {
                 Ok((k.to_string(), applied))
             }
             Self::Collision(dev) => {
-                let mut d = dev.lock().unwrap();
+                let mut d = dev.lock().unwrap_or_else(|e| e.into_inner());
                 let applied = match k {
                     "mallet_stiffness" => {
                         d.mallet_stiffness = value.clamp(0.0, 1.0);
@@ -1033,7 +1047,7 @@ impl ManagedDeviceHandle {
                 Ok((k.to_string(), applied))
             }
             Self::Tension(dev) => {
-                let mut d = dev.lock().unwrap();
+                let mut d = dev.lock().unwrap_or_else(|e| e.into_inner());
                 let applied = match k {
                     "string_damping" => {
                         d.string_damping = value.clamp(0.0, 1.0);
@@ -1068,7 +1082,7 @@ impl ManagedDeviceHandle {
                 Ok((k.to_string(), applied))
             }
             Self::Electric(dev) => {
-                let mut d = dev.lock().unwrap();
+                let mut d = dev.lock().unwrap_or_else(|e| e.into_inner());
                 let applied = match k {
                     "hammer_hardness" => {
                         d.hammer_hardness = value.clamp(0.0, 1.0);
@@ -1115,7 +1129,7 @@ impl ManagedDeviceHandle {
                 Ok((k.to_string(), applied))
             }
             Self::Simpler(dev) => {
-                let mut d = dev.lock().unwrap();
+                let mut d = dev.lock().unwrap_or_else(|e| e.into_inner());
                 let applied = match k {
                     "filter_cutoff" | "cutoff" | "cutoff_hz" => {
                         d.filter_cutoff = value.clamp(20.0, 20000.0);
@@ -1166,7 +1180,7 @@ impl ManagedDeviceHandle {
                 Ok((k.to_string(), applied))
             }
             Self::DrumRack(dev) => {
-                let mut d = dev.lock().unwrap();
+                let mut d = dev.lock().unwrap_or_else(|e| e.into_inner());
                 let applied = match k {
                     "return_a_level" => {
                         d.return_a_level = value.clamp(0.0, 2.0);
@@ -1176,28 +1190,46 @@ impl ManagedDeviceHandle {
                         d.return_b_level = value.clamp(0.0, 2.0);
                         d.return_b_level
                     }
-                    "pad0_volume" => {
-                        d.pads[0].volume = value.clamp(0.0, 2.0);
-                        d.pads[0].volume
+                    _ => {
+                        let mut matched = None;
+                        if let Some(rest) = k.strip_prefix("pad") {
+                            if let Some((idx_str, field)) = rest.split_once('_') {
+                                if let Ok(pad_idx) = idx_str.parse::<usize>() {
+                                    if pad_idx < d.pads.len().min(16) {
+                                        let pad = &mut d.pads[pad_idx];
+                                        matched = match field {
+                                            "volume" => {
+                                                pad.volume = value.clamp(0.0, 2.0);
+                                                Some(pad.volume)
+                                            }
+                                            "pan" => {
+                                                pad.pan = value.clamp(-1.0, 1.0);
+                                                Some(pad.pan)
+                                            }
+                                            "pitch" => {
+                                                pad.pitch_semitones = value.clamp(-24.0, 24.0);
+                                                Some(pad.pitch_semitones)
+                                            }
+                                            "decay" => {
+                                                pad.decay_seconds = value.clamp(0.02, 5.0);
+                                                Some(pad.decay_seconds)
+                                            }
+                                            _ => None,
+                                        };
+                                    }
+                                }
+                            }
+                        }
+                        match matched {
+                            Some(v) => v,
+                            None => return Err(format!("Unknown DrumRack parameter '{}'", key)),
+                        }
                     }
-                    "pad0_pan" => {
-                        d.pads[0].pan = value.clamp(-1.0, 1.0);
-                        d.pads[0].pan
-                    }
-                    "pad0_pitch" => {
-                        d.pads[0].pitch_semitones = value.clamp(-24.0, 24.0);
-                        d.pads[0].pitch_semitones
-                    }
-                    "pad0_decay" => {
-                        d.pads[0].decay_seconds = value.clamp(0.02, 5.0);
-                        d.pads[0].decay_seconds
-                    }
-                    _ => return Err(format!("Unknown DrumRack parameter '{}'", key)),
                 };
                 Ok((k.to_string(), applied))
             }
             Self::EqEight { dev, sample_rate } => {
-                let mut d = dev.lock().unwrap();
+                let mut d = dev.lock().unwrap_or_else(|e| e.into_inner());
                 let mut applied = None;
                 if let Some(rest) = k.strip_prefix("band") {
                     if let Some((num_str, field)) = rest.split_once('_') {
@@ -1236,7 +1268,7 @@ impl ManagedDeviceHandle {
                 }
             }
             Self::GlueCompressor(dev) => {
-                let mut d = dev.lock().unwrap();
+                let mut d = dev.lock().unwrap_or_else(|e| e.into_inner());
                 let applied = match k {
                     "threshold_db" | "threshold" => {
                         d.threshold_db = value.clamp(-40.0, 0.0);
@@ -1275,7 +1307,7 @@ impl ManagedDeviceHandle {
                 Ok((k.to_string(), applied))
             }
             Self::Roar(dev) => {
-                let mut d = dev.lock().unwrap();
+                let mut d = dev.lock().unwrap_or_else(|e| e.into_inner());
                 let applied = match k {
                     "drive_db" | "drive" => {
                         d.stage1.drive_db = value.clamp(0.0, 36.0);
@@ -1318,7 +1350,7 @@ impl ManagedDeviceHandle {
                 Ok((k.to_string(), applied))
             }
             Self::AutoFilter(dev) => {
-                let mut d = dev.lock().unwrap();
+                let mut d = dev.lock().unwrap_or_else(|e| e.into_inner());
                 let applied = match k {
                     "cutoff_hz" | "cutoff" | "filter_cutoff" | "frequency" => {
                         d.cutoff_hz = value.clamp(20.0, 20000.0);
@@ -1357,7 +1389,7 @@ impl ManagedDeviceHandle {
                 Ok((k.to_string(), applied))
             }
             Self::MultibandDynamics(dev) => {
-                let mut d = dev.lock().unwrap();
+                let mut d = dev.lock().unwrap_or_else(|e| e.into_inner());
                 let applied = match k {
                     "amount" | "dry_wet" | "wet" | "mix" => {
                         d.amount = value.clamp(0.0, 1.0);
@@ -1392,7 +1424,7 @@ impl ManagedDeviceHandle {
                 Ok((k.to_string(), applied))
             }
             Self::HybridReverb(dev) => {
-                let mut d = dev.lock().unwrap();
+                let mut d = dev.lock().unwrap_or_else(|e| e.into_inner());
                 let applied = match k {
                     "decay_s" | "decay" => {
                         d.decay_s = value.clamp(0.1, 20.0);
@@ -1423,7 +1455,7 @@ impl ManagedDeviceHandle {
                 Ok((k.to_string(), applied))
             }
             Self::SpectralResonator(dev) => {
-                let mut d = dev.lock().unwrap();
+                let mut d = dev.lock().unwrap_or_else(|e| e.into_inner());
                 let applied = match k {
                     "root_hz" | "freq" => {
                         d.root_hz = value.clamp(20.0, 4000.0);
@@ -1446,7 +1478,7 @@ impl ManagedDeviceHandle {
                 Ok((k.to_string(), applied))
             }
             Self::Echo(dev) => {
-                let mut d = dev.lock().unwrap();
+                let mut d = dev.lock().unwrap_or_else(|e| e.into_inner());
                 let applied = match k {
                     "delay_time_l_ms" | "time_l" | "delay_ms" => {
                         d.delay_time_l_ms = value.clamp(1.0, 2400.0);
@@ -1485,7 +1517,7 @@ impl ManagedDeviceHandle {
                 Ok((k.to_string(), applied))
             }
             Self::BeatRepeat(dev) => {
-                let mut d = dev.lock().unwrap();
+                let mut d = dev.lock().unwrap_or_else(|e| e.into_inner());
                 let applied = match k {
                     "interval_beats" | "interval" => {
                         d.interval_beats = (value as f64).clamp(0.25, 16.0);
@@ -1516,22 +1548,22 @@ impl ManagedDeviceHandle {
                 Ok((k.to_string(), applied))
             }
             Self::Corpus(dev) => {
-                let mut d = dev.lock().unwrap();
+                let mut d = dev.lock().unwrap_or_else(|e| e.into_inner());
                 let applied = match k {
                     "tune_hz" | "tune" => {
-                        d.tune_hz = value.clamp(20.0, 2000.0);
+                        AudioEffectDevice::set_parameter(&mut *d, 1, value);
                         d.tune_hz
                     }
                     "decay_s" | "decay" => {
-                        d.decay_s = value.clamp(0.05, 10.0);
+                        AudioEffectDevice::set_parameter(&mut *d, 2, value);
                         d.decay_s
                     }
                     "material" => {
-                        d.material = value.clamp(-1.0, 1.0);
+                        AudioEffectDevice::set_parameter(&mut *d, 3, value);
                         d.material
                     }
                     "dry_wet" | "wet" | "mix" => {
-                        d.dry_wet = value.clamp(0.0, 1.0);
+                        AudioEffectDevice::set_parameter(&mut *d, 0, value);
                         d.dry_wet
                     }
                     _ => return Err(format!("Unknown Corpus parameter '{}'", key)),
@@ -1539,7 +1571,7 @@ impl ManagedDeviceHandle {
                 Ok((k.to_string(), applied))
             }
             Self::Redux(dev) => {
-                let mut d = dev.lock().unwrap();
+                let mut d = dev.lock().unwrap_or_else(|e| e.into_inner());
                 let applied = match k {
                     "downsample" => {
                         d.downsample = (value.round() as usize).clamp(1, 256);
@@ -1562,7 +1594,7 @@ impl ManagedDeviceHandle {
                 Ok((k.to_string(), applied))
             }
             Self::Utility(dev) => {
-                let mut d = dev.lock().unwrap();
+                let mut d = dev.lock().unwrap_or_else(|e| e.into_inner());
                 let applied = match k {
                     "gain_db" | "gain" => {
                         d.gain_db = value.clamp(-60.0, 35.0);
@@ -1593,7 +1625,7 @@ impl ManagedDeviceHandle {
                 Ok((k.to_string(), applied))
             }
             Self::MasterLimiter(dev) => {
-                let mut d = dev.lock().unwrap();
+                let mut d = dev.lock().unwrap_or_else(|e| e.into_inner());
                 let applied = match k {
                     "ceiling" | "ceiling_linear" => {
                         d.ceiling = value.clamp(0.01, 1.0);
@@ -1608,7 +1640,7 @@ impl ManagedDeviceHandle {
                 Ok((k.to_string(), applied))
             }
             Self::Arpeggiator(dev) => {
-                let mut d = dev.lock().unwrap();
+                let mut d = dev.lock().unwrap_or_else(|e| e.into_inner());
                 let applied = match k {
                     "rate_beats" | "rate" => {
                         d.rate_beats = (value as f64).clamp(0.0625, 4.0);
@@ -1631,7 +1663,7 @@ impl ManagedDeviceHandle {
                 Ok((k.to_string(), applied))
             }
             Self::Chord(dev) => {
-                let mut d = dev.lock().unwrap();
+                let mut d = dev.lock().unwrap_or_else(|e| e.into_inner());
                 if let Some(num) = k.strip_prefix("shift").and_then(|s| s.parse::<usize>().ok()) {
                     if (1..=6).contains(&num) {
                         d.shifts[num - 1] = value.round().clamp(-36.0, 36.0) as i8;
@@ -1641,7 +1673,7 @@ impl ManagedDeviceHandle {
                 Err(format!("Unknown Chord parameter '{}'", key))
             }
             Self::Scale(dev) => {
-                let mut d = dev.lock().unwrap();
+                let mut d = dev.lock().unwrap_or_else(|e| e.into_inner());
                 let applied = match k {
                     "base_note" => {
                         d.base_note = (value.round() as i32).rem_euclid(12) as u8;
@@ -1656,7 +1688,7 @@ impl ManagedDeviceHandle {
                 Ok((k.to_string(), applied))
             }
             Self::Velocity(dev) => {
-                let mut d = dev.lock().unwrap();
+                let mut d = dev.lock().unwrap_or_else(|e| e.into_inner());
                 let applied = match k {
                     "drive" => {
                         d.drive = value.clamp(-1.0, 1.0);
@@ -1687,10 +1719,10 @@ impl ManagedDeviceHandle {
 
     /// Serialize an audio effect handle into `oxide_project::InsertEffectConfig`
     /// so project save, `.als` export, and offline bounce preserve all device parameters.
-    pub fn to_insert_effect_config(&self) -> Option<InsertEffectConfig> {
+    pub fn to_insert_effect_config(&self, bpm: f64) -> Option<InsertEffectConfig> {
         match self {
             Self::EqEight { dev, .. } => {
-                let d = dev.lock().unwrap();
+                let d = dev.lock().unwrap_or_else(|e| e.into_inner());
                 let mut params = HashMap::new();
                 for (i, b) in d.bands.iter().enumerate() {
                     let n = i + 1;
@@ -1705,7 +1737,7 @@ impl ManagedDeviceHandle {
                 Some(InsertEffectConfig::EqEight { params })
             }
             Self::GlueCompressor(dev) => {
-                let d = dev.lock().unwrap();
+                let d = dev.lock().unwrap_or_else(|e| e.into_inner());
                 Some(InsertEffectConfig::GlueCompressor {
                     threshold_db: d.threshold_db,
                     ratio: d.ratio,
@@ -1716,7 +1748,7 @@ impl ManagedDeviceHandle {
                 })
             }
             Self::Roar(dev) => {
-                let d = dev.lock().unwrap();
+                let d = dev.lock().unwrap_or_else(|e| e.into_inner());
                 Some(InsertEffectConfig::Roar {
                     drive_db: d.stage1.drive_db,
                     tone: d.stage1.tone,
@@ -1725,7 +1757,7 @@ impl ManagedDeviceHandle {
                 })
             }
             Self::AutoFilter(dev) => {
-                let d = dev.lock().unwrap();
+                let d = dev.lock().unwrap_or_else(|e| e.into_inner());
                 Some(InsertEffectConfig::AutoFilter {
                     cutoff_hz: d.cutoff_hz,
                     resonance: d.resonance,
@@ -1733,7 +1765,7 @@ impl ManagedDeviceHandle {
                 })
             }
             Self::MultibandDynamics(dev) => {
-                let d = dev.lock().unwrap();
+                let d = dev.lock().unwrap_or_else(|e| e.into_inner());
                 Some(InsertEffectConfig::MultibandDynamics {
                     amount: d.amount,
                     time_macro: d.time_macro,
@@ -1742,15 +1774,21 @@ impl ManagedDeviceHandle {
                 })
             }
             Self::Echo(dev) => {
-                let d = dev.lock().unwrap();
+                let d = dev.lock().unwrap_or_else(|e| e.into_inner());
+                let safe_bpm = if bpm.is_finite() && bpm >= 20.0 {
+                    bpm
+                } else {
+                    120.0
+                };
+                let beat_ms = (60_000.0 / safe_bpm) as f32;
                 Some(InsertEffectConfig::TempoDelay {
-                    time_beats: (d.delay_time_l_ms / 500.0).clamp(0.0625, 4.0),
+                    time_beats: (d.delay_time_l_ms / beat_ms).clamp(0.0625, 4.0),
                     feedback: d.feedback,
                     mix: d.dry_wet,
                 })
             }
             Self::HybridReverb(dev) => {
-                let d = dev.lock().unwrap();
+                let d = dev.lock().unwrap_or_else(|e| e.into_inner());
                 Some(InsertEffectConfig::Reverb {
                     ir_path: None,
                     decay_ms: d.decay_s * 1000.0,
@@ -1998,7 +2036,8 @@ pub fn instantiate_device(device_type: &str, sample_rate: f32) -> Result<Created
     instantiate_managed_device(device_type, sample_rate).map(|(dev, _)| dev)
 }
 
-/// Attach an instantiated device into a DeviceChain.
+/// Attach an instantiated device into a DeviceChain and return its global index
+/// in `[midi_effects..., instrument?, audio_effects...]`.
 pub fn add_device_to_chain(
     chain: &mut DeviceChain,
     dev: CreatedDevice,
@@ -2007,8 +2046,9 @@ pub fn add_device_to_chain(
     match dev {
         CreatedDevice::Midi(mfx) => {
             if let Some(pos) = position {
-                chain.insert_midi_effect(pos, mfx);
-                pos
+                let clamped = pos.min(chain.midi_effects.len());
+                chain.insert_midi_effect(clamped, mfx);
+                clamped
             } else {
                 chain.add_midi_effect(mfx)
             }
@@ -2018,13 +2058,61 @@ pub fn add_device_to_chain(
             chain.midi_effects.len()
         }
         CreatedDevice::Audio(afx) => {
-            if let Some(pos) = position {
-                chain.insert_audio_effect(pos, afx);
-                pos
+            let prefix = chain.midi_effects.len() + usize::from(chain.has_instrument());
+            let local_idx = if let Some(pos) = position {
+                let clamped = pos.min(chain.audio_effects.len());
+                chain.insert_audio_effect(clamped, afx);
+                clamped
             } else {
                 chain.add_audio_effect(afx)
-            }
+            };
+            prefix + local_idx
         }
+    }
+}
+
+/// Reorder devices within a matching category using global chain indices
+/// `[midi_effects..., instrument?, audio_effects...]`.
+pub fn reorder_device_chain_global(
+    chain: &mut DeviceChain,
+    handles: Option<&mut ManagedChainHandles>,
+    from_index: usize,
+    to_index: usize,
+) -> Result<(), String> {
+    let total = chain.device_count();
+    if from_index >= total || to_index >= total {
+        return Err(format!(
+            "Reorder indices ({}, {}) out of bounds for chain with {} devices",
+            from_index, to_index, total
+        ));
+    }
+    let midi_len = chain.midi_effects.len();
+    let inst_offset = usize::from(chain.has_instrument());
+    let audio_offset = midi_len + inst_offset;
+
+    if from_index < midi_len && to_index < midi_len {
+        if !chain.reorder_midi_effects(from_index, to_index) {
+            return Err("Failed reordering MIDI effects".to_string());
+        }
+        if let Some(hs) = handles {
+            hs.reorder_midi(from_index, to_index);
+        }
+        Ok(())
+    } else if from_index >= audio_offset && to_index >= audio_offset {
+        let from_local = from_index - audio_offset;
+        let to_local = to_index - audio_offset;
+        if !chain.reorder_audio_effects(from_local, to_local) {
+            return Err("Failed reordering audio effects".to_string());
+        }
+        if let Some(hs) = handles {
+            hs.reorder_audio(from_local, to_local);
+        }
+        Ok(())
+    } else {
+        Err(format!(
+            "Cannot reorder across device categories or move instrument slot (from={}, to={})",
+            from_index, to_index
+        ))
     }
 }
 
@@ -2104,4 +2192,60 @@ pub fn dump_device_chain_detailed(
         "device_count": devices.len(),
         "devices": devices
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_rejects_non_finite_parameters_and_global_indices_and_drum_pads() {
+        let mut chain = DeviceChain::new();
+        let mut handles = ManagedChainHandles::default();
+
+        let (inst, inst_h) = instantiate_managed_device("Wavetable", 44100.0).unwrap();
+        let (echo, echo_h) = instantiate_managed_device("Echo", 44100.0).unwrap();
+        let (lim, lim_h) = instantiate_managed_device("MasterLimiter", 44100.0).unwrap();
+
+        assert_eq!(add_device_to_chain(&mut chain, inst, None), 0);
+        assert_eq!(handles.add_handle(DeviceCategory::Instrument, inst_h, None), 0);
+        assert_eq!(add_device_to_chain(&mut chain, echo, None), 1);
+        assert_eq!(handles.add_handle(DeviceCategory::AudioEffect, echo_h, None), 1);
+        assert_eq!(add_device_to_chain(&mut chain, lim, None), 2);
+        assert_eq!(handles.add_handle(DeviceCategory::AudioEffect, lim_h, None), 2);
+
+        // Reject NaN/Inf across devices
+        assert!(handles.get_at(1).unwrap().set_parameter("feedback", f32::NAN).is_err());
+        assert!(handles.get_at(1).unwrap().set_parameter("feedback", f32::INFINITY).is_err());
+
+        // Global reorder of AudioEffects (indices 1 <-> 2) succeeds; cross-category (0 <-> 1) fails
+        assert!(reorder_device_chain_global(&mut chain, Some(&mut handles), 0, 1).is_err());
+        assert!(reorder_device_chain_global(&mut chain, Some(&mut handles), 1, 2).is_ok());
+        assert_eq!(handles.get_at(1).unwrap().name(), "Limiter");
+
+        // MasterLimiter emits ceiling_db
+        handles.get_at(1).unwrap().set_parameter("ceiling_db", -6.0).unwrap();
+        let lim_params = handles.get_at(1).unwrap().get_params();
+        assert_eq!(lim_params[0].0, "ceiling_db");
+        assert!((lim_params[0].1 - (-6.0)).abs() < 0.05);
+
+        // Echo uses BPM for time_beats conversion (e.g. 500ms at 60 BPM = 0.5 beat!)
+        handles.get_at(2).unwrap().set_parameter("delay_time_l_ms", 500.0).unwrap();
+        if let Some(InsertEffectConfig::TempoDelay { time_beats, .. }) =
+            handles.get_at(2).unwrap().to_insert_effect_config(60.0)
+        {
+            assert!((time_beats - 0.5).abs() < 1e-4, "500ms at 60 BPM must be 0.5 beat, got {}", time_beats);
+        } else {
+            panic!("Expected TempoDelay");
+        }
+
+        // DrumRack exposes pad0..15
+        let (_, drum_h) = instantiate_managed_device("DrumRack", 44100.0).unwrap();
+        assert!(drum_h.set_parameter("pad15_volume", 0.42).is_ok());
+        assert!(drum_h.get_params().iter().any(|(k, v)| k == "pad15_volume" && (*v - 0.42).abs() < 1e-4));
+
+        // Corpus tune_hz runs rebuild_modes via AudioEffectDevice::set_parameter
+        let (_, corpus_h) = instantiate_managed_device("Corpus", 44100.0).unwrap();
+        assert!(corpus_h.set_parameter("tune_hz", 330.0).is_ok());
+    }
 }

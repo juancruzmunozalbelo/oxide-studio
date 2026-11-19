@@ -243,8 +243,8 @@ impl TrackCompingManager {
         end_beat: f64,
         crossfade_ms: f32,
     ) -> Result<usize, String> {
-        if start_beat >= end_beat {
-            return Err("Invalid comp region: start_beat must be strictly less than end_beat".into());
+        if !start_beat.is_finite() || !end_beat.is_finite() || !crossfade_ms.is_finite() || start_beat >= end_beat {
+            return Err("Invalid comp region: finite start_beat must be strictly less than end_beat".into());
         }
 
         let lane = match self.get_take_lane(lane_id) {
@@ -356,11 +356,7 @@ impl TrackCompingManager {
         }
 
         // Sort main clips chronologically
-        new_main_clips.sort_by(|a, b| {
-            a.timeline_start_beat
-                .partial_cmp(&b.timeline_start_beat)
-                .unwrap_or(std::cmp::Ordering::Equal)
-        });
+        new_main_clips.sort_by(|a, b| a.timeline_start_beat.total_cmp(&b.timeline_start_beat));
 
         *main_clips = new_main_clips;
         Ok(comped_count)

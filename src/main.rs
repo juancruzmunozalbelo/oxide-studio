@@ -20,11 +20,36 @@ use oxide_project::DAWProject;
 fn main() {
     let args: Vec<String> = env::args().collect();
 
+    const KNOWN_LONG_FLAGS: &[&str] = &[
+        "--render-demo",
+        "--export-als",
+        "--project",
+        "--import-als",
+        "--split-stems",
+        "--scan-plugins",
+        "--output",
+        "--mcp",
+        "--help",
+    ];
+    for arg in args.iter().skip(1) {
+        if arg.starts_with("--") && !KNOWN_LONG_FLAGS.contains(&arg.as_str()) {
+            eprintln!("Error: unknown flag '{}'", arg);
+            print_usage();
+            exit(2);
+        }
+    }
+
+    // Check for --help
+    if args.iter().any(|a| a == "--help" || a == "-h") {
+        print_usage();
+        return;
+    }
+
     // Check for --render-demo
     if let Some(pos) = args.iter().position(|a| a == "--render-demo") {
-        if pos + 1 >= args.len() {
+        if pos + 1 >= args.len() || args[pos + 1].starts_with("--") {
             eprintln!("Error: --render-demo requires an output file path (e.g. --render-demo /tmp/demo.wav)");
-            exit(1);
+            exit(2);
         }
         let output_path = PathBuf::from(&args[pos + 1]);
         render_demo_and_verify(&output_path);
@@ -35,13 +60,13 @@ fn main() {
     if let Some(pos) = args.iter().position(|a| a == "--export-als") {
         if pos + 1 >= args.len() || args[pos + 1].starts_with("--") {
             eprintln!("Error: --export-als requires an output ALS file path (e.g. --export-als session.als)");
-            exit(1);
+            exit(2);
         }
         let out_als = PathBuf::from(&args[pos + 1]);
         let in_project = if let Some(p_pos) = args.iter().position(|a| a == "--project") {
             if p_pos + 1 >= args.len() || args[p_pos + 1].starts_with("--") {
                 eprintln!("Error: --project requires a path to a .oxide.json file");
-                exit(1);
+                exit(2);
             }
             Some(PathBuf::from(&args[p_pos + 1]))
         } else {
@@ -50,7 +75,7 @@ fn main() {
         let in_als = if let Some(a_pos) = args.iter().position(|a| a == "--import-als") {
             if a_pos + 1 >= args.len() || args[a_pos + 1].starts_with("--") {
                 eprintln!("Error: --import-als requires an input .als file path");
-                exit(1);
+                exit(2);
             }
             Some(PathBuf::from(&args[a_pos + 1]))
         } else {
@@ -62,9 +87,9 @@ fn main() {
 
     // Check for --import-als
     if let Some(pos) = args.iter().position(|a| a == "--import-als") {
-        if pos + 1 >= args.len() {
+        if pos + 1 >= args.len() || args[pos + 1].starts_with("--") {
             eprintln!("Error: --import-als requires an input ALS file path (e.g. --import-als session.als [out.json])");
-            exit(1);
+            exit(2);
         }
         let in_als = PathBuf::from(&args[pos + 1]);
         let out_json = if pos + 2 < args.len() && !args[pos + 2].starts_with("--") {
@@ -78,9 +103,9 @@ fn main() {
 
     // Check for --split-stems
     if let Some(pos) = args.iter().position(|a| a == "--split-stems") {
-        if pos + 2 >= args.len() {
+        if pos + 2 >= args.len() || args[pos + 1].starts_with("--") || args[pos + 2].starts_with("--") {
             eprintln!("Error: --split-stems requires input WAV and output directory (e.g. --split-stems mix.wav ./stems)");
-            exit(1);
+            exit(2);
         }
         let in_wav = PathBuf::from(&args[pos + 1]);
         let out_dir = PathBuf::from(&args[pos + 2]);
@@ -92,9 +117,11 @@ fn main() {
     if args.iter().any(|a| a == "--scan-plugins") {
         let mut output_path = PathBuf::from("plugin_manifest.json");
         if let Some(pos) = args.iter().position(|a| a == "--output" || a == "-o") {
-            if pos + 1 < args.len() {
-                output_path = PathBuf::from(&args[pos + 1]);
+            if pos + 1 >= args.len() || args[pos + 1].starts_with("--") {
+                eprintln!("Error: {} requires a file path", args[pos]);
+                exit(2);
             }
+            output_path = PathBuf::from(&args[pos + 1]);
         }
         scan_plugins_cli(&output_path);
         return;
@@ -106,10 +133,13 @@ fn main() {
         return;
     }
 
-    // Check for --help
-    if args.iter().any(|a| a == "--help" || a == "-h") {
-        print_usage();
-        return;
+    // Check for stray unknown flags/args before launching GUI
+    for arg in args.iter().skip(1) {
+        if arg.starts_with('-') {
+            eprintln!("Error: unknown argument '{}'", arg);
+            print_usage();
+            exit(2);
+        }
     }
 
     // Default: Launch native single-window studio GUI
@@ -206,8 +236,10 @@ fn render_demo_and_verify(output_path: &Path) {
         let _ = std::fs::create_dir_all(parent);
     }
 
-    WavWriter::write_wav_16bit(output_path, 44100, 2, &interleaved)
-        .expect("Failed to write demo WAV file");
+    if let Err(e) = WavWriter::write_wav_16bit(output_path, 44100, 2, &interleaved) {
+        eprintln!("Error writing demo WAV file '{}': {}", output_path.display(), e);
+        exit(1);
+    }
 
     println!("✓ Verified: Duration >= 4.0s, RMS > 0.02, Zero NaN/Inf, Peak <= 1.0");
     println!("✓ Export Succeeded: {}", output_path.display());
@@ -241,9 +273,10 @@ fn scan_plugins_cli(output_path: &Path) {
         let _ = std::fs::create_dir_all(parent);
     }
 
-    manifest
-        .save_to_file(output_path)
-        .expect("Failed to write plugin manifest file");
+    if let Err(e) = manifest.save_to_file(output_path) {
+        eprintln!("Error saving plugin manifest '{}': {}", output_path.display(), e);
+        exit(1);
+    }
 
     println!("✓ Manifest saved to: {}", output_path.display());
     println!("============================================================");

@@ -27,7 +27,7 @@ use crate::analysis::AudioAnalysisMetrics;
 use crate::browser::BrowserCategory;
 use crate::devices::{
     add_device_to_chain, dump_device_chain_detailed, instantiate_managed_device,
-    ManagedDeviceHandle,
+    reorder_device_chain_global, ManagedDeviceHandle,
 };
 use crate::lilypond::{parse_lilypond, sequence_to_clip_pattern};
 use crate::music_theory::{
@@ -36,6 +36,136 @@ use crate::music_theory::{
 };
 use crate::protocol::{Tool, ToolCallResult, ToolInputSchema};
 use crate::state::DawState;
+
+const MAX_TRACK_ID: usize = 128;
+const MAX_SLOT_ID: usize = 256;
+const MAX_TOTAL_BARS: usize = 512;
+
+fn validate_track_id(id: usize) -> Result<usize, ToolCallResult> {
+    if id > MAX_TRACK_ID {
+        Err(ToolCallResult::error(format!(
+            "track_id {} exceeds upper bound ({})",
+            id, MAX_TRACK_ID
+        )))
+    } else {
+        Ok(id)
+    }
+}
+
+fn validate_slot_id(id: usize) -> Result<usize, ToolCallResult> {
+    if id > MAX_SLOT_ID {
+        Err(ToolCallResult::error(format!(
+            "slot_id {} exceeds upper bound ({})",
+            id, MAX_SLOT_ID
+        )))
+    } else {
+        Ok(id)
+    }
+}
+
+fn validate_bpm(bpm: f64) -> Result<f64, ToolCallResult> {
+    if !bpm.is_finite() || !(20.0..=999.0).contains(&bpm) {
+        Err(ToolCallResult::error(format!(
+            "bpm {} out of valid range [20.0..=999.0]",
+            bpm
+        )))
+    } else {
+        Ok(bpm)
+    }
+}
+
+fn current_scale_lock(state: &DawState) -> ScaleLock {
+    ScaleLock {
+        root: state.scale.root,
+        degree_mask: state.scale.mode.degree_mask(),
+    }
+}
+
+fn insert_track_shifting_state(
+    state: &mut DawState,
+    insert_at: usize,
+    trk: TrackDefinition,
+    track_name: &str,
+    tl_label: &str,
+) {
+    let is_synth = matches!(trk.instrument, InstrumentConfig::BuiltinSubtractiveSynth(_));
+    let is_drum = matches!(trk.instrument, InstrumentConfig::ElectronicDrumRack(_));
+
+    state.project.tracks.insert(insert_at, trk);
+    for (i, t) in state.project.tracks.iter_mut().enumerate() {
+        t.id = i as u32;
+    }
+
+    let m_idx = insert_at.min(state.matrix.tracks.len());
+    state.matrix.tracks.insert(
+        m_idx,
+        oxide_timeline::SessionTrack::new(m_idx as u32, track_name, 8),
+    );
+    for (i, t) in state.matrix.tracks.iter_mut().enumerate() {
+        t.id = i as u32;
+    }
+
+    let tl_idx = insert_at.min(state.timeline.tracks.len());
+    state.timeline.tracks.insert(
+        tl_idx,
+        oxide_timeline::ArrangementTrack::new(tl_idx as u32, track_name, tl_label),
+    );
+    for (i, t) in state.timeline.tracks.iter_mut().enumerate() {
+        t.id = i as u32;
+    }
+
+    if insert_at <= state.track_manager.tracks.len() {
+        let mut new_tm = oxide_timeline::track::Track::new(
+            insert_at as u32,
+            track_name,
+            if tl_label == "Audio" {
+                oxide_timeline::track::TrackType::Audio
+            } else {
+                oxide_timeline::track::TrackType::Midi
+            },
+        );
+        for (s_idx, _) in state.custom_return_ids.iter().enumerate() {
+            new_tm.set_send(s_idx as u32, -70.0, SendRoutingMode::PostFader);
+        }
+        state.track_manager.tracks.insert(insert_at, new_tm);
+        for (i, t) in state.track_manager.tracks.iter_mut().enumerate() {
+            t.id = i as u32;
+        }
+    }
+
+    if insert_at < state.mixer.tracks.len() {
+        for i in (insert_at + 1..state.mixer.tracks.len()).rev() {
+            state.mixer.tracks[i] = state.mixer.tracks[i - 1].clone();
+        }
+        state.mixer.tracks[insert_at] = oxide_fx::MixerTrack::new(track_name);
+    }
+
+    let old_chains = std::mem::take(&mut state.device_chains);
+    for (k, v) in old_chains {
+        let new_k = if (k as usize) >= insert_at { k + 1 } else { k };
+        state.device_chains.insert(new_k, v);
+    }
+
+    let old_handles = std::mem::take(&mut state.device_handles);
+    for (k, v) in old_handles {
+        let new_k = if (k as usize) >= insert_at { k + 1 } else { k };
+        state.device_handles.insert(new_k, v);
+    }
+
+    let old_clips = std::mem::take(&mut state.audio_clips);
+    for ((t, s), v) in old_clips {
+        let new_t = if (t as usize) >= insert_at { t + 1 } else { t };
+        state.audio_clips.insert((new_t, s), v);
+    }
+
+    let _ = (is_synth, is_drum);
+    if state.active_synth_track_id >= insert_at {
+        state.active_synth_track_id += 1;
+    }
+    if state.active_drum_track_id >= insert_at {
+        state.active_drum_track_id += 1;
+    }
+}
 
 /// Expand a leading `~` or `~/` path prefix using `HOME`.
 fn expand_tilde_path(raw: &str) -> PathBuf {
@@ -100,12 +230,13 @@ fn set_track_device_param_helper(
     let (resolved_param, applied_value) = handle.set_parameter(param_key, value)?;
 
     // Keep track insert_fx synchronized immediately in project state
+    let bpm = state.bpm;
     if let Some(p_trk) = state.project.tracks.get_mut(track_id as usize) {
         if let Some(track_handles) = state.device_handles.get(&track_id) {
             p_trk.insert_fx = track_handles
                 .audio_effects
                 .iter()
-                .filter_map(|h| h.to_insert_effect_config())
+                .filter_map(|h| h.to_insert_effect_config(bpm))
                 .collect();
         }
     }
@@ -767,7 +898,7 @@ pub fn get_tool_definitions_filtered(disable_legacy_live12: bool) -> Vec<Tool> {
                 properties: Some(json!({
                     "track_id": { "type": "integer", "description": "Target track ID" },
                     "device_index": { "type": "integer", "description": "Device index in chain" },
-                    "param": { "type": "integer", "description": "Parameter index or ID" },
+                    "param": { "type": ["string", "integer"], "description": "Parameter name, alias, or 0-based index" },
                     "value": { "type": "number", "description": "Target parameter floating-point value" }
                 })),
                 required: Some(vec!["track_id".to_string(), "device_index".to_string(), "param".to_string(), "value".to_string()]),
@@ -1345,7 +1476,10 @@ pub fn call_tool(state: &mut DawState, name: &str, args: &Value) -> ToolCallResu
         }
         "transport_set_bpm" => {
             let bpm = match args.get("bpm").and_then(|v| v.as_f64()) {
-                Some(b) => b,
+                Some(b) => match validate_bpm(b) {
+                    Ok(v) => v,
+                    Err(e) => return e,
+                },
                 None => return ToolCallResult::error("Missing 'bpm' parameter"),
             };
             state.bpm = bpm;
@@ -1482,7 +1616,30 @@ pub fn call_tool(state: &mut DawState, name: &str, args: &Value) -> ToolCallResu
                 Some(p) => p,
                 None => return ToolCallResult::error("Missing 'preset_name' parameter"),
             };
-            let mut success = state.synth.load_preset(preset_name);
+            let explicit_tid = args.get("track_id").and_then(|v| v.as_u64()).map(|t| t as usize);
+            let target_idx = if let Some(idx) = explicit_tid {
+                match state.project.tracks.get(idx) {
+                    Some(trk) if matches!(trk.instrument, InstrumentConfig::BuiltinSubtractiveSynth(_)) => Some(idx),
+                    Some(_) => {
+                        return ToolCallResult::error(format!(
+                            "Track {} is not a synth track",
+                            idx
+                        ))
+                    }
+                    None => {
+                        return ToolCallResult::error(format!("Track index {} out of range", idx))
+                    }
+                }
+            } else {
+                state
+                    .project
+                    .tracks
+                    .iter()
+                    .rposition(|t| matches!(t.instrument, InstrumentConfig::BuiltinSubtractiveSynth(_)))
+            };
+
+            let mut candidate_synth = oxide_dsp::SynthEngine::new(state.sample_rate);
+            let mut success = candidate_synth.load_preset(preset_name);
             if !success {
                 let fallback = match preset_name {
                     "analogsaw.preset" | "analogsaw" => Some("osc-shapes.preset"),
@@ -1492,29 +1649,18 @@ pub fn call_tool(state: &mut DawState, name: &str, args: &Value) -> ToolCallResu
                     _ => None,
                 };
                 if let Some(fb) = fallback {
-                    success = state.synth.load_preset(fb);
+                    success = candidate_synth.load_preset(fb);
                 }
             }
             if success {
-                if let Some(tid) = args.get("track_id").and_then(|v| v.as_u64()) {
-                    let idx = tid as usize;
-                    if let Some(trk) = state.project.tracks.get_mut(idx) {
-                        state.active_synth_track_id = idx;
-                        if let InstrumentConfig::BuiltinSubtractiveSynth(ref mut p) = trk.instrument {
-                            p.preset_name = Some(preset_name.to_string());
-                        }
-                    }
-                } else if let Some(idx) = state
-                    .project
-                    .tracks
-                    .iter()
-                    .rposition(|t| matches!(t.instrument, InstrumentConfig::BuiltinSubtractiveSynth(_)))
-                {
+                state.synth = candidate_synth;
+                if let Some(idx) = target_idx {
                     state.active_synth_track_id = idx;
                     if let InstrumentConfig::BuiltinSubtractiveSynth(ref mut p) =
                         state.project.tracks[idx].instrument
                     {
                         p.preset_name = Some(preset_name.to_string());
+                        p.overridden_params.clear();
                     }
                 }
                 state.sync_synth_params_to_project();
@@ -1532,7 +1678,32 @@ pub fn call_tool(state: &mut DawState, name: &str, args: &Value) -> ToolCallResu
                 Some(v) => v as f32,
                 None => return ToolCallResult::error("Missing 'value' parameter"),
             };
+            if !param_val.is_finite() {
+                return ToolCallResult::error("Parameter 'value' must be finite");
+            }
             let is_norm = args.get("is_normalized").and_then(|v| v.as_bool()).unwrap_or(false);
+
+            let mark_active_synth_override = |st: &mut crate::state::DawState, name: &str| {
+                let target_idx = st
+                    .project
+                    .tracks
+                    .get(st.active_synth_track_id)
+                    .filter(|t| matches!(t.instrument, InstrumentConfig::BuiltinSubtractiveSynth(_)))
+                    .map(|_| st.active_synth_track_id)
+                    .or_else(|| {
+                        st.project
+                            .tracks
+                            .iter()
+                            .position(|t| matches!(t.instrument, InstrumentConfig::BuiltinSubtractiveSynth(_)))
+                    });
+                if let Some(idx) = target_idx {
+                    if let InstrumentConfig::BuiltinSubtractiveSynth(ref mut p) =
+                        st.project.tracks[idx].instrument
+                    {
+                        p.mark_overridden(name);
+                    }
+                }
+            };
 
             if let Some(param_str) = args.get("parameter").and_then(|v| v.as_str()) {
                 if !oxide_dsp::PARAMETER_DESCRIPTORS.iter().any(|d| d.name == param_str) {
@@ -1543,6 +1714,7 @@ pub fn call_tool(state: &mut DawState, name: &str, args: &Value) -> ToolCallResu
                 } else {
                     state.synth.set_parameter(param_str, param_val);
                 }
+                mark_active_synth_override(state, param_str);
                 state.sync_synth_params_to_project();
                 ToolCallResult::json(&json!({
                     "parameter": param_str,
@@ -1557,6 +1729,7 @@ pub fn call_tool(state: &mut DawState, name: &str, args: &Value) -> ToolCallResu
                     } else {
                         state.synth.set_parameter(desc.name, param_val);
                     }
+                    mark_active_synth_override(state, desc.name);
                     state.sync_synth_params_to_project();
                     ToolCallResult::json(&json!({
                         "parameter_id": param_idx,
@@ -1669,23 +1842,35 @@ pub fn call_tool(state: &mut DawState, name: &str, args: &Value) -> ToolCallResu
         // --- Session Matrix & Timeline ---
         "clip_create_midi" => {
             let track_id = match args.get("track_id").and_then(|v| v.as_u64()) {
-                Some(id) => id as usize,
+                Some(id) => match validate_track_id(id as usize) {
+                    Ok(v) => v,
+                    Err(e) => return e,
+                },
                 None => return ToolCallResult::error("Missing 'track_id'"),
             };
             let slot_id = match args.get("slot_id").and_then(|v| v.as_u64()) {
-                Some(id) => id as usize,
+                Some(id) => match validate_slot_id(id as usize) {
+                    Ok(v) => v,
+                    Err(e) => return e,
+                },
                 None => return ToolCallResult::error("Missing 'slot_id'"),
             };
             let name = args.get("name").and_then(|v| v.as_str()).unwrap_or("MIDI Clip");
             let len_beats = args.get("length_beats").and_then(|v| v.as_f64()).unwrap_or(4.0);
+            if !len_beats.is_finite() || len_beats <= 0.0 || len_beats > (MAX_TOTAL_BARS * 4) as f64 {
+                return ToolCallResult::error("length_beats must be finite and in (0.0..=2048.0]");
+            }
 
             let mut notes = Vec::new();
             if let Some(arr) = args.get("notes").and_then(|v| v.as_array()) {
                 for item in arr {
-                    let pitch = item.get("pitch").and_then(|v| v.as_u64()).unwrap_or(60) as u8;
-                    let vel = item.get("velocity").and_then(|v| v.as_u64()).unwrap_or(100) as u8;
+                    let pitch = item.get("pitch").and_then(|v| v.as_u64()).unwrap_or(60).min(127) as u8;
+                    let vel = item.get("velocity").and_then(|v| v.as_u64()).unwrap_or(100).clamp(1, 127) as u8;
                     let start = item.get("start_beat").and_then(|v| v.as_f64()).unwrap_or(0.0);
                     let dur = item.get("duration_beats").and_then(|v| v.as_f64()).unwrap_or(1.0);
+                    if !start.is_finite() || start < 0.0 || !dur.is_finite() || dur <= 0.0 {
+                        return ToolCallResult::error("MIDI note start_beat must be >= 0.0 and duration_beats must be > 0.0");
+                    }
                     notes.push(MidiNote::new(pitch, vel, start, dur));
                 }
             }
@@ -1737,11 +1922,17 @@ pub fn call_tool(state: &mut DawState, name: &str, args: &Value) -> ToolCallResu
         }
         "clip_create_drums" => {
             let track_id = match args.get("track_id").and_then(|v| v.as_u64()) {
-                Some(id) => id as usize,
+                Some(id) => match validate_track_id(id as usize) {
+                    Ok(v) => v,
+                    Err(e) => return e,
+                },
                 None => return ToolCallResult::error("Missing 'track_id'"),
             };
             let slot_id = match args.get("slot_id").and_then(|v| v.as_u64()) {
-                Some(id) => id as usize,
+                Some(id) => match validate_slot_id(id as usize) {
+                    Ok(v) => v,
+                    Err(e) => return e,
+                },
                 None => return ToolCallResult::error("Missing 'slot_id'"),
             };
             let name = args.get("name").and_then(|v| v.as_str()).unwrap_or("Drum Pattern");
@@ -1755,9 +1946,9 @@ pub fn call_tool(state: &mut DawState, name: &str, args: &Value) -> ToolCallResu
 
             if let Some(arr) = args.get("steps").and_then(|v| v.as_array()) {
                 for item in arr {
-                    let pad = item.get("pad_index").and_then(|v| v.as_u64()).unwrap_or(0) as u8;
+                    let pad = item.get("pad_index").and_then(|v| v.as_u64()).unwrap_or(0).min(15) as u8;
                     let step = item.get("step_index").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
-                    let vel = item.get("velocity").and_then(|v| v.as_u64()).unwrap_or(100) as u8;
+                    let vel = item.get("velocity").and_then(|v| v.as_u64()).unwrap_or(100).clamp(1, 127) as u8;
                     let acc = item.get("accent").and_then(|v| v.as_bool()).unwrap_or(false);
                     drum_pat.set_step(pad, step, DrumStep::new(true, vel, 36 + pad).with_accent(acc));
                 }
@@ -1786,11 +1977,17 @@ pub fn call_tool(state: &mut DawState, name: &str, args: &Value) -> ToolCallResu
         }
         "clip_create_lilypond" => {
             let track_id = match args.get("track_id").and_then(|v| v.as_u64()) {
-                Some(id) => id as usize,
+                Some(id) => match validate_track_id(id as usize) {
+                    Ok(v) => v,
+                    Err(e) => return e,
+                },
                 None => return ToolCallResult::error("Missing 'track_id'"),
             };
             let slot_id = match args.get("slot_id").and_then(|v| v.as_u64()) {
-                Some(id) => id as usize,
+                Some(id) => match validate_slot_id(id as usize) {
+                    Ok(v) => v,
+                    Err(e) => return e,
+                },
                 None => return ToolCallResult::error("Missing 'slot_id'"),
             };
             let notation = match args.get("notation").and_then(|v| v.as_str()) {
@@ -1880,17 +2077,28 @@ pub fn call_tool(state: &mut DawState, name: &str, args: &Value) -> ToolCallResu
         }
         "timeline_place_clip" => {
             let track_id = match args.get("track_id").and_then(|v| v.as_u64()) {
-                Some(id) => id as usize,
+                Some(id) => match validate_track_id(id as usize) {
+                    Ok(v) => v,
+                    Err(e) => return e,
+                },
                 None => return ToolCallResult::error("Missing 'track_id'"),
             };
             let clip_id = args.get("clip_id").and_then(|v| v.as_u64()).unwrap_or(1) as u32;
-            let slot_id = args.get("slot_id").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
+            let slot_id = match args.get("slot_id").and_then(|v| v.as_u64()) {
+                Some(id) => match validate_slot_id(id as usize) {
+                    Ok(v) => v,
+                    Err(e) => return e,
+                },
+                None => 0,
+            };
             let start = match args.get("start_beat").and_then(|v| v.as_f64()) {
-                Some(b) => b,
+                Some(b) if b.is_finite() && b >= 0.0 => b,
+                Some(_) => return ToolCallResult::error("start_beat must be finite and >= 0.0"),
                 None => return ToolCallResult::error("Missing 'start_beat'"),
             };
             let dur = match args.get("duration_beats").and_then(|v| v.as_f64()) {
-                Some(d) => d,
+                Some(d) if d.is_finite() && d > 0.0 => d,
+                Some(_) => return ToolCallResult::error("duration_beats must be finite and > 0.0"),
                 None => return ToolCallResult::error("Missing 'duration_beats'"),
             };
             let name = args.get("name").and_then(|v| v.as_str()).unwrap_or("Arrangement Clip");
@@ -1952,7 +2160,10 @@ pub fn call_tool(state: &mut DawState, name: &str, args: &Value) -> ToolCallResu
         }
         "timeline_add_automation" => {
             let track_id = match args.get("track_id").and_then(|v| v.as_u64()) {
-                Some(id) => id as usize,
+                Some(id) => match validate_track_id(id as usize) {
+                    Ok(v) => v,
+                    Err(e) => return e,
+                },
                 None => return ToolCallResult::error("Missing 'track_id'"),
             };
             let param_name = match args.get("parameter_name").and_then(|v| v.as_str()) {
@@ -1965,7 +2176,10 @@ pub fn call_tool(state: &mut DawState, name: &str, args: &Value) -> ToolCallResu
                 for pt in arr {
                     let beat = pt.get("beat").and_then(|v| v.as_f64()).unwrap_or(0.0);
                     let val = pt.get("value").and_then(|v| v.as_f64()).unwrap_or(0.0) as f32;
-                    lane.add_point(AutomationPoint::linear(beat, val));
+                    if !beat.is_finite() || !val.is_finite() {
+                        return ToolCallResult::error("Automation point beat and value must be finite");
+                    }
+                    lane.add_point(AutomationPoint::linear(beat.max(0.0), val));
                 }
             }
 
@@ -2128,7 +2342,13 @@ pub fn call_tool(state: &mut DawState, name: &str, args: &Value) -> ToolCallResu
             let manifest = supervisor.scan_all();
             if let Some(out_path) = args.get("output_path").and_then(|v| v.as_str()) {
                 let resolved = expand_tilde_path(out_path);
-                let _ = manifest.save_to_file(&resolved);
+                if let Err(e) = manifest.save_to_file(&resolved) {
+                    return ToolCallResult::error(format!(
+                        "Failed saving plugin scan manifest to {}: {}",
+                        resolved.display(),
+                        e
+                    ));
+                }
             }
             ToolCallResult::json(&json!({
                 "total_scanned": manifest.plugins.len(),
@@ -2138,8 +2358,18 @@ pub fn call_tool(state: &mut DawState, name: &str, args: &Value) -> ToolCallResu
             }))
         }
         "bounce_wav" | "render_bounce_wav" => {
-            let dur = args.get("duration_seconds").and_then(|v| v.as_f64()).unwrap_or(4.5).clamp(1.0, 300.0);
-            let start_beat = args.get("start_beat").and_then(|v| v.as_f64()).unwrap_or(0.0).max(0.0);
+            let dur = args.get("duration_seconds").and_then(|v| v.as_f64()).unwrap_or(4.5);
+            if !dur.is_finite() || dur <= 0.0 || dur > 3600.0 {
+                return ToolCallResult::error(format!(
+                    "duration_seconds {} out of valid range (0.0..=3600.0]",
+                    dur
+                ));
+            }
+            let dur = dur.clamp(1.0, 3600.0);
+            let start_beat = args.get("start_beat").and_then(|v| v.as_f64()).unwrap_or(0.0);
+            if !start_beat.is_finite() || start_beat < 0.0 {
+                return ToolCallResult::error(format!("Invalid start_beat: {}", start_beat));
+            }
             let out_path = args
                 .get("output_path")
                 .and_then(|v| v.as_str())
@@ -2170,7 +2400,7 @@ pub fn call_tool(state: &mut DawState, name: &str, args: &Value) -> ToolCallResu
                 }
             } else {
                 let renderer = DemoArrangementRenderer::new(state.sample_rate, state.bpm.max(60.0));
-                let samples = renderer.render_demo_seconds(dur);
+                let samples = renderer.render_demo_window(start_beat, dur);
                 let write_res = if bit_depth == 32 {
                     WavWriter::write_wav_32bit_float(&out_path, state.sample_rate as u32, 2, &samples)
                 } else {
@@ -2235,17 +2465,43 @@ pub fn call_tool(state: &mut DawState, name: &str, args: &Value) -> ToolCallResu
         // --- High-Level Agentic Music Composition Generators ---
         "generate_chord_progression_clip" => {
             let track_id = match args.get("track_id").and_then(|v| v.as_u64()) {
-                Some(id) => id as usize,
+                Some(id) => match validate_track_id(id as usize) {
+                    Ok(v) => v,
+                    Err(e) => return e,
+                },
                 None => return ToolCallResult::error("Missing 'track_id'"),
             };
             let slot_id = match args.get("slot_id").and_then(|v| v.as_u64()) {
-                Some(id) => id as usize,
+                Some(id) => match validate_slot_id(id as usize) {
+                    Ok(v) => v,
+                    Err(e) => return e,
+                },
                 None => return ToolCallResult::error("Missing 'slot_id'"),
             };
             let key_str = args.get("key").and_then(|v| v.as_str()).unwrap_or("C");
             let scale_str = args.get("scale").and_then(|v| v.as_str()).unwrap_or("Minor");
             let prog_str = args.get("progression").and_then(|v| v.as_str()).unwrap_or("i-VI-III-VII");
             let voicing = args.get("voicing").and_then(|v| v.as_str()).unwrap_or("close");
+            let bars_override = match args.get("bars") {
+                Some(v) => {
+                    let b = match v.as_f64() {
+                        Some(val) if val.is_finite() && val > 0.0 && val <= MAX_TOTAL_BARS as f64 => val,
+                        _ => {
+                            return ToolCallResult::error(format!(
+                                "bars out of valid range (0.0..={}]",
+                                MAX_TOTAL_BARS
+                            ))
+                        }
+                    };
+                    Some(b)
+                }
+                None => None,
+            };
+            let humanize_raw = args.get("humanize").and_then(|v| v.as_f64()).unwrap_or(0.0);
+            if !humanize_raw.is_finite() {
+                return ToolCallResult::error("Invalid non-finite 'humanize' parameter");
+            }
+            let humanize = humanize_raw.clamp(0.0, 1.0);
             let clip_name = args.get("name").and_then(|v| v.as_str()).unwrap_or("Chords");
 
             let root_pc = parse_pitch_class(key_str).unwrap_or(0);
@@ -2253,16 +2509,33 @@ pub fn call_tool(state: &mut DawState, name: &str, args: &Value) -> ToolCallResu
 
             let tokens: Vec<&str> = prog_str.split(&['-', ' ', ','][..]).filter(|s| !s.is_empty()).collect();
             let chord_count = tokens.len().max(1);
-            let beats_per_chord = 4.0;
-            let total_beats = (chord_count as f64) * beats_per_chord;
+            let total_beats = bars_override
+                .map(|b| (b * 4.0).max(0.25))
+                .unwrap_or((chord_count as f64) * 4.0);
+            let beats_per_chord = total_beats / (chord_count as f64);
 
             let mut notes = Vec::new();
             for (i, token) in tokens.iter().enumerate() {
                 let start_beat = i as f64 * beats_per_chord;
                 let step = parse_roman_degree(token).map(|(s, _)| s).unwrap_or(i % intervals.len());
                 let pitches = build_chord_notes(root_pc, intervals, step, voicing, 3);
-                for p in pitches {
-                    notes.push(MidiNote::new(p, 100, start_beat, beats_per_chord * 0.95));
+                for (note_idx, p) in pitches.into_iter().enumerate() {
+                    let vel_jitter = if humanize > 0.0 {
+                        let phase = ((i * 19 + note_idx * 31) % 25) as i32 - 12;
+                        (phase as f64 * humanize).round() as i32
+                    } else {
+                        0
+                    };
+                    let vel = (100 + vel_jitter).clamp(1, 127) as u8;
+                    let t_offset = if humanize > 0.0 {
+                        let phase = ((i * 13 + note_idx * 23) % 100) as f64 / 100.0 - 0.5;
+                        phase * 0.025 * humanize
+                    } else {
+                        0.0
+                    };
+                    let t = (start_beat + t_offset).clamp(0.0, (total_beats - 0.05).max(0.0));
+                    let dur = (beats_per_chord * 0.95).min((total_beats - t).max(0.05));
+                    notes.push(MidiNote::new(p, vel, t, dur));
                 }
             }
 
@@ -2306,17 +2579,25 @@ pub fn call_tool(state: &mut DawState, name: &str, args: &Value) -> ToolCallResu
                 "slot_id": slot_id,
                 "clip_name": clip_name,
                 "total_beats": total_beats,
+                "bars": total_beats / 4.0,
+                "humanize": humanize,
                 "chord_count": chord_count,
                 "note_events": notes.len()
             }))
         }
         "generate_bassline_clip" => {
             let track_id = match args.get("track_id").and_then(|v| v.as_u64()) {
-                Some(id) => id as usize,
+                Some(id) => match validate_track_id(id as usize) {
+                    Ok(v) => v,
+                    Err(e) => return e,
+                },
                 None => return ToolCallResult::error("Missing 'track_id'"),
             };
             let slot_id = match args.get("slot_id").and_then(|v| v.as_u64()) {
-                Some(id) => id as usize,
+                Some(id) => match validate_slot_id(id as usize) {
+                    Ok(v) => v,
+                    Err(e) => return e,
+                },
                 None => return ToolCallResult::error("Missing 'slot_id'"),
             };
             let key_str = args.get("key").and_then(|v| v.as_str()).unwrap_or("F");
@@ -2324,12 +2605,23 @@ pub fn call_tool(state: &mut DawState, name: &str, args: &Value) -> ToolCallResu
             let prog_str = args.get("progression").and_then(|v| v.as_str()).unwrap_or("i-i-VI-VII");
             let rhythm = args.get("rhythm_pattern").and_then(|v| v.as_str()).unwrap_or("driving_8ths");
             let octave = args.get("octave").and_then(|v| v.as_i64()).unwrap_or(2).clamp(0, 9);
-            let bars_override = args.get("bars").and_then(|v| v.as_u64()).map(|b| b.max(1) as usize);
-            let humanize = args
-                .get("humanize")
-                .and_then(|v| v.as_f64())
-                .unwrap_or(0.0)
-                .clamp(0.0, 1.0);
+            let bars_override = match args.get("bars") {
+                Some(v) => match v.as_u64() {
+                    Some(b) if b >= 1 && (b as usize) <= MAX_TOTAL_BARS => Some(b as usize),
+                    _ => {
+                        return ToolCallResult::error(format!(
+                            "bars out of valid range [1..={}]",
+                            MAX_TOTAL_BARS
+                        ))
+                    }
+                },
+                None => None,
+            };
+            let humanize_raw = args.get("humanize").and_then(|v| v.as_f64()).unwrap_or(0.0);
+            if !humanize_raw.is_finite() {
+                return ToolCallResult::error("Invalid non-finite 'humanize' parameter");
+            }
+            let humanize = humanize_raw.clamp(0.0, 1.0);
             let clip_name = args.get("name").and_then(|v| v.as_str()).unwrap_or("Bassline");
 
             let root_pc = parse_pitch_class(key_str).unwrap_or(5);
@@ -2448,11 +2740,17 @@ pub fn call_tool(state: &mut DawState, name: &str, args: &Value) -> ToolCallResu
         }
         "generate_arpeggio_clip" => {
             let track_id = match args.get("track_id").and_then(|v| v.as_u64()) {
-                Some(id) => id as usize,
+                Some(id) => match validate_track_id(id as usize) {
+                    Ok(v) => v,
+                    Err(e) => return e,
+                },
                 None => return ToolCallResult::error("Missing 'track_id'"),
             };
             let slot_id = match args.get("slot_id").and_then(|v| v.as_u64()) {
-                Some(id) => id as usize,
+                Some(id) => match validate_slot_id(id as usize) {
+                    Ok(v) => v,
+                    Err(e) => return e,
+                },
                 None => return ToolCallResult::error("Missing 'slot_id'"),
             };
             let key_str = args.get("key").and_then(|v| v.as_str()).unwrap_or("A");
@@ -2462,7 +2760,18 @@ pub fn call_tool(state: &mut DawState, name: &str, args: &Value) -> ToolCallResu
             let direction = args.get("direction").and_then(|v| v.as_str()).unwrap_or("up");
             let octaves = args.get("octaves").and_then(|v| v.as_u64()).unwrap_or(2).clamp(1, 3) as usize;
             let gate = args.get("gate").and_then(|v| v.as_f64()).unwrap_or(0.85).clamp(0.1, 1.0);
-            let bars_override = args.get("bars").and_then(|v| v.as_u64()).map(|b| b.max(1) as usize);
+            let bars_override = match args.get("bars") {
+                Some(v) => match v.as_u64() {
+                    Some(b) if b >= 1 && (b as usize) <= MAX_TOTAL_BARS => Some(b as usize),
+                    _ => {
+                        return ToolCallResult::error(format!(
+                            "bars out of valid range [1..={}]",
+                            MAX_TOTAL_BARS
+                        ))
+                    }
+                },
+                None => None,
+            };
             let clip_name = args.get("name").and_then(|v| v.as_str()).unwrap_or("Arp");
 
             let step_dur = match rate_str.trim() {
@@ -2556,11 +2865,17 @@ pub fn call_tool(state: &mut DawState, name: &str, args: &Value) -> ToolCallResu
         }
         "generate_euclidean_drum_clip" => {
             let track_id = match args.get("track_id").and_then(|v| v.as_u64()) {
-                Some(id) => id as usize,
+                Some(id) => match validate_track_id(id as usize) {
+                    Ok(v) => v,
+                    Err(e) => return e,
+                },
                 None => return ToolCallResult::error("Missing 'track_id'"),
             };
             let slot_id = match args.get("slot_id").and_then(|v| v.as_u64()) {
-                Some(id) => id as usize,
+                Some(id) => match validate_slot_id(id as usize) {
+                    Ok(v) => v,
+                    Err(e) => return e,
+                },
                 None => return ToolCallResult::error("Missing 'slot_id'"),
             };
             let hits = match args.get("hits").and_then(|v| v.as_u64()) {
@@ -2568,7 +2883,10 @@ pub fn call_tool(state: &mut DawState, name: &str, args: &Value) -> ToolCallResu
                 None => return ToolCallResult::error("Missing 'hits'"),
             };
             let steps = args.get("steps").and_then(|v| v.as_u64()).unwrap_or(16) as usize;
-            let pad_idx = args.get("pad_index").and_then(|v| v.as_u64()).unwrap_or(6) as u8;
+            if steps == 0 || steps > 128 {
+                return ToolCallResult::error("steps must be in [1..=128]");
+            }
+            let pad_idx = args.get("pad_index").and_then(|v| v.as_u64()).unwrap_or(6).min(15) as u8;
             let accent_first = args.get("accent_first").and_then(|v| v.as_bool()).unwrap_or(true);
             let clip_name = args.get("name").and_then(|v| v.as_str()).unwrap_or("Euclidean Rhythm");
 
@@ -2612,17 +2930,31 @@ pub fn call_tool(state: &mut DawState, name: &str, args: &Value) -> ToolCallResu
         }
         "generate_drum_groove_clip" => {
             let track_id = match args.get("track_id").and_then(|v| v.as_u64()) {
-                Some(id) => id as usize,
+                Some(id) => match validate_track_id(id as usize) {
+                    Ok(v) => v,
+                    Err(e) => return e,
+                },
                 None => return ToolCallResult::error("Missing 'track_id'"),
             };
             let slot_id = match args.get("slot_id").and_then(|v| v.as_u64()) {
-                Some(id) => id as usize,
+                Some(id) => match validate_slot_id(id as usize) {
+                    Ok(v) => v,
+                    Err(e) => return e,
+                },
                 None => return ToolCallResult::error("Missing 'slot_id'"),
             };
             let style = args.get("style").and_then(|v| v.as_str()).unwrap_or("house_909");
-            let tempo = args.get("tempo").and_then(|v| v.as_f64()).unwrap_or(state.bpm);
-            let swing = args.get("swing").and_then(|v| v.as_f64()).unwrap_or(state.swing as f64) as f32;
-            let complexity = args.get("complexity").and_then(|v| v.as_f64()).unwrap_or(0.5) as f32;
+            let tempo = match validate_bpm(args.get("tempo").and_then(|v| v.as_f64()).unwrap_or(state.bpm)) {
+                Ok(b) => b,
+                Err(e) => return e,
+            };
+            let swing_raw = args.get("swing").and_then(|v| v.as_f64()).unwrap_or(state.swing as f64);
+            let complexity_raw = args.get("complexity").and_then(|v| v.as_f64()).unwrap_or(0.5);
+            if !swing_raw.is_finite() || !complexity_raw.is_finite() {
+                return ToolCallResult::error("swing and complexity must be finite numbers");
+            }
+            let swing = (swing_raw as f32).clamp(0.0, 1.0);
+            let complexity = (complexity_raw as f32).clamp(0.0, 1.0);
             let clip_name = args.get("name").and_then(|v| v.as_str()).unwrap_or("909 Groove");
 
             let drum_pat = generate_drum_groove(style, tempo, swing, complexity);
@@ -2650,8 +2982,19 @@ pub fn call_tool(state: &mut DawState, name: &str, args: &Value) -> ToolCallResu
         "build_song_arrangement" => {
             let genre = args.get("genre").and_then(|v| v.as_str()).unwrap_or("techno");
             let key = args.get("key").and_then(|v| v.as_str()).unwrap_or("Fm");
-            let bpm = args.get("bpm").and_then(|v| v.as_f64()).unwrap_or(126.0);
-            let total_bars = args.get("total_bars").and_then(|v| v.as_u64()).unwrap_or(32).max(4) as usize;
+            let bpm_raw = args.get("bpm").and_then(|v| v.as_f64()).unwrap_or(126.0);
+            let bpm = match validate_bpm(bpm_raw) {
+                Ok(b) => b,
+                Err(e) => return e,
+            };
+            let raw_bars = args.get("total_bars").and_then(|v| v.as_u64()).unwrap_or(32);
+            if raw_bars == 0 || (raw_bars as usize) > MAX_TOTAL_BARS {
+                return ToolCallResult::error(format!(
+                    "total_bars {} out of valid range [1..={}]",
+                    raw_bars, MAX_TOTAL_BARS
+                ));
+            }
+            let total_bars = (raw_bars as usize).max(4);
 
             state.bpm = bpm;
             state.project.transport.bpm = bpm;
@@ -2675,7 +3018,7 @@ pub fn call_tool(state: &mut DawState, name: &str, args: &Value) -> ToolCallResu
                 "house" => "house_909",
                 "dnb" | "drum_and_bass" | "drum & bass" => "dnb",
                 "hiphop" | "hip-hop" | "hip_hop" => "hiphop",
-                _ => "techno_909",
+                _ => "techno_peak",
             };
 
             // Ensure project tracks contain Lead Synth (0), 909 Drums (1), Sub Bass (2)
@@ -2763,8 +3106,8 @@ pub fn call_tool(state: &mut DawState, name: &str, args: &Value) -> ToolCallResu
 
                 let mut drum_pat = generate_drum_groove(drum_style, bpm, state.swing, complexity);
                 if s == 0 {
-                    // Intro: strip snare/clap density while keeping kick/hat pulse
-                    drum_pat.tracks[2].steps.iter_mut().for_each(|st| st.active = false);
+                    // Intro: strip clap density (pad 6) while keeping kick/hat pulse
+                    drum_pat.tracks[6].steps.iter_mut().for_each(|st| st.active = false);
                 }
 
                 let synth_clip = ArrangementClip::new(
@@ -2944,7 +3287,10 @@ pub fn call_tool(state: &mut DawState, name: &str, args: &Value) -> ToolCallResu
         // --- Group 2 (Extra): Devices & Chains ---
         "device_add_to_track" => {
             let track_id = match args.get("track_id").and_then(|v| v.as_u64()) {
-                Some(id) => id as u32,
+                Some(id) => match validate_track_id(id as usize) {
+                    Ok(v) => v as u32,
+                    Err(e) => return e,
+                },
                 None => return ToolCallResult::error("Missing 'track_id' parameter"),
             };
             let dev_type = match args.get("device_type").or_else(|| args.get("device_name")).and_then(|v| v.as_str()) {
@@ -2954,6 +3300,7 @@ pub fn call_tool(state: &mut DawState, name: &str, args: &Value) -> ToolCallResu
             let pos = args.get("position").and_then(|v| v.as_u64()).map(|p| p as usize);
             match instantiate_managed_device(dev_type, state.sample_rate) {
                 Ok((dev, handle)) => {
+                    let bpm = state.bpm;
                     let cat = handle.category();
                     let chain = state.device_chains.entry(track_id).or_insert_with(|| {
                         let mut c = DeviceChain::new();
@@ -2968,7 +3315,7 @@ pub fn call_tool(state: &mut DawState, name: &str, args: &Value) -> ToolCallResu
                         p_trk.insert_fx = handles
                             .audio_effects
                             .iter()
-                            .filter_map(|h| h.to_insert_effect_config())
+                            .filter_map(|h| h.to_insert_effect_config(bpm))
                             .collect();
                     }
 
@@ -2985,13 +3332,17 @@ pub fn call_tool(state: &mut DawState, name: &str, args: &Value) -> ToolCallResu
         }
         "device_remove_from_track" => {
             let track_id = match args.get("track_id").and_then(|v| v.as_u64()) {
-                Some(id) => id as u32,
+                Some(id) => match validate_track_id(id as usize) {
+                    Ok(v) => v as u32,
+                    Err(e) => return e,
+                },
                 None => return ToolCallResult::error("Missing 'track_id' parameter"),
             };
             let dev_index = match args.get("device_index").and_then(|v| v.as_u64()) {
                 Some(idx) => idx as usize,
                 None => return ToolCallResult::error("Missing 'device_index' parameter"),
             };
+            let bpm = state.bpm;
             let chain = state.device_chains.entry(track_id).or_default();
             if dev_index >= chain.device_count() {
                 return ToolCallResult::error(format!(
@@ -3017,7 +3368,7 @@ pub fn call_tool(state: &mut DawState, name: &str, args: &Value) -> ToolCallResu
                     p_trk.insert_fx = handles
                         .audio_effects
                         .iter()
-                        .filter_map(|h| h.to_insert_effect_config())
+                        .filter_map(|h| h.to_insert_effect_config(bpm))
                         .collect();
                 }
             }
@@ -3030,7 +3381,10 @@ pub fn call_tool(state: &mut DawState, name: &str, args: &Value) -> ToolCallResu
         }
         "device_reorder" => {
             let track_id = match args.get("track_id").and_then(|v| v.as_u64()) {
-                Some(id) => id as u32,
+                Some(id) => match validate_track_id(id as usize) {
+                    Ok(v) => v as u32,
+                    Err(e) => return e,
+                },
                 None => return ToolCallResult::error("Missing 'track_id' parameter"),
             };
             let from_index = match args.get("from_index").and_then(|v| v.as_u64()) {
@@ -3041,37 +3395,35 @@ pub fn call_tool(state: &mut DawState, name: &str, args: &Value) -> ToolCallResu
                 Some(idx) => idx as usize,
                 None => return ToolCallResult::error("Missing 'to_index' parameter"),
             };
+            let bpm = state.bpm;
             let chain = state.device_chains.entry(track_id).or_default();
-            let audio_ok = chain.reorder_audio_effects(from_index, to_index);
-            let midi_ok = !audio_ok && chain.reorder_midi_effects(from_index, to_index);
-            let ok = audio_ok || midi_ok;
-            if ok {
-                if let Some(handles) = state.device_handles.get_mut(&track_id) {
-                    if audio_ok {
-                        handles.reorder_audio(from_index, to_index);
-                    } else {
-                        handles.reorder_midi(from_index, to_index);
-                    }
-                    if let Some(p_trk) = state.project.tracks.get_mut(track_id as usize) {
-                        p_trk.insert_fx = handles
-                            .audio_effects
-                            .iter()
-                            .filter_map(|h| h.to_insert_effect_config())
-                            .collect();
-                    }
+            let handles_opt = state.device_handles.get_mut(&track_id);
+            if let Err(err) = reorder_device_chain_global(chain, handles_opt, from_index, to_index) {
+                return ToolCallResult::error(err);
+            }
+            if let Some(handles) = state.device_handles.get(&track_id) {
+                if let Some(p_trk) = state.project.tracks.get_mut(track_id as usize) {
+                    p_trk.insert_fx = handles
+                        .audio_effects
+                        .iter()
+                        .filter_map(|h| h.to_insert_effect_config(bpm))
+                        .collect();
                 }
             }
             ToolCallResult::json(&json!({
-                "status": if ok { "device_reordered" } else { "reorder_out_of_bounds" },
+                "status": "device_reordered",
                 "track_id": track_id,
                 "from_index": from_index,
                 "to_index": to_index,
-                "success": ok
+                "success": true
             }))
         }
         "device_set_param" => {
             let track_id = match args.get("track_id").and_then(|v| v.as_u64()) {
-                Some(id) => id as u32,
+                Some(id) => match validate_track_id(id as usize) {
+                    Ok(v) => v as u32,
+                    Err(e) => return e,
+                },
                 None => return ToolCallResult::error("Missing 'track_id' parameter"),
             };
             let device_index = match args.get("device_index").and_then(|v| v.as_u64()) {
@@ -3088,7 +3440,8 @@ pub fn call_tool(state: &mut DawState, name: &str, args: &Value) -> ToolCallResu
                 _ => return ToolCallResult::error("Missing 'param' parameter"),
             };
             let value = match args.get("value").and_then(|v| v.as_f64()) {
-                Some(val) => val as f32,
+                Some(val) if val.is_finite() => val as f32,
+                Some(_) => return ToolCallResult::error("Non-finite 'value' parameter"),
                 None => return ToolCallResult::error("Missing 'value' parameter"),
             };
 
@@ -3106,7 +3459,10 @@ pub fn call_tool(state: &mut DawState, name: &str, args: &Value) -> ToolCallResu
         }
         "device_get_chain" => {
             let track_id = match args.get("track_id").and_then(|v| v.as_u64()) {
-                Some(id) => id as u32,
+                Some(id) => match validate_track_id(id as usize) {
+                    Ok(v) => v as u32,
+                    Err(e) => return e,
+                },
                 None => return ToolCallResult::error("Missing 'track_id' parameter"),
             };
             let chain = state.device_chains.entry(track_id).or_default();
@@ -3117,16 +3473,47 @@ pub fn call_tool(state: &mut DawState, name: &str, args: &Value) -> ToolCallResu
         // --- Group 3 (Extra): Synths, Drums & Simpler ---
         "simpler_slice_to_drum_rack" => {
             let track_id = match args.get("track_id").and_then(|v| v.as_u64()) {
-                Some(id) => id as u32,
+                Some(id) => match validate_track_id(id as usize) {
+                    Ok(v) => v as u32,
+                    Err(e) => return e,
+                },
                 None => return ToolCallResult::error("Missing 'track_id' parameter"),
             };
+            let simpler_device_index = args
+                .get("simpler_device_index")
+                .and_then(|v| v.as_u64())
+                .map(|i| i as usize);
 
             // Inspect any Simpler device on the source track, or fallback to a warped audio clip on the source track
             let mut source_samples: Option<(std::sync::Arc<[f32]>, u32, u8, Vec<usize>, String)> = None;
 
             if let Some(handles) = state.device_handles.get(&track_id) {
-                if let Some(ManagedDeviceHandle::Simpler(simpler_arc)) = &handles.instrument {
-                    let mut simpler = simpler_arc.lock().unwrap();
+                let simpler_opt = if let Some(dev_idx) = simpler_device_index {
+                    match handles.get_at(dev_idx) {
+                        Some(ManagedDeviceHandle::Simpler(simpler_arc)) => Some(simpler_arc),
+                        Some(other) => {
+                            return ToolCallResult::error(format!(
+                                "Device index {} on track {} is '{}', expected 'Simpler'",
+                                dev_idx,
+                                track_id,
+                                other.name()
+                            ));
+                        }
+                        None => {
+                            return ToolCallResult::error(format!(
+                                "Device index {} out of range on track {}",
+                                dev_idx, track_id
+                            ));
+                        }
+                    }
+                } else if let Some(ManagedDeviceHandle::Simpler(simpler_arc)) = &handles.instrument {
+                    Some(simpler_arc)
+                } else {
+                    None
+                };
+
+                if let Some(simpler_arc) = simpler_opt {
+                    let mut simpler = simpler_arc.lock().unwrap_or_else(|e| e.into_inner());
                     if simpler.sample_data.is_some() && simpler.slices.is_empty() {
                         simpler.recalculate_slices();
                     }
@@ -3214,7 +3601,7 @@ pub fn call_tool(state: &mut DawState, name: &str, args: &Value) -> ToolCallResu
 
             let slice_count = slices.len();
             if let ManagedDeviceHandle::DrumRack(ref rack_arc) = handle {
-                let mut rack = rack_arc.lock().unwrap();
+                let mut rack = rack_arc.lock().unwrap_or_else(|e| e.into_inner());
                 for (i, &start_idx) in slices.iter().enumerate() {
                     let end_idx = slices
                         .get(i + 1)
@@ -3314,11 +3701,17 @@ pub fn call_tool(state: &mut DawState, name: &str, args: &Value) -> ToolCallResu
         // --- Group 6: Live 12 MIDI Generators & Transformers ---
         "midi_transform_clip" => {
             let track_id = match args.get("track_id").and_then(|v| v.as_u64()) {
-                Some(id) => id as usize,
+                Some(id) => match validate_track_id(id as usize) {
+                    Ok(v) => v,
+                    Err(e) => return e,
+                },
                 None => return ToolCallResult::error("Missing 'track_id' parameter"),
             };
             let slot_id = match args.get("slot_id").and_then(|v| v.as_u64()) {
-                Some(id) => id as usize,
+                Some(id) => match validate_slot_id(id as usize) {
+                    Ok(v) => v,
+                    Err(e) => return e,
+                },
                 None => return ToolCallResult::error("Missing 'slot_id' parameter"),
             };
             let transform = match args.get("transform").and_then(|v| v.as_str()) {
@@ -3326,6 +3719,7 @@ pub fn call_tool(state: &mut DawState, name: &str, args: &Value) -> ToolCallResu
                 None => return ToolCallResult::error("Missing 'transform' parameter"),
             };
             let params = args.get("params").cloned().unwrap_or(json!({}));
+            let lock = current_scale_lock(state);
 
             while state.matrix.tracks.len() <= track_id {
                 let tid = state.matrix.tracks.len() as u32;
@@ -3352,7 +3746,6 @@ pub fn call_tool(state: &mut DawState, name: &str, args: &Value) -> ToolCallResu
                     transform_arpeggiate(&mut pattern, step, downwards);
                 }
                 "connect" => {
-                    let lock = ScaleLock::dorian(state.scale.root);
                     transform_connect(&mut pattern, lock, 0.5);
                 }
                 "ornament" => {
@@ -3394,11 +3787,17 @@ pub fn call_tool(state: &mut DawState, name: &str, args: &Value) -> ToolCallResu
         }
         "midi_generate_clip" => {
             let track_id = match args.get("track_id").and_then(|v| v.as_u64()) {
-                Some(id) => id as usize,
+                Some(id) => match validate_track_id(id as usize) {
+                    Ok(v) => v,
+                    Err(e) => return e,
+                },
                 None => return ToolCallResult::error("Missing 'track_id' parameter"),
             };
             let slot_id = match args.get("slot_id").and_then(|v| v.as_u64()) {
-                Some(id) => id as usize,
+                Some(id) => match validate_slot_id(id as usize) {
+                    Ok(v) => v,
+                    Err(e) => return e,
+                },
                 None => return ToolCallResult::error("Missing 'slot_id' parameter"),
             };
             let generator = match args.get("generator").and_then(|v| v.as_str()) {
@@ -3406,7 +3805,7 @@ pub fn call_tool(state: &mut DawState, name: &str, args: &Value) -> ToolCallResu
                 None => return ToolCallResult::error("Missing 'generator' parameter"),
             };
             let params = args.get("params").cloned().unwrap_or(json!({}));
-            let lock = ScaleLock::dorian(state.scale.root);
+            let lock = current_scale_lock(state);
 
             let pattern = match generator.as_str() {
                 "seed" => {
@@ -3452,6 +3851,9 @@ pub fn call_tool(state: &mut DawState, name: &str, args: &Value) -> ToolCallResu
                 "euclidean" => {
                     let hits = params.get("hits").and_then(|v| v.as_u64()).unwrap_or(5) as usize;
                     let steps = params.get("steps").and_then(|v| v.as_u64()).unwrap_or(16) as usize;
+                    if steps == 0 || steps > 256 {
+                        return ToolCallResult::error("euclidean 'steps' must be in [1..=256]");
+                    }
                     generate_euclidean(hits, steps, 0, 60, 0.25, 100)
                 }
                 _ => return ToolCallResult::error(format!("Generator '{}' not supported", generator)),
@@ -3481,11 +3883,17 @@ pub fn call_tool(state: &mut DawState, name: &str, args: &Value) -> ToolCallResu
         // --- Group 7: Audio Clips & Warping Engine ---
         "audio_clip_create_warped" => {
             let track_id = match args.get("track_id").and_then(|v| v.as_u64()) {
-                Some(id) => id as u32,
+                Some(id) => match validate_track_id(id as usize) {
+                    Ok(v) => v as u32,
+                    Err(e) => return e,
+                },
                 None => return ToolCallResult::error("Missing 'track_id' parameter"),
             };
             let slot_id = match args.get("slot_id").and_then(|v| v.as_u64()) {
-                Some(id) => id as u32,
+                Some(id) => match validate_slot_id(id as usize) {
+                    Ok(v) => v as u32,
+                    Err(e) => return e,
+                },
                 None => return ToolCallResult::error("Missing 'slot_id' parameter"),
             };
             let sample_path = match args.get("sample_path").and_then(|v| v.as_str()) {
@@ -3804,7 +4212,10 @@ pub fn call_tool(state: &mut DawState, name: &str, args: &Value) -> ToolCallResu
         }
         "take_lane_comp_region" => {
             let track_id = match args.get("track_id").and_then(|v| v.as_u64()) {
-                Some(id) => id as usize,
+                Some(id) => match validate_track_id(id as usize) {
+                    Ok(v) => v,
+                    Err(e) => return e,
+                },
                 None => return ToolCallResult::error("Missing 'track_id' parameter"),
             };
             let take_lane_idx = match args.get("take_lane_index").and_then(|v| v.as_u64()) {
@@ -3812,11 +4223,13 @@ pub fn call_tool(state: &mut DawState, name: &str, args: &Value) -> ToolCallResu
                 None => return ToolCallResult::error("Missing 'take_lane_index' parameter"),
             };
             let start_beat = match args.get("start_beat").and_then(|v| v.as_f64()) {
-                Some(s) => s,
+                Some(s) if s.is_finite() => s,
+                Some(_) => return ToolCallResult::error("Non-finite 'start_beat' parameter"),
                 None => return ToolCallResult::error("Missing 'start_beat' parameter"),
             };
             let end_beat = match args.get("end_beat").and_then(|v| v.as_f64()) {
-                Some(e) => e,
+                Some(e) if e.is_finite() => e,
+                Some(_) => return ToolCallResult::error("Non-finite 'end_beat' parameter"),
                 None => return ToolCallResult::error("Missing 'end_beat' parameter"),
             };
 
@@ -3850,11 +4263,14 @@ pub fn call_tool(state: &mut DawState, name: &str, args: &Value) -> ToolCallResu
                 .comp_region_to_main(&mut clips, lane_id, start_beat, end_beat, 5.0);
             let slices_comped = match comp_res {
                 Ok(n) => {
-                    trk.clips = clips;
+                    trk.clips = clips.clone();
                     n
                 }
                 Err(e) => return ToolCallResult::error(e),
             };
+            if let Some(a_trk) = state.timeline.tracks.get_mut(track_id) {
+                a_trk.clips = clips;
+            }
 
             ToolCallResult::json(&json!({
                 "status": "region_comped",
@@ -3897,15 +4313,20 @@ pub fn call_tool(state: &mut DawState, name: &str, args: &Value) -> ToolCallResu
         }
         "mixer_set_send" => {
             let track_id = match args.get("track_id").and_then(|v| v.as_u64()) {
-                Some(id) => id as u32,
+                Some(id) => match validate_track_id(id as usize) {
+                    Ok(v) => v as u32,
+                    Err(e) => return e,
+                },
                 None => return ToolCallResult::error("Missing 'track_id' parameter"),
             };
             let send_index = match args.get("send_index").and_then(|v| v.as_u64()) {
-                Some(i) => i as usize,
+                Some(i) if (i as usize) <= 32 => i as usize,
+                Some(i) => return ToolCallResult::error(format!("send_index {} out of range [0..=32]", i)),
                 None => return ToolCallResult::error("Missing 'send_index' parameter"),
             };
             let level_db = match args.get("level_db").and_then(|v| v.as_f64()) {
-                Some(l) => l as f32,
+                Some(l) if l.is_finite() => l as f32,
+                Some(_) => return ToolCallResult::error("Non-finite 'level_db' parameter"),
                 None => return ToolCallResult::error("Missing 'level_db' parameter"),
             };
             let clamped = level_db.clamp(-70.0, 6.0);
@@ -3913,8 +4334,14 @@ pub fn call_tool(state: &mut DawState, name: &str, args: &Value) -> ToolCallResu
             if track_id as usize >= state.project.tracks.len() {
                 return ToolCallResult::error(format!("Track {} out of range", track_id));
             }
+            let ret_id = state
+                .custom_return_ids
+                .get(send_index)
+                .copied()
+                .or_else(|| state.track_manager.return_tracks.get(send_index).map(|r| r.id))
+                .unwrap_or(send_index as u32);
             if let Some(trk) = state.ensure_timeline_track_mut(track_id as usize) {
-                trk.set_send(send_index as u32, clamped, SendRoutingMode::PostFader);
+                trk.set_send(ret_id, clamped, SendRoutingMode::PostFader);
             }
             if let Some(p_trk) = state.project.tracks.get_mut(track_id as usize) {
                 p_trk.mixer.set_send_db(send_index, clamped);
@@ -3995,6 +4422,12 @@ pub fn call_tool(state: &mut DawState, name: &str, args: &Value) -> ToolCallResu
             ToolCallResult::json(&res)
         }
         "live12_create_midi_track" => {
+            if state.project.tracks.len() > MAX_TRACK_ID {
+                return ToolCallResult::error(format!(
+                    "Cannot exceed maximum track count ({})",
+                    MAX_TRACK_ID + 1
+                ));
+            }
             let index = args.get("index").and_then(|v| v.as_u64()).map(|i| i as usize);
             let lom_client = state.lom_client.clone();
             let res = lom_client.execute_with_fallback(
@@ -4004,21 +4437,9 @@ pub fn call_tool(state: &mut DawState, name: &str, args: &Value) -> ToolCallResu
                     let insert_at = index
                         .map(|i| i.min(state.project.tracks.len()))
                         .unwrap_or(state.project.tracks.len());
-                    let trk = TrackDefinition::new_synth(insert_at as u32, format!("MIDI Track {}", insert_at));
-                    state.project.tracks.insert(insert_at, trk);
-                    for (i, t) in state.project.tracks.iter_mut().enumerate() {
-                        t.id = i as u32;
-                    }
-                    let m_idx = insert_at.min(state.matrix.tracks.len());
-                    state.matrix.tracks.insert(
-                        m_idx,
-                        oxide_timeline::SessionTrack::new(m_idx as u32, format!("MIDI Track {}", m_idx), 8),
-                    );
-                    let tl_idx = insert_at.min(state.timeline.tracks.len());
-                    state.timeline.tracks.insert(
-                        tl_idx,
-                        oxide_timeline::ArrangementTrack::new(tl_idx as u32, format!("MIDI Track {}", tl_idx), "MidiSynth"),
-                    );
+                    let track_name = format!("MIDI Track {}", insert_at);
+                    let trk = TrackDefinition::new_synth(insert_at as u32, &track_name);
+                    insert_track_shifting_state(state, insert_at, trk, &track_name, "MidiSynth");
                     json!({
                         "index": insert_at,
                         "track_type": "MidiSynth",
@@ -4029,6 +4450,12 @@ pub fn call_tool(state: &mut DawState, name: &str, args: &Value) -> ToolCallResu
             ToolCallResult::json(&res)
         }
         "live12_create_audio_track" => {
+            if state.project.tracks.len() > MAX_TRACK_ID {
+                return ToolCallResult::error(format!(
+                    "Cannot exceed maximum track count ({})",
+                    MAX_TRACK_ID + 1
+                ));
+            }
             let index = args.get("index").and_then(|v| v.as_u64()).map(|i| i as usize);
             let lom_client = state.lom_client.clone();
             let res = lom_client.execute_with_fallback(
@@ -4038,21 +4465,9 @@ pub fn call_tool(state: &mut DawState, name: &str, args: &Value) -> ToolCallResu
                     let insert_at = index
                         .map(|i| i.min(state.project.tracks.len()))
                         .unwrap_or(state.project.tracks.len());
-                    let trk = TrackDefinition::new_audio(insert_at as u32, format!("Audio Track {}", insert_at));
-                    state.project.tracks.insert(insert_at, trk);
-                    for (i, t) in state.project.tracks.iter_mut().enumerate() {
-                        t.id = i as u32;
-                    }
-                    let m_idx = insert_at.min(state.matrix.tracks.len());
-                    state.matrix.tracks.insert(
-                        m_idx,
-                        oxide_timeline::SessionTrack::new(m_idx as u32, format!("Audio Track {}", m_idx), 8),
-                    );
-                    let tl_idx = insert_at.min(state.timeline.tracks.len());
-                    state.timeline.tracks.insert(
-                        tl_idx,
-                        oxide_timeline::ArrangementTrack::new(tl_idx as u32, format!("Audio Track {}", tl_idx), "Audio"),
-                    );
+                    let track_name = format!("Audio Track {}", insert_at);
+                    let trk = TrackDefinition::new_audio(insert_at as u32, &track_name);
+                    insert_track_shifting_state(state, insert_at, trk, &track_name, "Audio");
                     json!({
                         "index": insert_at,
                         "track_type": "Audio",
@@ -4155,9 +4570,22 @@ pub fn call_tool(state: &mut DawState, name: &str, args: &Value) -> ToolCallResu
             ToolCallResult::json(&res)
         }
         "live12_create_clip" => {
-            let track_index = args.get("track_index").and_then(|v| v.as_u64()).unwrap_or(0);
-            let slot_index = args.get("slot_index").and_then(|v| v.as_u64()).unwrap_or(0);
+            let track_index = match validate_track_id(args.get("track_index").and_then(|v| v.as_u64()).unwrap_or(0) as usize) {
+                Ok(v) => v as u64,
+                Err(e) => return e,
+            };
+            let slot_index = match validate_slot_id(args.get("slot_index").and_then(|v| v.as_u64()).unwrap_or(0) as usize) {
+                Ok(v) => v as u64,
+                Err(e) => return e,
+            };
             let length_beats = args.get("length_beats").and_then(|v| v.as_f64()).unwrap_or(4.0);
+            if !length_beats.is_finite() || length_beats <= 0.0 || length_beats > (MAX_TOTAL_BARS * 4) as f64 {
+                return ToolCallResult::error(format!(
+                    "length_beats {} out of valid range (0.0..={}]",
+                    length_beats,
+                    MAX_TOTAL_BARS * 4
+                ));
+            }
             let lom_client = state.lom_client.clone();
             let res = lom_client.execute_with_fallback(
                 "create_clip",
@@ -4179,8 +4607,14 @@ pub fn call_tool(state: &mut DawState, name: &str, args: &Value) -> ToolCallResu
             ToolCallResult::json(&res)
         }
         "live12_add_notes" => {
-            let track_index = args.get("track_index").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
-            let slot_index = args.get("slot_index").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
+            let track_index = match validate_track_id(args.get("track_index").and_then(|v| v.as_u64()).unwrap_or(0) as usize) {
+                Ok(v) => v,
+                Err(e) => return e,
+            };
+            let slot_index = match validate_slot_id(args.get("slot_index").and_then(|v| v.as_u64()).unwrap_or(0) as usize) {
+                Ok(v) => v,
+                Err(e) => return e,
+            };
             let notes = args.get("notes").cloned().unwrap_or(json!([]));
             let lom_client = state.lom_client.clone();
             let res = lom_client.execute_with_fallback(
@@ -4192,8 +4626,10 @@ pub fn call_tool(state: &mut DawState, name: &str, args: &Value) -> ToolCallResu
                         for item in arr {
                             let pitch = item.get("pitch").and_then(|v| v.as_u64()).unwrap_or(60).min(127) as u8;
                             let vel = item.get("velocity").and_then(|v| v.as_u64()).unwrap_or(100).clamp(1, 127) as u8;
-                            let start = item.get("start_beat").and_then(|v| v.as_f64()).unwrap_or(0.0).max(0.0);
-                            let dur = item.get("duration_beats").and_then(|v| v.as_f64()).unwrap_or(0.5).max(0.01);
+                            let raw_start = item.get("start_beat").and_then(|v| v.as_f64()).unwrap_or(0.0);
+                            let raw_dur = item.get("duration_beats").and_then(|v| v.as_f64()).unwrap_or(0.5);
+                            let start = if raw_start.is_finite() { raw_start.max(0.0) } else { 0.0 };
+                            let dur = if raw_dur.is_finite() { raw_dur.max(0.01) } else { 0.5 };
                             parsed_notes.push(MidiNote::new(pitch, vel, start, dur));
                         }
                     }
@@ -4256,7 +4692,10 @@ pub fn call_tool(state: &mut DawState, name: &str, args: &Value) -> ToolCallResu
             ToolCallResult::json(&res)
         }
         "live12_set_device_param" => {
-            let track_index = args.get("track_index").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
+            let track_index = match validate_track_id(args.get("track_index").and_then(|v| v.as_u64()).unwrap_or(0) as usize) {
+                Ok(v) => v as u32,
+                Err(e) => return e,
+            };
             let device_index = args.get("device_index").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
             let param_val = args
                 .get("param_index")
@@ -4267,14 +4706,25 @@ pub fn call_tool(state: &mut DawState, name: &str, args: &Value) -> ToolCallResu
                 Some(v) if v.is_u64() => v.as_u64().unwrap_or(0).to_string(),
                 _ => "0".to_string(),
             };
-            let value = args.get("value").and_then(|v| v.as_f64()).unwrap_or(0.0) as f32;
+            let param_index_json = if let Some(n) = param_val.and_then(|v| v.as_u64()) {
+                json!(n)
+            } else if let Ok(n) = param_key.trim().parse::<u64>() {
+                json!(n)
+            } else {
+                json!(param_key)
+            };
+            let value_raw = args.get("value").and_then(|v| v.as_f64()).unwrap_or(0.0);
+            if !value_raw.is_finite() {
+                return ToolCallResult::error("Non-finite 'value' parameter");
+            }
+            let value = value_raw as f32;
             let lom_client = state.lom_client.clone();
             let res = lom_client.execute_with_fallback(
                 "set_device_param",
                 json!({
                     "track_index": track_index,
                     "device_index": device_index,
-                    "param_index": param_key,
+                    "param_index": param_index_json,
                     "value": value
                 }),
                 || match set_track_device_param_helper(state, track_index, device_index, &param_key, value) {
@@ -4311,19 +4761,22 @@ pub fn call_tool(state: &mut DawState, name: &str, args: &Value) -> ToolCallResu
             ToolCallResult::json(&res)
         }
         "live12_set_tempo" => {
-            let bpm = match args.get("bpm").and_then(|v| v.as_f64()) {
+            let bpm_raw = match args.get("bpm").and_then(|v| v.as_f64()) {
                 Some(b) => b,
                 None => return ToolCallResult::error("Missing 'bpm' parameter"),
+            };
+            let bpm = match validate_bpm(bpm_raw) {
+                Ok(b) => b,
+                Err(e) => return e,
             };
             let lom_client = state.lom_client.clone();
             let res = lom_client.execute_with_fallback(
                 "set_tempo",
                 json!({ "bpm": bpm }),
                 || {
-                    let clamped = bpm.clamp(20.0, 999.0);
-                    state.bpm = clamped;
-                    state.project.transport.bpm = clamped;
-                    state.delay.set_tempo(clamped);
+                    state.bpm = bpm;
+                    state.project.transport.bpm = bpm;
+                    state.delay.set_tempo(bpm);
                     json!({ "tempo": state.bpm })
                 },
             );
@@ -4465,5 +4918,189 @@ mod tests {
         assert!(remix_dir.join("remix_other.wav").exists(), "remix_other.wav must exist");
 
         let _ = fs::remove_dir_all(&temp_dir);
+    }
+
+    #[test]
+    fn test_tools_reject_out_of_bounds_and_oom_inputs() {
+        let mut state = DawState::new();
+        assert!(call_tool(&mut state, "clip_create_midi", &json!({"track_id": 999999, "slot_id": 0, "notes": []})).is_error);
+        assert!(call_tool(&mut state, "clip_create_midi", &json!({"track_id": 0, "slot_id": 999999, "notes": []})).is_error);
+        assert!(call_tool(&mut state, "clip_create_midi", &json!({"track_id": 0, "slot_id": 0, "length_beats": 0.0, "notes": []})).is_error);
+        assert!(call_tool(&mut state, "clip_create_midi", &json!({"track_id": 0, "slot_id": 0, "notes": [{"pitch": 60, "start_beat": 0.0, "duration_beats": 0.0}]})).is_error);
+        assert!(call_tool(&mut state, "generate_chord_progression_clip", &json!({"track_id": 500, "slot_id": 0})).is_error);
+        assert!(call_tool(&mut state, "device_add_to_track", &json!({"track_id": 500, "device_type": "Echo"})).is_error);
+        assert!(call_tool(&mut state, "build_song_arrangement", &json!({"total_bars": 9999})).is_error);
+        assert!(call_tool(&mut state, "transport_set_bpm", &json!({"bpm": 5.0})).is_error);
+        assert!(call_tool(&mut state, "live12_set_tempo", &json!({"bpm": 1500.0})).is_error);
+    }
+
+    #[test]
+    fn test_live12_set_device_param_sends_integer_param_index() {
+        use std::io::{BufRead, BufReader, Write};
+        use std::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind ephemeral port");
+        let port = listener.local_addr().unwrap().port();
+        let captured = std::sync::Arc::new(std::sync::Mutex::new(Vec::<Value>::new()));
+        let captured_srv = std::sync::Arc::clone(&captured);
+
+        let handle = std::thread::spawn(move || {
+            for _ in 0..2 {
+                let (mut stream, _) = listener.accept().unwrap();
+                let mut reader = BufReader::new(stream.try_clone().unwrap());
+                let mut line = String::new();
+                reader.read_line(&mut line).unwrap();
+                let req: Value = serde_json::from_str(&line).unwrap();
+                captured_srv.lock().unwrap().push(req);
+                let resp = json!({"ok": true, "result": {"updated": true}}).to_string();
+                stream.write_all(format!("{}\n", resp).as_bytes()).unwrap();
+                stream.flush().unwrap();
+            }
+        });
+
+        let mut state = DawState::new();
+        state.lom_client.host = "127.0.0.1".to_string();
+        state.lom_client.port = port;
+
+        let res1 = call_tool(&mut state, "live12_set_device_param", &json!({
+            "track_index": 0, "device_index": 0, "param_index": 3, "value": 0.75
+        }));
+        assert!(!res1.is_error);
+
+        let res2 = call_tool(&mut state, "live12_set_device_param", &json!({
+            "track_index": 0, "device_index": 0, "param_index": "2", "value": 0.5
+        }));
+        assert!(!res2.is_error);
+
+        handle.join().unwrap();
+        let reqs = captured.lock().unwrap();
+        assert_eq!(reqs.len(), 2);
+        assert!(reqs[0]["params"]["param_index"].is_u64(), "numeric param_index must be JSON integer, got {:?}", reqs[0]["params"]);
+        assert_eq!(reqs[0]["params"]["param_index"].as_u64(), Some(3));
+        assert!(reqs[1]["params"]["param_index"].is_u64(), "numeric string param_index must be JSON integer, got {:?}", reqs[1]["params"]);
+        assert_eq!(reqs[1]["params"]["param_index"].as_u64(), Some(2));
+    }
+
+    #[test]
+    fn test_live12_create_tracks_shifts_indices_and_active_ids() {
+        let mut state = DawState::new();
+        state.active_synth_track_id = 0;
+        state.active_drum_track_id = 1;
+        state.mixer.tracks[0].set_volume_db(-5.5);
+        assert!(!call_tool(&mut state, "device_add_to_track", &json!({"track_id": 0, "device_type": "AutoFilter"})).is_error);
+        let dummy_clip = WarpedAudioClip::new("a.wav", 44100, 1, vec![0.1; 1024], 128.0);
+        state.audio_clips.insert((0, 2), dummy_clip);
+
+        let res = call_tool(&mut state, "live12_create_midi_track", &json!({"index": 0}));
+        assert!(!res.is_error);
+        assert_eq!(state.active_synth_track_id, 1);
+        assert_eq!(state.active_drum_track_id, 2);
+        assert!(state.device_handles.get(&0).is_none());
+        assert_eq!(state.device_handles.get(&1).map(|h| h.audio_effects.len()), Some(1));
+        assert!(state.audio_clips.contains_key(&(1, 2)));
+        assert!((state.mixer.tracks[1].volume_db - (-5.5)).abs() < 0.1);
+    }
+
+    #[test]
+    fn test_build_song_arrangement_uses_techno_peak_and_strips_clap_in_intro() {
+        let mut state = DawState::new();
+        let res = call_tool(&mut state, "build_song_arrangement", &json!({
+            "genre": "techno", "key": "Fm", "bpm": 134.0, "total_bars": 16
+        }));
+        assert!(!res.is_error, "build_song_arrangement failed: {:?}", res);
+
+        let drum_trk = &state.timeline.tracks[1];
+        assert_eq!(drum_trk.clips.len(), 4);
+        if let ClipPattern::Drum(ref intro_pat) = drum_trk.clips[0].pattern {
+            assert!(
+                intro_pat.tracks[6].steps.iter().all(|s| !s.active),
+                "Intro should strip Clap on pad 6"
+            );
+        } else {
+            panic!("Expected Drum pattern in intro");
+        }
+        if let ClipPattern::Drum(ref drop_pat) = drum_trk.clips[2].pattern {
+            assert!(drop_pat.tracks[0].steps.iter().any(|s| s.active), "Drop should have Kick on pad 0");
+            assert!(drop_pat.tracks[6].steps.iter().any(|s| s.active), "Drop should have Clap on pad 6");
+            assert!(drop_pat.tracks[8].steps.iter().any(|s| s.active), "Drop should have Closed HH on pad 8");
+        } else {
+            panic!("Expected Drum pattern in drop");
+        }
+    }
+
+    #[test]
+    fn test_device_reorder_global_and_cross_category_rejected() {
+        let mut state = DawState::new();
+        assert!(!call_tool(&mut state, "device_add_to_track", &json!({"track_id": 0, "device_type": "Arpeggiator"})).is_error);
+        assert!(!call_tool(&mut state, "device_add_to_track", &json!({"track_id": 0, "device_type": "Wavetable"})).is_error);
+        let eq = call_tool(&mut state, "device_add_to_track", &json!({"track_id": 0, "device_type": "EQEight"}));
+        let eq_v: Value = serde_json::from_str(&eq.content[0].text).unwrap();
+        assert_eq!(eq_v["device_index"], 2);
+        let echo = call_tool(&mut state, "device_add_to_track", &json!({"track_id": 0, "device_type": "Echo"}));
+        let echo_v: Value = serde_json::from_str(&echo.content[0].text).unwrap();
+        assert_eq!(echo_v["device_index"], 3);
+
+        // Cross-category move must fail cleanly
+        assert!(call_tool(&mut state, "device_reorder", &json!({"track_id": 0, "from_index": 0, "to_index": 2})).is_error);
+
+        // Same-category audio reorder using global indices 2 <-> 3
+        let ok = call_tool(&mut state, "device_reorder", &json!({"track_id": 0, "from_index": 2, "to_index": 3}));
+        assert!(!ok.is_error, "valid audio reorder should succeed: {:?}", ok);
+        assert_eq!(state.device_handles[&0].audio_effects[0].name(), "Echo");
+        assert_eq!(state.device_handles[&0].audio_effects[1].name(), "EQ Eight");
+    }
+
+    #[test]
+    fn test_synth_load_preset_invalid_track_preserves_state_and_scale_lock() {
+        let mut state = DawState::new();
+        let before_values = state.synth.params.values;
+        let bad = call_tool(&mut state, "synth_load_preset", &json!({"track_id": 999, "preset": "Acid Bass"}));
+        assert!(bad.is_error);
+        assert_eq!(state.synth.params.values, before_values);
+
+        // Global Major scale lock must produce notes matching C Major mask (never Dorian b3/b7)
+        assert!(!call_tool(&mut state, "scale_set_global", &json!({"root_note": "C", "scale_name": "Major", "scale_lock": true})).is_error);
+        assert!(!call_tool(&mut state, "midi_generate_clip", &json!({
+            "track_id": 0, "slot_id": 0, "generator": "shape", "params": {"shape": "linear_rise"}
+        })).is_error);
+        let clip = state.matrix.tracks[0].slots[0].clip.as_ref().unwrap();
+        let major_mask = ScaleMode::Major.degree_mask();
+        if let ClipPattern::Midi(ref mp) = clip.pattern {
+            assert!(!mp.notes.is_empty());
+            for n in &mp.notes {
+                let pc = n.pitch % 12;
+                assert_ne!((major_mask >> pc) & 1, 0, "note pitch {} (pc {}) not in C Major", n.pitch, pc);
+            }
+        }
+    }
+
+    #[test]
+    fn test_chord_bars_humanize_and_simpler_device_index() {
+        let mut state = DawState::new();
+        let chords = call_tool(&mut state, "generate_chord_progression_clip", &json!({
+            "track_id": 0, "slot_id": 0, "progression": "I-V-vi-IV", "bars": 2, "humanize": 0.9
+        }));
+        assert!(!chords.is_error, "chords failed: {:?}", chords);
+        let clip = state.matrix.tracks[0].slots[0].clip.as_ref().unwrap();
+        if let ClipPattern::Midi(ref mp) = clip.pattern {
+            assert!((mp.length_beats - 8.0).abs() < 1e-6, "bars=2 must equal 8.0 beats");
+            assert!(mp.notes.iter().any(|n| n.velocity != 100), "humanize=0.9 should vary velocities");
+        }
+
+        // Invalid simpler_device_index must error cleanly
+        assert!(!call_tool(&mut state, "device_add_to_track", &json!({"track_id": 0, "device_type": "Arpeggiator"})).is_error);
+        assert!(!call_tool(&mut state, "device_add_to_track", &json!({"track_id": 0, "device_type": "Simpler"})).is_error);
+        assert!(call_tool(&mut state, "simpler_slice_to_drum_rack", &json!({"track_id": 0, "simpler_device_index": 99})).is_error);
+
+        // Load audio into Simpler at global index 1 and slice explicitly
+        if let Some(ManagedDeviceHandle::Simpler(ref s_arc)) = state.device_handles[&0].get_at(1) {
+            let mut s = s_arc.lock().unwrap_or_else(|e| e.into_inner());
+            let buf: Vec<f32> = (0..4096).map(|i| if i % 1024 < 64 { 0.8 } else { 0.0 }).collect();
+            s.load_sample(buf, 44100, 1);
+        }
+        let sliced = call_tool(&mut state, "simpler_slice_to_drum_rack", &json!({
+            "track_id": 0, "simpler_device_index": 1
+        }));
+        assert!(!sliced.is_error, "explicit simpler_device_index 1 should slice: {:?}", sliced);
     }
 }

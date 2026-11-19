@@ -143,18 +143,69 @@ impl SignalRoutingGraph {
     }
 
     /// Validate that the signal routing graph contains no circular routing dependencies.
+    /// Runs full 3-color DFS across GroupBus, SendAux, and DirectToMaster edges to detect
+    /// both self-loops and multi-hop feedback cycles (e.g. Track A -> Group B -> Track A).
     pub fn validate_no_cycles(&self) -> Result<(), RoutingValidationError> {
-        for node in &self.nodes {
-            let current = node.id;
+        #[derive(Clone, Copy, PartialEq, Eq)]
+        enum Color {
+            Unvisited,
+            Visiting,
+            Visited,
+        }
+
+        fn dfs(
+            nodes: &[SignalRoutingNode],
+            idx: usize,
+            colors: &mut [Color],
+        ) -> Result<(), RoutingValidationError> {
+            colors[idx] = Color::Visiting;
+            let node = &nodes[idx];
+
             for edge in &node.edges {
-                if let SignalEdge::GroupBus(target_grp) = edge {
-                    if *target_grp == current {
-                        return Err(RoutingValidationError::CircularRouting {
-                            track_id: current,
-                            track_name: node.name.clone(),
-                        });
+                let target_idx_opt = match edge {
+                    SignalEdge::GroupBus(target_grp) => {
+                        nodes.iter().position(|n| n.id == *target_grp)
+                    }
+                    SignalEdge::SendAux {
+                        return_idx, level, ..
+                    } if *level > 0.0 => nodes
+                        .iter()
+                        .enumerate()
+                        .filter(|(_, n)| n.archetype.is_return())
+                        .nth(*return_idx)
+                        .map(|(pos, _)| pos)
+                        .or_else(|| nodes.iter().position(|n| n.id == 100 + *return_idx)),
+                    SignalEdge::DirectToMaster => {
+                        nodes.iter().position(|n| n.archetype.is_master())
+                    }
+                    _ => None,
+                };
+
+                if let Some(target_idx) = target_idx_opt {
+                    match colors[target_idx] {
+                        Color::Visiting => {
+                            let target = &nodes[target_idx];
+                            return Err(RoutingValidationError::CircularRouting {
+                                track_id: target.id,
+                                track_name: target.name.clone(),
+                            });
+                        }
+                        Color::Unvisited => {
+                            dfs(nodes, target_idx, colors)?;
+                        }
+                        Color::Visited => {}
                     }
                 }
+            }
+
+            colors[idx] = Color::Visited;
+            Ok(())
+        }
+
+        let mut colors = vec![Color::Unvisited; self.nodes.len()];
+        for idx in 0..self.nodes.len() {
+            if colors[idx] == Color::Unvisited {
+                dfs(&self.nodes, idx, &mut colors)?;
             }
         }
         Ok(())
@@ -230,5 +281,27 @@ mod tests {
                 track_name: "Self-Referencing Group".into(),
             })
         );
+    }
+
+    #[test]
+    fn test_signal_routing_multi_node_cycle_detection() {
+        let mut graph = SignalRoutingGraph::new();
+        // 3-node cycle: 10 -> 11 -> 12 -> 10
+        for (id, next_id) in [(10usize, 11usize), (11, 12), (12, 10)] {
+            graph.add_node(SignalRoutingNode {
+                id,
+                name: format!("Bus {}", id),
+                archetype: TrackArchetype::Group,
+                input_source: "All Ins".into(),
+                output_destination: format!("Group {}", next_id),
+                volume_linear: 1.0,
+                pan: 0.0,
+                mute: false,
+                solo: false,
+                edges: vec![SignalEdge::GroupBus(next_id)],
+            });
+        }
+        let err = graph.validate_no_cycles().unwrap_err();
+        assert!(matches!(err, RoutingValidationError::CircularRouting { .. }));
     }
 }

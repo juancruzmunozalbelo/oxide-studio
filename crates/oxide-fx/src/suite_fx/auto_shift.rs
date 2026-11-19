@@ -53,8 +53,16 @@ impl AutoShift {
     }
 
     pub fn set_sample_rate(&mut self, sample_rate: f32) {
-        if sample_rate > 0.0 {
-            *self = Self::new(sample_rate);
+        if sample_rate.is_finite() && sample_rate > 0.0 {
+            let max_samples = ((sample_rate * 0.1) as usize).max(256);
+            self.sample_rate = sample_rate;
+            self.ring_buf_l = vec![0.0; max_samples];
+            self.ring_buf_r = vec![0.0; max_samples];
+            self.write_pos = 0;
+            self.phase_l = 0.0;
+            self.phase_r = 0.0;
+            self.vibrato_phase = 0.0;
+            self.current_pitch_ratio = 1.0;
         }
     }
 }
@@ -126,7 +134,7 @@ impl AudioEffectDevice for AutoShift {
             // Vibrato LFO
             let vibrato_mod = if self.vibrato_depth > 0.0 {
                 let v = self.vibrato_phase.sin() * self.vibrato_depth * 0.05;
-                self.vibrato_phase = (self.vibrato_phase + vib_step).fract() * 2.0 * PI;
+                self.vibrato_phase = (self.vibrato_phase + vib_step).rem_euclid(2.0 * PI);
                 v
             } else {
                 0.0
@@ -134,20 +142,26 @@ impl AudioEffectDevice for AutoShift {
 
             let effective_ratio = (self.current_pitch_ratio + vibrato_mod).max(0.25);
 
-            // Dual-grain pitch shifter with crossfade window
+            // Dual-grain pitch shifter with crossfade window; bypass grain window at unity pitch
             let grain_size = 512.0f32;
-            let offset_l = (self.phase_l * (effective_ratio - 1.0)).rem_euclid(grain_size);
-            let offset_r = (self.phase_r * (effective_ratio - 1.0)).rem_euclid(grain_size);
+            let (wet_l, wet_r) = if (effective_ratio - 1.0).abs() < 1e-5 {
+                (dry_l, dry_r)
+            } else {
+                let offset_l = (self.phase_l * (effective_ratio - 1.0)).rem_euclid(grain_size);
+                let offset_r = (self.phase_r * (effective_ratio - 1.0)).rem_euclid(grain_size);
 
-            let read_pos_l = ((self.write_pos as f32 - offset_l + buf_len as f32) as usize) % buf_len;
-            let read_pos_r = ((self.write_pos as f32 - offset_r + buf_len as f32) as usize) % buf_len;
+                let read_pos_l = ((self.write_pos as f32 - offset_l + buf_len as f32) as usize) % buf_len;
+                let read_pos_r = ((self.write_pos as f32 - offset_r + buf_len as f32) as usize) % buf_len;
 
-            // Triangular window envelope
-            let window_l = 1.0 - (2.0 * offset_l / grain_size - 1.0).abs();
-            let window_r = 1.0 - (2.0 * offset_r / grain_size - 1.0).abs();
+                // Triangular window envelope
+                let window_l = 1.0 - (2.0 * offset_l / grain_size - 1.0).abs();
+                let window_r = 1.0 - (2.0 * offset_r / grain_size - 1.0).abs();
 
-            let wet_l = self.ring_buf_l[read_pos_l] * window_l;
-            let wet_r = self.ring_buf_r[read_pos_r] * window_r;
+                (
+                    self.ring_buf_l[read_pos_l] * window_l,
+                    self.ring_buf_r[read_pos_r] * window_r,
+                )
+            };
 
             self.phase_l = (self.phase_l + 1.0) % grain_size;
             self.phase_r = (self.phase_r + 1.0) % grain_size;

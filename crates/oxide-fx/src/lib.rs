@@ -141,4 +141,152 @@ mod tests {
         let processed = dry_buf.left[100];
         assert_ne!(processed, 0.75);
     }
+
+    #[test]
+    fn test_auto_shift_unity_pitch_passes_audio_and_preserves_params_on_sr_change() {
+        use oxide_core::{AudioBuffer, AudioEffectDevice, MusicalTime};
+        let mut sh = AutoShift::new(44100.0);
+        sh.pitch_shift_semitones = 0.0;
+        sh.dry_wet = 1.0;
+        sh.vibrato_depth = 0.25;
+        sh.set_sample_rate(48000.0);
+        assert_eq!(sh.dry_wet, 1.0);
+        assert_eq!(sh.vibrato_depth, 0.25);
+
+        sh.vibrato_depth = 0.0;
+        let mut buf = AudioBuffer::silence(256);
+        buf.left[..256].fill(0.6);
+        buf.right[..256].fill(-0.4);
+        sh.process_audio(&mut buf, &MusicalTime::default());
+        assert!((buf.left[100] - 0.6).abs() < 1e-5);
+        assert!((buf.right[100] + 0.4).abs() < 1e-5);
+    }
+
+    #[test]
+    fn test_utility_mute_inside_device_chain_silences_buffer() {
+        use oxide_core::{AudioBuffer, Device, DeviceChain, MusicalTime};
+        let mut util = Utility::new(44100.0);
+        util.mute = true;
+        assert!(util.is_enabled(), "Muted Utility must stay enabled so DeviceChain clears output");
+
+        let mut chain = DeviceChain::new();
+        chain.add_audio_effect(Box::new(util));
+        let mut buf = AudioBuffer::silence(64);
+        buf.left[..64].fill(0.5);
+        buf.right[..64].fill(-0.5);
+        chain.process(&[], &mut buf, &MusicalTime::default());
+
+        assert!(buf.left[..64].iter().all(|&s| s == 0.0));
+        assert!(buf.right[..64].iter().all(|&s| s == 0.0));
+    }
+
+    #[test]
+    fn test_scale_b_major_octave_wrap_and_velocity_inverted_range() {
+        let mut scale = crate::midi_fx::Scale::new();
+        scale.base_note = 11; // B Major: B, C#, D#, E, F#, G#, A#
+        // C4 (60) is 1 semitone above B3 (59), must snap down to 59, not up to 71
+        assert_eq!(scale.quantize_pitch(60), 59);
+
+        let mut vel = crate::midi_fx::Velocity::new();
+        vel.min_velocity = 120;
+        vel.max_velocity = 20;
+        let remapped = vel.remap(64);
+        assert!((20..=120).contains(&remapped));
+
+        let mut vel_dev = VelocityDevice::new();
+        vel_dev.out_low = 110;
+        vel_dev.out_high = 30;
+        let v2 = vel_dev.transform_velocity(64);
+        assert!((30..=110).contains(&v2));
+    }
+
+    #[test]
+    fn test_multiband_dynamics_stereo_linked_peak_and_roar_tone_polarity() {
+        let mut mb = MultibandDynamics::new(44100.0);
+        let (out_l, out_r) = mb.low_band.process_stereo(0.8, 0.2, 1.0, 44100.0);
+        // Stereo link preserves L:R ratio (4:1) by stepping envelope once per frame
+        assert!((out_l / out_r - 4.0).abs() < 1e-4);
+
+        let mut dark = RoarStage::new(RoarCurve::Tube, 0.0);
+        dark.tone = -1.0;
+        let mut bright = RoarStage::new(RoarCurve::Tube, 0.0);
+        bright.tone = 1.0;
+
+        let mut hf_dark = 0.0f32;
+        let mut hf_bright = 0.0f32;
+        for i in 0..128 {
+            let x = if i % 2 == 0 { 0.4 } else { -0.4 }; // Nyquist oscillation
+            let (dl, _) = dark.process_sample(x, x);
+            let (bl, _) = bright.process_sample(x, x);
+            hf_dark += dl * dl;
+            hf_bright += bl * bl;
+        }
+        assert!(
+            hf_bright > hf_dark * 2.0,
+            "Roar +1.0 tone must be brighter than -1.0 tone: bright={}, dark={}",
+            hf_bright,
+            hf_dark
+        );
+    }
+
+    #[test]
+    fn test_redux_1bit_compressor_soft_knee_hybrid_reverb_and_midi_fx_bypass() {
+        use oxide_core::{AudioBuffer, AudioEffectDevice, MidiEffectDevice, MidiEvent, MusicalTime};
+        // Redux 1-bit quantization -> only {-1.0, 0.0, 1.0}
+        let mut redux = Redux::new();
+        redux.downsample = 1;
+        redux.bit_depth = 1;
+        let mut rbuf = AudioBuffer::silence(4);
+        rbuf.left[0] = 0.25;
+        rbuf.left[1] = -0.15;
+        rbuf.left[2] = 0.0;
+        rbuf.left[3] = 0.9;
+        redux.process_audio(&mut rbuf, &MusicalTime::default());
+        assert_eq!(&rbuf.left[..4], &[1.0, -1.0, 0.0, 1.0]);
+
+        // Compressor soft knee applies gain reduction inside [threshold - knee/2, threshold]
+        let mut comp = Compressor::new(44100.0);
+        comp.threshold_db = -12.0;
+        comp.ratio = 4.0;
+        comp.knee_db = 12.0; // Knee [-18, -6]
+        let level_db15 = 10.0_f32.powf(-15.0 / 20.0); // inside soft knee below threshold!
+        let mut cbuf = AudioBuffer::silence(64);
+        cbuf.left[..64].fill(level_db15);
+        cbuf.right[..64].fill(level_db15);
+        comp.process_audio(&mut cbuf, &MusicalTime::default());
+        assert!(cbuf.left[63] < level_db15, "Soft knee must reduce gain at -15 dBFS");
+
+        // HybridReverb 500ms predelay + SR preservation + size invariance
+        let mut hr = HybridReverb::new(44100.0);
+        hr.predelay_ms = 450.0;
+        hr.size = 1.6;
+        hr.decay_s = 3.5;
+        hr.set_sample_rate(48000.0);
+        assert_eq!(hr.predelay_ms, 450.0);
+        assert_eq!(hr.size, 1.6);
+        assert_eq!(hr.decay_s, 3.5);
+        let mut hbuf = AudioBuffer::silence(128);
+        hbuf.left[0] = 1.0;
+        hbuf.right[0] = 1.0;
+        hr.process_audio(&mut hbuf, &MusicalTime::default());
+        assert!(hbuf.left[..128].iter().all(|s| s.is_finite()));
+
+        // MidiEffectDevice is_enabled / set_enabled and channel preservation
+        let mut nl = crate::midi_fx::NoteLength::new();
+        nl.length_beats = 0.5;
+        let mut out = Vec::new();
+        nl.process_midi(
+            &[MidiEvent::NoteOn { channel: 5, note: 60, velocity: 100 }],
+            &mut out,
+            &MusicalTime::new(0.0, 120.0, 4, 4, true),
+        );
+        out.clear();
+        nl.process_midi(&[], &mut out, &MusicalTime::new(0.6, 120.0, 4, 4, true));
+        assert_eq!(out, vec![MidiEvent::NoteOff { channel: 5, note: 60 }]);
+
+        let mut dev = RackMidiEffectDevice::Pitch(PitchDevice::new());
+        assert!(dev.is_enabled());
+        dev.set_enabled(false);
+        assert!(!dev.is_enabled());
+    }
 }

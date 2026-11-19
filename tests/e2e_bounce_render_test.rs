@@ -6,9 +6,17 @@
 
 use std::fs::{self, File};
 use std::io::Read;
-use std::path::Path;
+use std::path::PathBuf;
 
 use oxide_bounce::{DemoArrangementRenderer, WavWriter};
+
+fn temp_wav_path(label: &str) -> PathBuf {
+    std::env::temp_dir().join(format!(
+        "oxide_studio_test_{}_{}.wav",
+        label,
+        std::process::id()
+    ))
+}
 
 #[test]
 fn test_multitrack_offline_bounce_wav_export() {
@@ -28,16 +36,16 @@ fn test_multitrack_offline_bounce_wav_export() {
     );
 
     // Export to WAV
-    let output_path = Path::new("/tmp/oxide_studio_test_export.wav");
-    WavWriter::write_wav_16bit(output_path, sample_rate as u32, 2, &interleaved)
+    let output_path = temp_wav_path("export");
+    WavWriter::write_wav_16bit(&output_path, sample_rate as u32, 2, &interleaved)
         .expect("Failed to export WAV");
 
     assert!(output_path.exists(), "Exported WAV file must exist on disk");
-    let metadata = fs::metadata(output_path).expect("File metadata");
+    let metadata = fs::metadata(&output_path).expect("File metadata");
     println!("Exported WAV size: {} bytes", metadata.len());
     assert!(metadata.len() > 100000, "WAV file must be non-trivial size");
 
-    let _ = fs::remove_file(output_path);
+    let _ = fs::remove_file(&output_path);
 }
 
 #[test]
@@ -47,11 +55,11 @@ fn test_wav_riff_header_and_chunk_integrity() {
     let renderer = DemoArrangementRenderer::new(sample_rate, bpm);
     let interleaved = renderer.render_demo_seconds(4.2);
 
-    let wav_path = Path::new("/tmp/oxide_studio_test_header.wav");
-    WavWriter::write_wav_16bit(wav_path, sample_rate as u32, 2, &interleaved)
+    let wav_path = temp_wav_path("header");
+    WavWriter::write_wav_16bit(&wav_path, sample_rate as u32, 2, &interleaved)
         .expect("Failed to write header test WAV");
 
-    let mut file = File::open(wav_path).expect("Failed to open exported WAV");
+    let mut file = File::open(&wav_path).expect("Failed to open exported WAV");
     let mut header = [0u8; 44];
     file.read_exact(&mut header).expect("Failed to read 44-byte RIFF header");
 
@@ -60,7 +68,7 @@ fn test_wav_riff_header_and_chunk_integrity() {
 
     // 2. File size field (header[4..8])
     let file_size_field = u32::from_le_bytes(header[4..8].try_into().unwrap());
-    let actual_len = fs::metadata(wav_path).unwrap().len() as u32;
+    let actual_len = fs::metadata(&wav_path).unwrap().len() as u32;
     assert_eq!(file_size_field + 8, actual_len, "RIFF size field + 8 must equal total file length");
 
     // 3. WAVE Format
@@ -88,7 +96,7 @@ fn test_wav_riff_header_and_chunk_integrity() {
     let data_size = u32::from_le_bytes(header[40..44].try_into().unwrap());
     assert_eq!(data_size, actual_len - 44, "Data size must equal file length minus 44 bytes");
 
-    let _ = fs::remove_file(wav_path);
+    let _ = fs::remove_file(&wav_path);
     println!("RIFF/WAVE 44-byte header verified: 100% compliant.");
 }
 
@@ -100,12 +108,12 @@ fn test_bounce_audio_duration_and_rms_energy() {
     let duration_target = 4.5; // > 4.0 seconds
     let interleaved = renderer.render_demo_seconds(duration_target);
 
-    let wav_path = Path::new("/tmp/oxide_studio_test_rms.wav");
-    WavWriter::write_wav_16bit(wav_path, sample_rate as u32, 2, &interleaved)
+    let wav_path = temp_wav_path("rms");
+    WavWriter::write_wav_16bit(&wav_path, sample_rate as u32, 2, &interleaved)
         .expect("Failed to write test RMS WAV");
 
     let mut bytes = Vec::new();
-    File::open(wav_path).unwrap().read_to_end(&mut bytes).unwrap();
+    File::open(&wav_path).unwrap().read_to_end(&mut bytes).unwrap();
 
     let data_bytes = &bytes[44..];
     let mut sum_sq = 0.0f64;
@@ -154,5 +162,5 @@ fn test_bounce_audio_duration_and_rms_energy() {
         max_abs
     );
 
-    let _ = fs::remove_file(wav_path);
+    let _ = fs::remove_file(&wav_path);
 }

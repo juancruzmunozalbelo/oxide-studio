@@ -1,13 +1,14 @@
 //! Steady-state audio callback processor with zero heap allocations.
 
-use oxide_core::{AudioCommand, AudioTelemetry, MusicalTime};
+use oxide_core::{AudioCommand, AudioTelemetry, InstrumentDevice, MusicalTime};
 use oxide_dsp::SynthEngine;
 use oxide_drums::DrumRack;
 use oxide_fx::{Mixer, Saturator, TempoDelay, FdnReverb};
 
 use crate::parameters::{
-    AtomicParameters, PARAM_BPM, PARAM_FX_DRIVE, PARAM_MASTER_VOL, PARAM_TRACK_PAN_BASE,
-    PARAM_TRACK_VOL_BASE,
+    AtomicParameters, PARAM_BPM, PARAM_FX_DELAY_WET, PARAM_FX_DRIVE, PARAM_FX_REVERB_WET,
+    PARAM_MASTER_VOL, PARAM_SYNTH_CUTOFF, PARAM_SYNTH_MACRO_X, PARAM_SYNTH_MACRO_Y,
+    PARAM_SYNTH_RESONANCE, PARAM_TRACK_PAN_BASE, PARAM_TRACK_VOL_BASE,
 };
 use crate::queues::AudioThreadHandles;
 
@@ -164,6 +165,7 @@ impl AudioEngineProcessor {
         let transport = &mut self.transport;
         let saturator = &mut self.saturator;
         let delay = &mut self.delay;
+        let reverb = &mut self.reverb;
         let mixer = &mut self.mixer;
         let params = &self.params;
         let send_a = &mut self.send_a;
@@ -188,25 +190,31 @@ impl AudioEngineProcessor {
             }
             AudioCommand::NoteOn { track_id, note, velocity } => {
                 if track_id == 1 {
-                    // Drum track: note 36..51 -> pad 0..15
-                    if note >= 36 && note <= 51 {
-                        drum_rack.trigger_pad(note - 36, velocity);
-                    }
+                    // Drum rack covers all 128 MIDI notes across Banks A..H (including pads & Simpler)
+                    drum_rack.trigger_midi_note(note, velocity);
                 } else {
                     // Melodic synth track
                     synth.note_on(note, velocity);
                 }
             }
             AudioCommand::NoteOff { track_id, note } => {
-                if track_id != 1 {
+                if track_id == 1 {
+                    drum_rack.note_off(note);
+                } else {
                     synth.note_off(note);
                 }
             }
             AudioCommand::SetParameter { track_id, param_id, value } => {
-                if param_id == 100 {
-                    synth.set_macro_x(value);
-                } else if param_id == 101 {
-                    synth.set_macro_y(value);
+                if param_id == 100 || param_id == PARAM_SYNTH_MACRO_X as u32 {
+                    if value.is_finite() {
+                        synth.set_macro_x(value);
+                        params.set(PARAM_SYNTH_MACRO_X, value);
+                    }
+                } else if param_id == 101 || param_id == PARAM_SYNTH_MACRO_Y as u32 {
+                    if value.is_finite() {
+                        synth.set_macro_y(value);
+                        params.set(PARAM_SYNTH_MACRO_Y, value);
+                    }
                 } else if param_id == 0 || param_id == PARAM_ID_MASTER_VOL {
                     let safe_vol = if value.is_finite() {
                         value.clamp(0.0, 2.0)
@@ -215,11 +223,20 @@ impl AudioEngineProcessor {
                     };
                     mixer.master_volume_linear = safe_vol;
                     params.set(PARAM_MASTER_VOL, safe_vol);
-                } else if param_id == PARAM_ID_SYNTH_CUTOFF {
+                } else if param_id == PARAM_BPM as u32 {
                     if value.is_finite() {
-                        synth.set_parameter("filter_frequency", value.clamp(20.0, 20000.0));
+                        let bpm = value.clamp(20.0, 999.0) as f64;
+                        transport.bpm = bpm;
+                        delay.set_tempo(bpm);
+                        params.set(PARAM_BPM, bpm as f32);
                     }
-                } else if param_id == PARAM_ID_SYNTH_RESONANCE {
+                } else if param_id == PARAM_ID_SYNTH_CUTOFF || param_id == PARAM_SYNTH_CUTOFF as u32 {
+                    if value.is_finite() {
+                        let cutoff = value.clamp(20.0, 20000.0);
+                        synth.set_parameter("filter_frequency", cutoff);
+                        params.set(PARAM_SYNTH_CUTOFF, cutoff);
+                    }
+                } else if param_id == PARAM_ID_SYNTH_RESONANCE || param_id == PARAM_SYNTH_RESONANCE as u32 {
                     if value.is_finite() {
                         // Accept either normalized [0.0..=1.0] or GUI Q-scale [>1.0..=5.0]
                         let norm = if value > 1.0 {
@@ -228,6 +245,7 @@ impl AudioEngineProcessor {
                             value.clamp(0.0, 1.0)
                         };
                         synth.set_parameter("filter_resonance", norm);
+                        params.set(PARAM_SYNTH_RESONANCE, norm);
                     }
                 } else if param_id == PARAM_ID_SYNTH_PULSE_PW {
                     if value.is_finite() {
@@ -243,6 +261,18 @@ impl AudioEngineProcessor {
                         let drive_norm = value.clamp(0.0, 2.0);
                         params.set(PARAM_FX_DRIVE, drive_norm);
                         saturator.set_drive_db(drive_norm * 12.0);
+                    }
+                } else if param_id == PARAM_FX_DELAY_WET as u32 {
+                    if value.is_finite() {
+                        let w = value.clamp(0.0, 1.0);
+                        delay.wet = w;
+                        params.set(PARAM_FX_DELAY_WET, w);
+                    }
+                } else if param_id == PARAM_FX_REVERB_WET as u32 {
+                    if value.is_finite() {
+                        let w = value.clamp(0.0, 1.0);
+                        reverb.wet = w;
+                        params.set(PARAM_FX_REVERB_WET, w);
                     }
                 } else if (PARAM_ID_TRACK_VOL_BASE..=PARAM_ID_TRACK_VOL_BASE + 15).contains(&param_id)
                     || (PARAM_TRACK_VOL_BASE as u32..=(PARAM_TRACK_VOL_BASE + 15) as u32).contains(&param_id)
@@ -501,8 +531,16 @@ impl AudioEngineProcessor {
         }
 
         let test_tone_active = self.test_tone_enabled && self.test_tone_volume > 0.0001;
+        let send_a_active =
+            (track0_active && xf_gain_0 > 0.0 && send_a_0 > 0.0001)
+                || (track1_active && xf_gain_1 > 0.0 && send_a_1 > 0.0001);
+        let send_b_active =
+            (track0_active && xf_gain_0 > 0.0 && send_b_0 > 0.0001)
+                || (track1_active && xf_gain_1 > 0.0 && send_b_1 > 0.0001);
+        let process_return_a = send_a_active || self.send_a_active_tail;
+        let process_return_b = send_b_active || self.send_b_active_tail;
 
-        if !any_track_audible && !test_tone_active {
+        if !any_track_audible && !process_return_a && !process_return_b && !test_tone_active {
             self.scratch_l[..frames].fill(0.0);
             self.scratch_r[..frames].fill(0.0);
             self.mixer.master_peak_l = 0.0;
@@ -511,51 +549,47 @@ impl AudioEngineProcessor {
             self.mixer.master_rms_r = 0.0;
         } else {
             if any_track_audible {
-                // 7. Process Master Insert Saturator & Return A (Delay) / Return B (Reverb) Sends
+                // 7a. Process Master Insert Saturator on dry track mix
                 self.saturator.process_block(
                     &mut self.scratch_l[..frames],
                     &mut self.scratch_r[..frames],
                 );
-                let send_a_active =
-                    (track0_active && xf_gain_0 > 0.0 && send_a_0 > 0.0001)
-                        || (track1_active && xf_gain_1 > 0.0 && send_a_1 > 0.0001);
-                if send_a_active || self.send_a_active_tail {
-                    self.delay.process_block(
-                        &mut self.send_a_l[..frames],
-                        &mut self.send_a_r[..frames],
-                    );
-                    let mut peak_ret = 0.0f32;
-                    for i in 0..frames {
-                        let l = self.send_a_l[i];
-                        let r = self.send_a_r[i];
-                        self.scratch_l[i] += l;
-                        self.scratch_r[i] += r;
-                        peak_ret = peak_ret.max(l.abs()).max(r.abs());
-                    }
-                    self.send_a_active_tail = peak_ret > 1e-6;
-                }
-
-                let send_b_active =
-                    (track0_active && xf_gain_0 > 0.0 && send_b_0 > 0.0001)
-                        || (track1_active && xf_gain_1 > 0.0 && send_b_1 > 0.0001);
-                if send_b_active || self.send_b_active_tail {
-                    self.reverb.process_block(
-                        &mut self.send_b_l[..frames],
-                        &mut self.send_b_r[..frames],
-                    );
-                    let mut peak_ret = 0.0f32;
-                    for i in 0..frames {
-                        let l = self.send_b_l[i];
-                        let r = self.send_b_r[i];
-                        self.scratch_l[i] += l;
-                        self.scratch_r[i] += r;
-                        peak_ret = peak_ret.max(l.abs()).max(r.abs());
-                    }
-                    self.send_b_active_tail = peak_ret > 1e-6;
-                }
             } else {
                 self.scratch_l[..frames].fill(0.0);
                 self.scratch_r[..frames].fill(0.0);
+            }
+
+            // 7b. Process Return A (Reverb) and Return B (Delay), including ringing tails even when dry tracks are muted
+            if process_return_a {
+                self.reverb.process_block(
+                    &mut self.send_a_l[..frames],
+                    &mut self.send_a_r[..frames],
+                );
+                let mut peak_ret = 0.0f32;
+                for i in 0..frames {
+                    let l = self.send_a_l[i];
+                    let r = self.send_a_r[i];
+                    self.scratch_l[i] += l;
+                    self.scratch_r[i] += r;
+                    peak_ret = peak_ret.max(l.abs()).max(r.abs());
+                }
+                self.send_a_active_tail = peak_ret > 1e-6;
+            }
+
+            if process_return_b {
+                self.delay.process_block(
+                    &mut self.send_b_l[..frames],
+                    &mut self.send_b_r[..frames],
+                );
+                let mut peak_ret = 0.0f32;
+                for i in 0..frames {
+                    let l = self.send_b_l[i];
+                    let r = self.send_b_r[i];
+                    self.scratch_l[i] += l;
+                    self.scratch_r[i] += r;
+                    peak_ret = peak_ret.max(l.abs()).max(r.abs());
+                }
+                self.send_b_active_tail = peak_ret > 1e-6;
             }
 
             // Test Tone Generator (Chapter 2: Pure reference sine tone injected into master output)
@@ -1081,6 +1115,126 @@ mod tests {
         proc.process_interleaved(&mut xf_buf);
         let xf_energy: f32 = xf_buf.iter().map(|s| s * s).sum();
         assert_eq!(xf_energy, 0.0, "Full B crossfader must silence Track 0 (A)");
+    }
+
+    #[test]
+    fn test_return_tails_continue_when_dry_tracks_muted_and_send_order_matches_gui() {
+        let queues = AudioQueues::new();
+        let (mut ui, audio) = queues.split();
+        let params = AtomicParameters::new();
+        let mut proc = AudioEngineProcessor::new(44100.0, audio, params);
+
+        // Configure Return A (Reverb) wet=1.0, Return B (Delay) wet=1.0 via non-colliding PARAM_FX_*
+        ui.send_command(AudioCommand::SetParameter {
+            track_id: 0,
+            param_id: crate::parameters::PARAM_FX_REVERB_WET as u32,
+            value: 1.0,
+        });
+        ui.send_command(AudioCommand::SetParameter {
+            track_id: 0,
+            param_id: crate::parameters::PARAM_FX_DELAY_WET as u32,
+            value: 1.0,
+        });
+        // Send Track 0 to Return A (Reverb) only
+        ui.send_command(AudioCommand::SetParameter {
+            track_id: 0,
+            param_id: PARAM_ID_TRACK_SEND_A_BASE,
+            value: 1.0,
+        });
+        ui.send_command(AudioCommand::Play);
+        ui.send_command(AudioCommand::NoteOn {
+            track_id: 0,
+            note: 60,
+            velocity: 120,
+        });
+
+        let mut warmup = [0.0f32; 4096];
+        proc.process_interleaved(&mut warmup);
+        assert!(
+            proc.send_a_active_tail,
+            "Return A (Reverb) must have an active tail after processing Send A audio"
+        );
+        assert!(
+            !proc.send_b_active_tail,
+            "Return B (Delay) should stay inactive when only Send A is raised"
+        );
+
+        // Now mute Track 0 completely (any_track_audible == false); Return A tail must continue ringing out!
+        ui.send_command(AudioCommand::SetParameter {
+            track_id: 0,
+            param_id: PARAM_ID_TRACK_MUTE_BASE,
+            value: 1.0,
+        });
+        let mut tail_buf = [0.0f32; 1024];
+        proc.process_interleaved(&mut tail_buf);
+        let tail_energy: f32 = tail_buf.iter().map(|s| s * s).sum();
+        assert!(
+            tail_energy > 1e-6,
+            "Return A reverb tail must continue ringing out after dry tracks are muted"
+        );
+    }
+
+    #[test]
+    fn test_parameter_ids_non_collision_and_drum_rack_128_note_routing() {
+        let queues = AudioQueues::new();
+        let (mut ui, audio) = queues.split();
+        let params = AtomicParameters::new();
+        let mut proc = AudioEngineProcessor::new(44100.0, audio, params);
+
+        // Sending PARAM_ID_TEST_TONE_* (2,3,4) must NOT overwrite PARAM_SYNTH_* in AtomicParameters!
+        let init_cutoff = proc.params.get(PARAM_SYNTH_CUTOFF);
+        let init_res = proc.params.get(PARAM_SYNTH_RESONANCE);
+        let init_mx = proc.params.get(PARAM_SYNTH_MACRO_X);
+
+        ui.send_command(AudioCommand::SetParameter {
+            track_id: 0,
+            param_id: PARAM_ID_TEST_TONE_ENABLE,
+            value: 1.0,
+        });
+        ui.send_command(AudioCommand::SetParameter {
+            track_id: 0,
+            param_id: PARAM_ID_TEST_TONE_FREQ,
+            value: 880.0,
+        });
+        ui.send_command(AudioCommand::SetParameter {
+            track_id: 0,
+            param_id: PARAM_ID_TEST_TONE_VOL,
+            value: 0.25,
+        });
+        ui.send_command(AudioCommand::SetParameter {
+            track_id: 0,
+            param_id: PARAM_BPM as u32,
+            value: 138.0,
+        });
+        // Trigger Bank B drum note (<36) and Bank H note (>51) + NoteOff
+        ui.send_command(AudioCommand::NoteOn {
+            track_id: 1,
+            note: 0,
+            velocity: 110,
+        });
+        ui.send_command(AudioCommand::NoteOn {
+            track_id: 1,
+            note: 100,
+            velocity: 110,
+        });
+        ui.send_command(AudioCommand::NoteOff {
+            track_id: 1,
+            note: 0,
+        });
+
+        proc.process_commands();
+
+        assert!(proc.test_tone_enabled);
+        assert_eq!(proc.test_tone_freq, 880.0);
+        assert_eq!(proc.params.get(PARAM_SYNTH_CUTOFF), init_cutoff);
+        assert_eq!(proc.params.get(PARAM_SYNTH_RESONANCE), init_res);
+        assert_eq!(proc.params.get(PARAM_SYNTH_MACRO_X), init_mx);
+        assert_eq!(proc.params.get(PARAM_BPM), 138.0);
+        assert_eq!(proc.transport.bpm, 138.0);
+        assert!(
+            proc.drum_rack.voices.iter().filter(|v| v.active).count() >= 2,
+            "DrumRack must trigger Bank B..H notes outside 36..=51"
+        );
     }
 }
 

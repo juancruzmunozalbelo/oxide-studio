@@ -5,6 +5,9 @@
 
 use oxide_core::{AudioBuffer, AudioEffectDevice, Device, DeviceCategory, MusicalTime};
 
+const NUM_ER_TAPS: usize = 24;
+const FDN_BASE_SEC: [f32; 4] = [0.023, 0.029, 0.037, 0.043];
+
 /// Reverb routing blend modes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HybridReverbMode {
@@ -26,13 +29,14 @@ pub struct HybridReverb {
     pub dry_wet: f32,
 
     sample_rate: f32,
-    // Pre-delay buffer
+    // Pre-delay buffer (500ms capacity)
     predelay_buf_l: Vec<f32>,
     predelay_buf_r: Vec<f32>,
     predelay_pos: usize,
-    // Convolution FIR buffer
-    ir_l: Vec<f32>,
-    ir_r: Vec<f32>,
+    // Sparse Early-Reflection tap bank (<= 32 taps) scaled dynamically by size
+    er_delays_sec: [f32; NUM_ER_TAPS],
+    er_gains_l: [f32; NUM_ER_TAPS],
+    er_gains_r: [f32; NUM_ER_TAPS],
     conv_history_l: Vec<f32>,
     conv_history_r: Vec<f32>,
     conv_pos: usize,
@@ -43,36 +47,60 @@ pub struct HybridReverb {
 }
 
 impl HybridReverb {
-    pub fn new(sample_rate: f32) -> Self {
-        let sr = if sample_rate <= 0.0 { 44100.0 } else { sample_rate };
-        let max_predelay = (sr * 0.2) as usize; // 200 ms
-        let ir_len = 256; // Fast partitioned synthetic early reflection IR
-
-        // Generate synthetic early reflection IR
-        let mut ir_l = vec![0.0; ir_len];
-        let mut ir_r = vec![0.0; ir_len];
-        for i in 0..ir_len {
-            let t = i as f32 / ir_len as f32;
-            let decay = (-3.0 * t).exp();
-            let noise_l = ((i as f32 * 123.456).sin() * 43_758.547).fract() * 2.0 - 1.0;
-            let noise_r = ((i as f32 * 654.321).sin() * 43_758.547).fract() * 2.0 - 1.0;
-            ir_l[i] = noise_l * decay * (1.0 / (ir_len as f32).sqrt());
-            ir_r[i] = noise_r * decay * (1.0 / (ir_len as f32).sqrt());
-        }
-
-        // Prime numbers for FDN delay lines (approx 20..45 ms)
-        let lengths = [
-            (sr * 0.023) as usize,
-            (sr * 0.029) as usize,
-            (sr * 0.037) as usize,
-            (sr * 0.043) as usize,
-        ];
+    fn build_buffers(sample_rate: f32) -> (Vec<f32>, Vec<f32>, Vec<f32>, Vec<f32>, [Vec<f32>; 4]) {
+        let sr = if sample_rate.is_finite() && sample_rate > 0.0 {
+            sample_rate
+        } else {
+            44100.0
+        };
+        let max_predelay = ((sr * 0.5).ceil() as usize + 2).max(256); // Full 500ms capacity
+        let hist_len = ((sr * 0.14).ceil() as usize + 8).max(512); // Supports ER taps scaled up to size=2.0
         let fdn_buffers = [
-            vec![0.0; lengths[0].max(128)],
-            vec![0.0; lengths[1].max(128)],
-            vec![0.0; lengths[2].max(128)],
-            vec![0.0; lengths[3].max(128)],
+            vec![0.0; ((sr * FDN_BASE_SEC[0] * 2.0).ceil() as usize + 4).max(256)],
+            vec![0.0; ((sr * FDN_BASE_SEC[1] * 2.0).ceil() as usize + 4).max(256)],
+            vec![0.0; ((sr * FDN_BASE_SEC[2] * 2.0).ceil() as usize + 4).max(256)],
+            vec![0.0; ((sr * FDN_BASE_SEC[3] * 2.0).ceil() as usize + 4).max(256)],
         ];
+        (
+            vec![0.0; max_predelay],
+            vec![0.0; max_predelay],
+            vec![0.0; hist_len],
+            vec![0.0; hist_len],
+            fdn_buffers,
+        )
+    }
+
+    pub fn new(sample_rate: f32) -> Self {
+        let sr = if sample_rate.is_finite() && sample_rate > 0.0 {
+            sample_rate
+        } else {
+            44100.0
+        };
+        let (predelay_buf_l, predelay_buf_r, conv_history_l, conv_history_r, fdn_buffers) =
+            Self::build_buffers(sr);
+
+        let mut er_delays_sec = [0.0f32; NUM_ER_TAPS];
+        let mut er_gains_l = [0.0f32; NUM_ER_TAPS];
+        let mut er_gains_r = [0.0f32; NUM_ER_TAPS];
+        let mut norm_sq_l = 0.0f32;
+        let mut norm_sq_r = 0.0f32;
+        for k in 0..NUM_ER_TAPS {
+            let frac = (k + 1) as f32 / NUM_ER_TAPS as f32;
+            er_delays_sec[k] = 0.002 + 0.053 * frac * frac;
+            let env = (-2.6 * frac).exp();
+            let sign_l = if ((k * 7 + 3) % 5) < 2 { -1.0 } else { 1.0 };
+            let sign_r = if ((k * 11 + 1) % 5) < 2 { -1.0 } else { 1.0 };
+            er_gains_l[k] = env * sign_l;
+            er_gains_r[k] = env * sign_r;
+            norm_sq_l += er_gains_l[k] * er_gains_l[k];
+            norm_sq_r += er_gains_r[k] * er_gains_r[k];
+        }
+        let inv_l = 0.8 / norm_sq_l.sqrt().max(1e-4);
+        let inv_r = 0.8 / norm_sq_r.sqrt().max(1e-4);
+        for k in 0..NUM_ER_TAPS {
+            er_gains_l[k] *= inv_l;
+            er_gains_r[k] *= inv_r;
+        }
 
         Self {
             name: "Hybrid Reverb".to_string(),
@@ -85,13 +113,14 @@ impl HybridReverb {
             conv_algo_blend: 0.5,
             dry_wet: 0.4,
             sample_rate: sr,
-            predelay_buf_l: vec![0.0; max_predelay.max(256)],
-            predelay_buf_r: vec![0.0; max_predelay.max(256)],
+            predelay_buf_l,
+            predelay_buf_r,
             predelay_pos: 0,
-            ir_l,
-            ir_r,
-            conv_history_l: vec![0.0; ir_len],
-            conv_history_r: vec![0.0; ir_len],
+            er_delays_sec,
+            er_gains_l,
+            er_gains_r,
+            conv_history_l,
+            conv_history_r,
             conv_pos: 0,
             fdn_buffers,
             fdn_indices: [0; 4],
@@ -100,8 +129,19 @@ impl HybridReverb {
     }
 
     pub fn set_sample_rate(&mut self, sample_rate: f32) {
-        if sample_rate > 0.0 {
-            *self = Self::new(sample_rate);
+        if sample_rate.is_finite() && sample_rate > 0.0 {
+            let (predelay_buf_l, predelay_buf_r, conv_history_l, conv_history_r, fdn_buffers) =
+                Self::build_buffers(sample_rate);
+            self.sample_rate = sample_rate;
+            self.predelay_buf_l = predelay_buf_l;
+            self.predelay_buf_r = predelay_buf_r;
+            self.predelay_pos = 0;
+            self.conv_history_l = conv_history_l;
+            self.conv_history_r = conv_history_r;
+            self.conv_pos = 0;
+            self.fdn_buffers = fdn_buffers;
+            self.fdn_indices = [0; 4];
+            self.fdn_filter_states = [0.0; 4];
         }
     }
 }
@@ -152,42 +192,56 @@ impl AudioEffectDevice for HybridReverb {
             return;
         }
 
-        let predelay_len = ((self.predelay_ms * 0.001 * self.sample_rate) as usize)
-            .clamp(1, self.predelay_buf_l.len() - 1);
-        let ir_len = self.ir_l.len();
-        let feedback_gain = (-3.0 / (self.decay_s.max(0.1) * self.sample_rate / 1000.0)).exp();
+        let predelay_len = ((self.predelay_ms * 0.001 * self.sample_rate).round() as usize)
+            .clamp(0, self.predelay_buf_l.len().saturating_sub(1));
+        let hist_len = self.conv_history_l.len();
+        let size_clamped = self.size.clamp(0.2, 2.0);
+        let decay_s = self.decay_s.clamp(0.1, 20.0);
+        let damping = self.damping.clamp(0.0, 0.99);
+
+        let mut fdn_eff_lens = [0usize; 4];
+        let mut fdn_gains = [0.0f32; 4];
+        for line in 0..4 {
+            let buf_len = self.fdn_buffers[line].len();
+            let eff_len = ((FDN_BASE_SEC[line] * self.sample_rate * size_clamped).round() as usize)
+                .clamp(16, buf_len.saturating_sub(1).max(16));
+            fdn_eff_lens[line] = eff_len;
+            let delay_sec = eff_len as f32 / self.sample_rate;
+            fdn_gains[line] = (-6.907755 * delay_sec / decay_s).exp().clamp(0.0, 0.995);
+        }
 
         for i in 0..count {
-            let dry_l = buffer.left[i];
-            let dry_r = buffer.right[i];
+            let dry_l = if buffer.left[i].is_finite() { buffer.left[i] } else { 0.0 };
+            let dry_r = if buffer.right[i].is_finite() { buffer.right[i] } else { 0.0 };
 
-            // 1. Pre-delay
-            let read_pos = if self.predelay_pos >= predelay_len {
-                self.predelay_pos - predelay_len
-            } else {
-                self.predelay_pos + self.predelay_buf_l.len() - predelay_len
-            };
-            let pd_l = self.predelay_buf_l[read_pos];
-            let pd_r = self.predelay_buf_r[read_pos];
-
+            // 1. Pre-delay (write first so predelay_len == 0 yields immediate zero-delay tap)
             self.predelay_buf_l[self.predelay_pos] = dry_l;
             self.predelay_buf_r[self.predelay_pos] = dry_r;
-            self.predelay_pos = (self.predelay_pos + 1) % self.predelay_buf_l.len();
+            let pd_len = self.predelay_buf_l.len();
+            let read_pos = (self.predelay_pos + pd_len - predelay_len) % pd_len;
+            let pd_l = self.predelay_buf_l[read_pos];
+            let pd_r = self.predelay_buf_r[read_pos];
+            self.predelay_pos = (self.predelay_pos + 1) % pd_len;
 
-            // 2. Convolution Engine
+            // 2. Sparse Early Reflections Convolution (<= 32 taps scaled by room size)
             self.conv_history_l[self.conv_pos] = pd_l;
             self.conv_history_r[self.conv_pos] = pd_r;
 
             let mut conv_out_l = 0.0f32;
             let mut conv_out_r = 0.0f32;
-            for k in 0..ir_len {
-                let h_idx = (self.conv_pos + ir_len - k) % ir_len;
-                conv_out_l += self.conv_history_l[h_idx] * self.ir_l[k];
-                conv_out_r += self.conv_history_r[h_idx] * self.ir_r[k];
+            for k in 0..NUM_ER_TAPS {
+                let tap_l = ((self.er_delays_sec[k] * self.sample_rate * size_clamped).round() as usize)
+                    .clamp(1, hist_len.saturating_sub(1).max(1));
+                let tap_r = ((self.er_delays_sec[k] * 1.07 * self.sample_rate * size_clamped).round() as usize)
+                    .clamp(1, hist_len.saturating_sub(1).max(1));
+                let idx_l = (self.conv_pos + hist_len - tap_l) % hist_len;
+                let idx_r = (self.conv_pos + hist_len - tap_r) % hist_len;
+                conv_out_l += self.conv_history_l[idx_l] * self.er_gains_l[k];
+                conv_out_r += self.conv_history_r[idx_r] * self.er_gains_r[k];
             }
-            self.conv_pos = (self.conv_pos + 1) % ir_len;
+            self.conv_pos = (self.conv_pos + 1) % hist_len;
 
-            // 3. Algorithmic FDN Engine
+            // 3. Algorithmic FDN Engine (size-aware delay lengths & SR-invariant RT60 decay)
             let fdn_in = match self.mode {
                 HybridReverbMode::Series => (conv_out_l + conv_out_r) * 0.5,
                 _ => (pd_l + pd_r) * 0.5,
@@ -195,19 +249,20 @@ impl AudioEffectDevice for HybridReverb {
 
             let mut fdn_reads = [0.0f32; 4];
             for (line, val) in fdn_reads.iter_mut().enumerate() {
-                let pos = self.fdn_indices[line];
-                *val = self.fdn_buffers[line][pos];
+                let buf_len = self.fdn_buffers[line].len();
+                let w = self.fdn_indices[line];
+                let r = (w + buf_len - fdn_eff_lens[line]) % buf_len;
+                *val = self.fdn_buffers[line][r];
             }
 
             // Householder matrix mixing: y = x - 0.5 * sum(x)
             let sum: f32 = fdn_reads.iter().sum();
-            let mut fdn_mixed = [0.0f32; 4];
             for line in 0..4 {
-                fdn_mixed[line] = fdn_reads[line] - 0.5 * sum;
+                let mixed = fdn_reads[line] - 0.5 * sum;
                 // Damping 1-pole filter
                 self.fdn_filter_states[line] =
-                    self.fdn_filter_states[line] * self.damping + fdn_mixed[line] * (1.0 - self.damping);
-                let write_val = fdn_in + self.fdn_filter_states[line] * feedback_gain;
+                    self.fdn_filter_states[line] * damping + mixed * (1.0 - damping);
+                let write_val = (fdn_in + self.fdn_filter_states[line] * fdn_gains[line]).clamp(-4.0, 4.0);
                 let len = self.fdn_buffers[line].len();
                 let pos = self.fdn_indices[line];
                 self.fdn_buffers[line][pos] = write_val;

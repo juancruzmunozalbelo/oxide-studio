@@ -85,7 +85,7 @@ impl Corpus {
         }
     }
 
-    fn rebuild_modes(&mut self) {
+    pub fn rebuild_modes(&mut self) {
         let ratios: &[f32] = match self.resonator_type {
             CorpusResonatorType::Beam => &[1.0, 2.76, 5.4, 8.93, 13.34],
             CorpusResonatorType::Marimba => &[1.0, 3.98, 9.2, 16.5],

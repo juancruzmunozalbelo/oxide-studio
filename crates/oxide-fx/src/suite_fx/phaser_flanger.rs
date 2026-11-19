@@ -63,9 +63,28 @@ impl PhaserFlanger {
     }
 
     pub fn set_sample_rate(&mut self, sample_rate: f32) {
-        if sample_rate > 0.0 {
-            *self = Self::new(sample_rate);
+        if sample_rate.is_finite() && sample_rate > 0.0 {
+            let max_flange = ((sample_rate * 0.05) as usize).max(256);
+            self.sample_rate = sample_rate;
+            self.allpass_states_l.fill(0.0);
+            self.allpass_states_r.fill(0.0);
+            self.feedback_state_l = 0.0;
+            self.feedback_state_r = 0.0;
+            self.flange_buf_l = vec![0.0; max_flange];
+            self.flange_buf_r = vec![0.0; max_flange];
+            self.flange_pos = 0;
         }
+    }
+
+    #[inline(always)]
+    fn read_linear(buf: &[f32], write_pos: usize, delay_samples: f32) -> f32 {
+        let len = buf.len();
+        let d = delay_samples.clamp(1.0, (len - 2) as f32);
+        let idx_int = d.floor() as usize;
+        let frac = d - idx_int as f32;
+        let i0 = (write_pos + len - idx_int) % len;
+        let i1 = (write_pos + len - idx_int - 1) % len;
+        buf[i0] + frac * (buf[i1] - buf[i0])
     }
 }
 
@@ -166,15 +185,12 @@ impl AudioEffectDevice for PhaserFlanger {
                     let base_delay = max_delay_ms * 0.001 * self.sample_rate;
                     let mod_range = base_delay * self.depth * 0.8;
 
-                    let d_l = (base_delay + lfo_l * mod_range).clamp(1.0, (self.flange_buf_l.len() - 2) as f32);
-                    let d_r = (base_delay + lfo_r * mod_range).clamp(1.0, (self.flange_buf_r.len() - 2) as f32);
+                    let d_l = base_delay + lfo_l * mod_range;
+                    let d_r = base_delay + lfo_r * mod_range;
 
                     let buf_len = self.flange_buf_l.len();
-                    let idx_l = ((self.flange_pos as f32 - d_l + buf_len as f32) as usize) % buf_len;
-                    let idx_r = ((self.flange_pos as f32 - d_r + buf_len as f32) as usize) % buf_len;
-
-                    let del_l = self.flange_buf_l[idx_l];
-                    let del_r = self.flange_buf_r[idx_r];
+                    let del_l = Self::read_linear(&self.flange_buf_l, self.flange_pos, d_l);
+                    let del_r = Self::read_linear(&self.flange_buf_r, self.flange_pos, d_r);
 
                     self.flange_buf_l[self.flange_pos] = (dry_l + del_l * self.feedback).clamp(-2.0, 2.0);
                     self.flange_buf_r[self.flange_pos] = (dry_r + del_r * self.feedback).clamp(-2.0, 2.0);

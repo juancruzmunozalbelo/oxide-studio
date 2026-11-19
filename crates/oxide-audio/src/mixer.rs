@@ -63,6 +63,10 @@ pub struct AudioTrackChannel {
     delay_write_ptr: usize,
     delay_samples: usize,
 
+    // Group summing bus (cleared each block in begin_block)
+    group_bus_l: Vec<f32>,
+    group_bus_r: Vec<f32>,
+
     // Metering ballistics
     pub peak_l: f32,
     pub peak_r: f32,
@@ -72,9 +76,16 @@ pub struct AudioTrackChannel {
     sum_sq_r: f32,
 }
 
+const MIXER_PREALLOC_FRAMES: usize = 8192;
+
 impl AudioTrackChannel {
     pub fn new(id: u32, name: &str, track_type: TrackType, sample_rate: f32) -> Self {
-        let max_delay_frames = ((MAX_DELAY_MS / 1000.0) * sample_rate.max(44100.0)).ceil() as usize + 64;
+        let sr = if sample_rate.is_finite() && sample_rate > 0.0 {
+            sample_rate
+        } else {
+            44100.0
+        };
+        let max_delay_frames = ((MAX_DELAY_MS / 1000.0) * sr.max(44100.0)).ceil() as usize + 64;
         Self {
             id,
             name: name.to_string(),
@@ -94,6 +105,8 @@ impl AudioTrackChannel {
             delay_buf_r: vec![0.0; max_delay_frames],
             delay_write_ptr: 0,
             delay_samples: 0,
+            group_bus_l: vec![0.0; MIXER_PREALLOC_FRAMES],
+            group_bus_r: vec![0.0; MIXER_PREALLOC_FRAMES],
             peak_l: 0.0,
             peak_r: 0.0,
             rms_l: 0.0,
@@ -109,6 +122,9 @@ impl AudioTrackChannel {
     }
 
     pub fn set_volume_db(&mut self, db: f32) {
+        if !db.is_finite() {
+            return;
+        }
         self.volume_db = db.clamp(-70.0, 6.0);
         self.volume_linear = if self.volume_db <= -59.5 {
             0.0
@@ -118,10 +134,16 @@ impl AudioTrackChannel {
     }
 
     pub fn set_pan(&mut self, pan: f32) {
+        if !pan.is_finite() {
+            return;
+        }
         self.pan = pan.clamp(-1.0, 1.0);
     }
 
     pub fn set_track_delay(&mut self, ms: f32, sample_rate: f32) {
+        if !ms.is_finite() || !sample_rate.is_finite() || sample_rate <= 0.0 {
+            return;
+        }
         self.track_delay_ms = ms.clamp(-MAX_DELAY_MS, MAX_DELAY_MS);
         if self.track_delay_ms > 0.0 {
             self.delay_samples = ((self.track_delay_ms / 1000.0) * sample_rate).round() as usize;
@@ -176,8 +198,8 @@ impl AudioReturnChannel {
             pan: 0.0,
             mute: false,
             solo: false,
-            buffer_l: vec![0.0; 1024],
-            buffer_r: vec![0.0; 1024],
+            buffer_l: vec![0.0; MIXER_PREALLOC_FRAMES],
+            buffer_r: vec![0.0; MIXER_PREALLOC_FRAMES],
             peak_l: 0.0,
             peak_r: 0.0,
             rms_l: 0.0,
@@ -188,6 +210,9 @@ impl AudioReturnChannel {
     }
 
     pub fn set_volume_db(&mut self, db: f32) {
+        if !db.is_finite() {
+            return;
+        }
         self.volume_db = db.clamp(-70.0, 6.0);
         self.volume_linear = if self.volume_db <= -59.5 {
             0.0
@@ -197,6 +222,9 @@ impl AudioReturnChannel {
     }
 
     pub fn set_pan(&mut self, pan: f32) {
+        if !pan.is_finite() {
+            return;
+        }
         self.pan = pan.clamp(-1.0, 1.0);
     }
 
@@ -274,12 +302,12 @@ impl ModularAudioMixer {
             master_rms_r: 0.0,
             master_sum_sq_l: 0.0,
             master_sum_sq_r: 0.0,
-            master_bus_l: vec![0.0; 1024],
-            master_bus_r: vec![0.0; 1024],
-            master_bus_l_f64: vec![0.0; 1024],
-            master_bus_r_f64: vec![0.0; 1024],
-            resampling_bus_l: vec![0.0; 1024],
-            resampling_bus_r: vec![0.0; 1024],
+            master_bus_l: vec![0.0; MIXER_PREALLOC_FRAMES],
+            master_bus_r: vec![0.0; MIXER_PREALLOC_FRAMES],
+            master_bus_l_f64: vec![0.0; MIXER_PREALLOC_FRAMES],
+            master_bus_r_f64: vec![0.0; MIXER_PREALLOC_FRAMES],
+            resampling_bus_l: vec![0.0; MIXER_PREALLOC_FRAMES],
+            resampling_bus_r: vec![0.0; MIXER_PREALLOC_FRAMES],
             sample_rate: sr,
             meter_alpha,
             peak_decay_coeff,
@@ -336,11 +364,16 @@ impl ModularAudioMixer {
 
     /// Set crossfader position in range [-1.0, 1.0].
     pub fn set_crossfader(&mut self, pos: f32) {
-        self.crossfader_position = pos.clamp(-1.0, 1.0);
+        if pos.is_finite() {
+            self.crossfader_position = pos.clamp(-1.0, 1.0);
+        }
     }
 
     /// Set master volume in decibels.
     pub fn set_master_volume_db(&mut self, db: f32) {
+        if !db.is_finite() {
+            return;
+        }
         self.master_volume_db = db.clamp(-70.0, 6.0);
         self.master_volume_linear = if self.master_volume_db <= -59.5 {
             0.0
@@ -351,7 +384,9 @@ impl ModularAudioMixer {
 
     /// Set master pan [-1.0, 1.0].
     pub fn set_master_pan(&mut self, pan: f32) {
-        self.master_pan = pan.clamp(-1.0, 1.0);
+        if pan.is_finite() {
+            self.master_pan = pan.clamp(-1.0, 1.0);
+        }
     }
 
     /// Check if any channel or return bus is soloed.
@@ -386,7 +421,7 @@ impl ModularAudioMixer {
         }
     }
 
-    /// Prepare a block for processing: clears master and return accumulator buffers.
+    /// Prepare a block for processing: clears master, group, and return accumulator buffers.
     pub fn begin_block(&mut self, frames: usize) {
         if self.master_bus_l.len() < frames {
             self.master_bus_l.resize(frames, 0.0);
@@ -402,6 +437,15 @@ impl ModularAudioMixer {
             self.master_bus_r[i] = 0.0;
             self.master_bus_l_f64[i] = 0.0;
             self.master_bus_r_f64[i] = 0.0;
+        }
+
+        for ch in &mut self.channels {
+            if ch.group_bus_l.len() < frames {
+                ch.group_bus_l.resize(frames, 0.0);
+                ch.group_bus_r.resize(frames, 0.0);
+            }
+            ch.group_bus_l[..frames].fill(0.0);
+            ch.group_bus_r[..frames].fill(0.0);
         }
 
         for ret in &mut self.returns {
@@ -437,6 +481,19 @@ impl ModularAudioMixer {
         } else {
             !ch.mute
         };
+
+        // 0. Fold accumulated GroupTrack child audio into this channel's input (regardless of track delay)
+        let grp_avail = len.min(ch.group_bus_l.len()).min(ch.group_bus_r.len());
+        for i in 0..len {
+            let mut l = if left[i].is_finite() { left[i] } else { 0.0 };
+            let mut r = if right[i].is_finite() { right[i] } else { 0.0 };
+            if ch.track_type == TrackType::Group && i < grp_avail {
+                l += ch.group_bus_l[i];
+                r += ch.group_bus_r[i];
+            }
+            left[i] = l;
+            right[i] = r;
+        }
 
         // 1. Pre-fader sends: tapped BEFORE volume fader, mute, and pan
         for send in &ch.sends {
@@ -536,11 +593,13 @@ impl ModularAudioMixer {
             OutputDestination::GroupTrack(grp_id) => {
                 if let Some(grp_idx) = self.channels.iter().position(|c| c.id == grp_id) {
                     let grp = &mut self.channels[grp_idx];
-                    let grp_cap = grp.delay_buf_l.len();
+                    if grp.group_bus_l.len() < len {
+                        grp.group_bus_l.resize(len, 0.0);
+                        grp.group_bus_r.resize(len, 0.0);
+                    }
                     for i in 0..len {
-                        let wp = (grp.delay_write_ptr + i) % grp_cap;
-                        grp.delay_buf_l[wp] += left[i];
-                        grp.delay_buf_r[wp] += right[i];
+                        grp.group_bus_l[i] += left[i];
+                        grp.group_bus_r[i] += right[i];
                     }
                 } else {
                     for i in 0..len {
@@ -600,8 +659,10 @@ impl ModularAudioMixer {
         let gain = if is_audible { ret.volume_linear } else { 0.0 };
 
         for i in 0..frames {
-            let l = ret.buffer_l[i] * gain * pan_l;
-            let r = ret.buffer_r[i] * gain * pan_r;
+            let ret_l = if ret.buffer_l[i].is_finite() { ret.buffer_l[i] } else { 0.0 };
+            let ret_r = if ret.buffer_r[i].is_finite() { ret.buffer_r[i] } else { 0.0 };
+            let l = ret_l * gain * pan_l;
+            let r = ret_r * gain * pan_r;
 
             ret.buffer_l[i] = l;
             ret.buffer_r[i] = r;
@@ -827,5 +888,39 @@ mod tests {
             assert_eq!(out_l[i], 0.0, "Master out L must be exact 0.0 at frame {}", i);
             assert_eq!(out_r[i], 0.0, "Master out R must be exact 0.0 at frame {}", i);
         }
+    }
+
+    #[test]
+    fn test_group_track_forwards_child_audio_with_zero_delay() {
+        let mut mixer = ModularAudioMixer::new(44100.0);
+        let child = mixer.add_channel("ChildSynth", TrackType::Audio);
+        let group = mixer.add_channel("SynthGroup", TrackType::Group);
+        let group_id = mixer.channels[group].id;
+        mixer.channels[child].output_destination = OutputDestination::GroupTrack(group_id);
+        mixer.channels[group].output_destination = OutputDestination::Master;
+        assert_eq!(mixer.channels[group].delay_samples, 0);
+
+        let frames = 256;
+        mixer.begin_block(frames);
+
+        let mut c_l = vec![0.4f32; frames];
+        let mut c_r = vec![0.4f32; frames];
+        mixer.process_channel(child, &mut c_l, &mut c_r);
+
+        let mut g_l = vec![0.0f32; frames];
+        let mut g_r = vec![0.0f32; frames];
+        mixer.process_channel(group, &mut g_l, &mut g_r);
+
+        // Child audio (two cascaded constant-power center pans: 0.4 * 0.5 = 0.2) must emerge when delay==0
+        assert!(
+            (g_l[0] - 0.2).abs() < 1e-4,
+            "GroupTrack must forward child audio when delay_samples==0, got {}",
+            g_l[0]
+        );
+
+        let mut out_l = vec![0.0f32; frames];
+        let mut out_r = vec![0.0f32; frames];
+        mixer.end_block(&mut out_l, &mut out_r);
+        assert!(out_l[200] > 0.1, "GroupTrack mix must reach Master bus");
     }
 }

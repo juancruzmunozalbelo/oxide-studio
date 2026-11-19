@@ -616,6 +616,9 @@ impl OWarper {
                 slice_in.to_vec()
             };
             let res_frames = resampled.len() / channels;
+            if res_frames == 0 {
+                continue;
+            }
 
             // Render slice to target length based on LoopMode and Envelope
             for f in 0..target_len {
@@ -636,6 +639,7 @@ impl OWarper {
                     // Attack section: 1.0x playback
                     f
                 } else {
+                    let tail_offset = f.saturating_sub(attack_frames);
                     match loop_mode {
                         TransientLoopMode::Off => {
                             if f < res_frames {
@@ -648,13 +652,13 @@ impl OWarper {
                         TransientLoopMode::Forward => {
                             let tail_start = attack_frames.min(res_frames.saturating_sub(1));
                             let tail_len = res_frames.saturating_sub(tail_start).max(1);
-                            tail_start + ((f - attack_frames) % tail_len)
+                            tail_start + (tail_offset % tail_len)
                         }
                         TransientLoopMode::Alternating => {
                             let tail_start = attack_frames.min(res_frames.saturating_sub(1));
                             let tail_len = res_frames.saturating_sub(tail_start).max(1);
                             let period = tail_len * 2;
-                            let phase = (f - attack_frames) % period;
+                            let phase = tail_offset % period;
                             if phase < tail_len {
                                 tail_start + phase
                             } else {
@@ -688,7 +692,9 @@ impl OWarper {
         let grain_len = ((grain_ms / 1000.0) * self.sample_rate).round() as usize & !1;
         let grain_len = grain_len.clamp(64, 4096);
         let hop_a = grain_len / 2;
-        let hop_s = ((hop_a as f64) * stretch).round().max(1.0) as usize;
+        let max_hop_s = (grain_len / 2).max(1);
+        let hop_s = (((hop_a as f64) * stretch).round().max(1.0) as usize).min(max_hop_s);
+        let in_step_f = (hop_s as f64) / stretch.max(0.05);
 
         let in_frames = input.len() / channels;
         let out_frames = (in_frames as f64 * stretch).round().max(1.0) as usize;
@@ -701,10 +707,11 @@ impl OWarper {
             win[n] = 0.5 * (1.0 - (2.0 * PI * (n as f32) / (grain_len as f32)).cos());
         }
 
-        let mut in_pos = 0usize;
+        let mut in_pos_f = 0.0f64;
         let mut out_pos = 0usize;
 
-        while in_pos + grain_len <= in_frames && out_pos < out_frames {
+        while (in_pos_f.round() as usize) + grain_len <= in_frames && out_pos < out_frames {
+            let in_pos = in_pos_f.round() as usize;
             let slice = &input[in_pos * channels..(in_pos + grain_len) * channels];
 
             // Resample for pitch shifting
@@ -752,7 +759,7 @@ impl OWarper {
                 }
             }
 
-            in_pos += hop_a;
+            in_pos_f += in_step_f;
             out_pos += hop_s;
         }
 
@@ -786,7 +793,8 @@ impl OWarper {
         let flux = self.config.texture_config.flux.clamp(0.0, 1.0);
 
         let hop_a = grain_len / 2;
-        let hop_s = ((hop_a as f64) * stretch).round().max(1.0) as usize;
+        let max_hop_s = (grain_len / 2).max(1);
+        let hop_s = (((hop_a as f64) * stretch).round().max(1.0) as usize).min(max_hop_s);
 
         let in_frames = input.len() / channels;
         let out_frames = (in_frames as f64 * stretch).round().max(1.0) as usize;
@@ -879,8 +887,10 @@ impl OWarper {
         is_pro: bool,
     ) -> Vec<f32> {
         let fft_size = 1024usize;
-        let hop_a = 256usize;
-        let hop_s = ((hop_a as f64) * stretch).round().max(1.0) as usize;
+        let base_hop_a = 256usize;
+        let max_hop_s = fft_size / 2;
+        let hop_s = (((base_hop_a as f64) * stretch).round().max(1.0) as usize).min(max_hop_s);
+        let eff_hop_a_f = ((hop_s as f64) / stretch.max(0.05)).max(1.0);
 
         let in_frames = input.len() / channels;
         let out_frames = (in_frames as f64 * stretch).round().max(1.0) as usize;
@@ -892,26 +902,31 @@ impl OWarper {
             win[n] = 0.5 * (1.0 - (2.0 * PI * (n as f32) / (fft_size as f32)).cos());
         }
 
-        let num_hops = in_frames.saturating_sub(fft_size) / hop_a;
-        if num_hops == 0 {
+        if in_frames < fft_size {
             return self.process_repitch(input, channels, stretch, pitch_ratio);
         }
 
         let half_fft = fft_size / 2;
         let mut last_phase = vec![vec![0.0f32; half_fft + 1]; channels];
-        let mut synth_phase = vec![vec![0.0f32; half_fft + 1]; channels];
+        let mut out_phase = vec![vec![0.0f32; half_fft + 1]; channels];
 
         let mut re = vec![0.0f32; fft_size];
         let mut im = vec![0.0f32; fft_size];
         let mut mag = vec![0.0f32; half_fft + 1];
         let mut phase = vec![0.0f32; half_fft + 1];
+        let mut best_mag = vec![0.0f32; half_fft + 1];
+        let mut target_inst_freq = vec![0.0f32; half_fft + 1];
+        let mut synth_mag = vec![0.0f32; half_fft + 1];
 
         let formants_preserved = if is_pro { self.config.complex_pro_config.formants } else { 0.0 };
         let env_width = if is_pro { self.config.complex_pro_config.envelope } else { 0.5 };
 
-        for h in 0..num_hops {
-            let in_pos = h * hop_a;
-            let out_pos = h * hop_s;
+        let mut in_pos_f = 0.0f64;
+        let mut out_pos = 0usize;
+        let two_pi = 2.0 * PI;
+
+        while out_pos < out_frames && (in_pos_f.round() as usize) + fft_size <= in_frames {
+            let in_pos = in_pos_f.round() as usize;
 
             for ch in 0..channels {
                 for n in 0..fft_size {
@@ -938,17 +953,18 @@ impl OWarper {
                     }
                 }
 
-                // Phase Vocoder Phase Accumulation with Instantaneous Frequency
-                let mut synth_mag = vec![0.0f32; half_fft + 1];
-                let mut synth_p = vec![0.0f32; half_fft + 1];
+                // Phase Vocoder Phase Accumulation using dedicated output phase buffer (1 update per output bin per hop)
+                synth_mag.fill(0.0);
+                best_mag.fill(0.0);
+                target_inst_freq.fill(0.0);
 
                 for k in 0..=half_fft {
-                    let expected_omega = 2.0 * PI * (k as f32) / (fft_size as f32);
-                    let delta_phi = phase[k] - last_phase[ch][k] - expected_omega * (hop_a as f32);
+                    let expected_omega = two_pi * (k as f32) / (fft_size as f32);
+                    let delta_phi = phase[k] - last_phase[ch][k] - expected_omega * (eff_hop_a_f as f32);
 
                     // Principal argument wrapping to [-PI, PI]
-                    let wrapped = ((delta_phi + PI) % (2.0 * PI) + 2.0 * PI) % (2.0 * PI) - PI;
-                    let inst_freq = expected_omega + wrapped / (hop_a as f32);
+                    let wrapped = ((delta_phi + PI).rem_euclid(two_pi)) - PI;
+                    let inst_freq = expected_omega + wrapped / (eff_hop_a_f as f32);
 
                     last_phase[ch][k] = phase[k];
 
@@ -957,31 +973,41 @@ impl OWarper {
                     let target_k = target_k_f.round() as usize;
 
                     if target_k <= half_fft {
-                        synth_phase[ch][target_k] += (hop_s as f32) * inst_freq * pitch_ratio;
-                        synth_p[target_k] = synth_phase[ch][target_k];
-
                         let mut m = mag[k];
                         if is_pro && formants_preserved > 0.0 {
-                            // Preserve formant envelope
                             let orig_env = spectral_envelope[k];
                             let target_env = spectral_envelope[target_k];
                             let excitation = m / orig_env;
                             let adapted_env = orig_env * formants_preserved + target_env * (1.0 - formants_preserved);
                             m = excitation * adapted_env;
                         }
+                        if m >= best_mag[target_k] {
+                            best_mag[target_k] = m;
+                            target_inst_freq[target_k] = inst_freq * pitch_ratio;
+                        }
                         synth_mag[target_k] += m;
                     }
                 }
 
-                // Reconstruct spectrum
-                re[0] = synth_mag[0] * synth_p[0].cos();
+                for tk in 0..=half_fft {
+                    let step_freq = if best_mag[tk] > 0.0 {
+                        target_inst_freq[tk]
+                    } else {
+                        two_pi * (tk as f32) / (fft_size as f32)
+                    };
+                    out_phase[ch][tk] =
+                        (out_phase[ch][tk] + (hop_s as f32) * step_freq).rem_euclid(two_pi);
+                }
+
+                // Reconstruct spectrum using dedicated output phase buffer
+                re[0] = synth_mag[0] * out_phase[ch][0].cos();
                 im[0] = 0.0;
-                re[half_fft] = synth_mag[half_fft] * synth_p[half_fft].cos();
+                re[half_fft] = synth_mag[half_fft] * out_phase[ch][half_fft].cos();
                 im[half_fft] = 0.0;
 
                 for k in 1..half_fft {
-                    re[k] = synth_mag[k] * synth_p[k].cos();
-                    im[k] = synth_mag[k] * synth_p[k].sin();
+                    re[k] = synth_mag[k] * out_phase[ch][k].cos();
+                    im[k] = synth_mag[k] * out_phase[ch][k].sin();
                     re[fft_size - k] = re[k];
                     im[fft_size - k] = -im[k];
                 }
@@ -999,6 +1025,9 @@ impl OWarper {
                     }
                 }
             }
+
+            in_pos_f += eff_hop_a_f;
+            out_pos += hop_s;
         }
 
         // Normalize
@@ -1342,5 +1371,52 @@ mod tests {
         assert_eq!(samples.len(), 2);
         assert!((samples[0] - 0.25).abs() < 1e-6);
         assert!((samples[1] + 0.5).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_warper_beats_underflow_high_stretch_and_complex_pitch() {
+        // 1. Beats mode: short transient slice < attack_frames must not underflow usize
+        let sr = 44100.0;
+        let short_slice = vec![0.4f32; 400]; // < default preserve_attack_ms (15ms = 661 frames)
+        let mut cfg = WarperConfig::default();
+        cfg.mode = WarpMode::Beats;
+        let warper = OWarper::new(sr, cfg);
+        let out_beats = warper.process_stretch(&short_slice, 1, 2.5, 0.0);
+        assert!(!out_beats.is_empty());
+        assert!(out_beats.iter().all(|s| s.is_finite()));
+
+        // 2. High stretch ratio in Tones/Texture/Complex must not produce middle silent gaps
+        let input: Vec<f32> = (0..4096)
+            .map(|i| (2.0 * PI * 220.0 * (i as f32) / sr).sin() * 0.5)
+            .collect();
+        for mode in [WarpMode::Tones, WarpMode::Texture, WarpMode::Complex] {
+            let mut c = WarperConfig::default();
+            c.mode = mode;
+            let w = OWarper::new(sr, c);
+            let out = w.process_stretch(&input, 1, 8.0, 0.0);
+            let mid_start = out.len() / 4;
+            let mid_end = (out.len() * 3) / 4;
+            let mid_peak = out[mid_start..mid_end]
+                .iter()
+                .map(|s| s.abs())
+                .fold(0.0f32, f32::max);
+            assert!(
+                mid_peak > 0.01,
+                "Mode {:?} at 8.0x stretch must not drop out in middle, peak={}",
+                mode,
+                mid_peak
+            );
+        }
+
+        // 3. Complex mode pitch shift up & down produces finite audio without phase corruption
+        let mut cc = WarperConfig::default();
+        cc.mode = WarpMode::Complex;
+        let cw = OWarper::new(sr, cc);
+        for st in [-12.0, 7.0] {
+            let pitched = cw.process_stretch(&input, 1, 1.0, st);
+            assert!(pitched.iter().all(|s| s.is_finite()));
+            let energy: f32 = pitched.iter().map(|s| s * s).sum();
+            assert!(energy > 1.0, "Complex pitch shift {}st produced empty energy", st);
+        }
     }
 }

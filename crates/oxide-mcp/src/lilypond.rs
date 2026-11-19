@@ -119,26 +119,24 @@ pub fn parse_lilypond(input: &str) -> ParsedSequence {
     if text.starts_with("\\tempo") {
         let rest = text.trim_start_matches("\\tempo").trim();
         if let Some(eq_idx) = rest.find('=') {
-            let tempo_part = rest[eq_idx + 1..].trim();
-            let mut num_str = String::new();
-            for c in tempo_part.chars() {
-                if c.is_ascii_digit() || c == '.' {
-                    num_str.push(c);
-                } else if !num_str.is_empty() {
-                    break;
-                }
-            }
+            let after_eq = rest[eq_idx + 1..].trim_start();
+            let num_len: usize = after_eq
+                .chars()
+                .take_while(|c| c.is_ascii_digit() || *c == '.')
+                .map(|c| c.len_utf8())
+                .sum();
+            let num_str = &after_eq[..num_len];
             if let Ok(bpm) = num_str.parse::<f64>() {
                 if bpm > 10.0 && bpm < 400.0 {
                     tempo = bpm;
                 }
             }
-            if let Some(line_end) = rest.find('\n') {
+            if num_len > 0 {
+                text = after_eq[num_len..].trim();
+            } else if let Some(line_end) = rest.find('\n') {
                 text = rest[line_end + 1..].trim();
-            } else if let Some(space_end) = rest[eq_idx + 1..].find(|c: char| c.is_whitespace() && !num_str.is_empty()) {
-                text = rest[eq_idx + 1 + space_end..].trim();
             } else {
-                text = "";
+                text = after_eq;
             }
         }
     }
@@ -317,5 +315,24 @@ pub fn sequence_to_clip_pattern(parsed: &ParsedSequence) -> ClipPattern {
             length_beats: rounded_length,
             notes,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_single_line_tempo_parses_all_notes_without_dropping() {
+        let seq = parse_lilypond("\\tempo 4 = 120 c4 d4 e4 f4");
+        let pat = sequence_to_clip_pattern(&seq);
+        match pat {
+            ClipPattern::Midi(mp) => {
+                assert_eq!(mp.notes.len(), 4, "Expected all 4 notes after inline \\tempo, got {:?}", mp.notes);
+                assert_eq!(mp.notes[0].pitch, 60);
+                assert_eq!(mp.notes[3].pitch, 65);
+            }
+            _ => panic!("Expected MIDI pattern"),
+        }
     }
 }

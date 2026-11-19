@@ -508,9 +508,9 @@ impl WavetableDevice {
                         (detune, pan)
                     }
                     UnisonMode::Noise => {
-                        let jitter = (voice.rng.next_f32() - 0.5) * 0.4;
+                        let jitter = (voice.rng.next_f32_unit() - 0.5) * 0.4;
                         let detune = (spread_ratio * 0.3 + jitter) * unison_amt;
-                        let pan = (spread_ratio + (voice.rng.next_f32() - 0.5) * 0.2) * unison_amt * 0.8;
+                        let pan = (spread_ratio + (voice.rng.next_f32_unit() - 0.5) * 0.2) * unison_amt * 0.8;
                         (detune, pan)
                     }
                     UnisonMode::PhaseSync => {
@@ -564,14 +564,18 @@ impl WavetableDevice {
             voice.dual_filter.routing = self.filter_routing;
             voice.dual_filter.filter1.filter_type = self.filter1_type;
             voice.dual_filter.filter1.circuit_model = self.filter1_model;
+            voice.dual_filter.filter1_drive = self.filter1_drive;
             voice.dual_filter.filter2.filter_type = self.filter2_type;
             voice.dual_filter.filter2.circuit_model = self.filter2_model;
+            voice.dual_filter.filter2_drive = self.filter2_drive;
 
             voice.dual_filter_r.routing = self.filter_routing;
             voice.dual_filter_r.filter1.filter_type = self.filter1_type;
             voice.dual_filter_r.filter1.circuit_model = self.filter1_model;
+            voice.dual_filter_r.filter1_drive = self.filter1_drive;
             voice.dual_filter_r.filter2.filter_type = self.filter2_type;
             voice.dual_filter_r.filter2.circuit_model = self.filter2_model;
+            voice.dual_filter_r.filter2_drive = self.filter2_drive;
 
             let mod_cutoff1 = (self.filter1_cutoff * 2.0f32.powf(f1_cut_mod * 4.0)).clamp(20.0, 20000.0);
             let mod_res1 = (self.filter1_res + f1_res_mod * 0.5).clamp(0.0, 1.0);

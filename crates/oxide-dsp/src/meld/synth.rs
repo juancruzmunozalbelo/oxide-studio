@@ -335,7 +335,7 @@ impl MeldDevice {
             }
             MeldMacroEngine::Fm => {
                 // 2-Op FM cell
-                let ratio = (p1 * 8.0).max(0.5).round();
+                let ratio = (p1 * 8.0).round().max(0.5);
                 let index = p2.clamp(0.0, 1.0) * 4.0;
                 let mod_dt = base_freq * ratio * inv_sr;
                 *main_phase = (*main_phase + dt).fract();
@@ -524,7 +524,7 @@ impl MeldDevice {
             let mod_a_cutoff = (self.filter_a_cutoff + voice.slide * 2000.0).clamp(20.0, 20000.0);
             let mod_a_res = (self.filter_a_res + voice.pressure * 0.3).clamp(0.0, 1.0);
             let out_proc_a = if self.use_plate_a {
-                let eff_decay = (self.plate_decay + voice.slide * 0.2).clamp(0.05, 0.98);
+                let eff_decay = (self.plate_decay + voice.slide * 2.0).clamp(0.05, 10.0);
                 let eff_damping = (self.plate_damping + voice.pressure * 0.2).clamp(0.0, 0.95);
                 voice.plate_a.process(sig_a, base_freq, eff_decay, eff_damping, sr)
             } else {
@@ -540,7 +540,7 @@ impl MeldDevice {
 
             // Filter B or Plate B
             let out_proc_b = if self.use_plate_b {
-                let eff_decay = (self.plate_decay + voice.slide * 0.2).clamp(0.05, 0.98);
+                let eff_decay = (self.plate_decay + voice.slide * 2.0).clamp(0.05, 10.0);
                 let eff_damping = (self.plate_damping + voice.pressure * 0.2).clamp(0.0, 0.95);
                 voice.plate_b.process(sig_b, base_freq, eff_decay, eff_damping, sr)
             } else {
@@ -652,7 +652,7 @@ impl InstrumentDevice for MeldDevice {
             3 => self.filter_b_cutoff = value.clamp(20.0, 20000.0),
             4 => self.filter_b_res = value.clamp(0.0, 1.0),
             5 => self.cross_mod_amount = value.clamp(0.0, 1.0),
-            6 => self.plate_decay = value.clamp(0.0, 1.0),
+            6 => self.plate_decay = value.clamp(0.05, 10.0),
             7 => self.plate_damping = value.clamp(0.0, 1.0),
             _ => {}
         }

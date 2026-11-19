@@ -35,7 +35,11 @@ impl Default for FdnReverb {
 
 impl FdnReverb {
     pub fn new(sample_rate: f32) -> Self {
-        let sr = if sample_rate <= 0.0 { 44100.0 } else { sample_rate };
+        let sr = if sample_rate.is_finite() && sample_rate > 0.0 {
+            sample_rate
+        } else {
+            44100.0
+        };
         let sr_scale = sr / 44100.0;
 
         // Mutually prime delay lengths for smooth diffuse tail
@@ -66,6 +70,24 @@ impl FdnReverb {
             damping: 0.35,
             wet: 0.25,
         }
+    }
+
+    pub fn set_sample_rate(&mut self, sample_rate: f32) {
+        if !sample_rate.is_finite() || sample_rate <= 0.0 {
+            return;
+        }
+        let sr_scale = sample_rate / 44100.0;
+        let base_delays = [1087, 1283, 1487, 1721, 1987, 2281, 2593, 2909];
+        for i in 0..NUM_FDN_LINES {
+            self.delay_lengths[i] =
+                ((base_delays[i] as f32 * sr_scale) as usize).clamp(16, MAX_FDN_DELAY - 1);
+        }
+        let ap_base = [223, 347, 467, 599];
+        for i in 0..4 {
+            self.ap_lengths[i] = ((ap_base[i] as f32 * sr_scale) as usize).clamp(8, 1023);
+        }
+        self.sample_rate = sample_rate;
+        self.reset();
     }
 
     pub fn reset(&mut self) {
@@ -102,14 +124,34 @@ impl FdnReverb {
     /// Process stereo planar audio buffers in-place. Zero allocations.
     pub fn process_block(&mut self, left: &mut [f32], right: &mut [f32]) {
         let len = left.len().min(right.len());
-        let g = self.decay.clamp(0.1, 0.97) * 0.353553; // Normalized by sqrt(8) = 1 / 2.828427
-        let alpha = (1.0 - self.damping.clamp(0.0, 0.95)).clamp(0.05, 1.0);
+        let decay = if self.decay.is_finite() {
+            self.decay.clamp(0.1, 0.97)
+        } else {
+            0.85
+        };
+        let g = decay * 0.353553; // Normalized by sqrt(8) = 1 / 2.828427
+        let damping = if self.damping.is_finite() {
+            self.damping.clamp(0.0, 0.95)
+        } else {
+            0.35
+        };
+        let alpha = (1.0 - damping).clamp(0.05, 1.0);
+        let room_size = if self.room_size.is_finite() {
+            self.room_size.clamp(0.1, 2.0)
+        } else {
+            1.0
+        };
+        let wet = if self.wet.is_finite() {
+            self.wet.clamp(0.0, 1.0)
+        } else {
+            0.0
+        };
 
         let mut read_samples = [0.0f32; NUM_FDN_LINES];
 
         for i in 0..len {
-            let in_l = left[i];
-            let in_r = right[i];
+            let in_l = if left[i].is_finite() { left[i] } else { 0.0 };
+            let in_r = if right[i].is_finite() { right[i] } else { 0.0 };
             let in_mono = 0.5 * (in_l + in_r);
 
             // Diffuse input
@@ -117,7 +159,7 @@ impl FdnReverb {
 
             // 1. Read delay lines and apply one-pole lowpass damping
             for ch in 0..NUM_FDN_LINES {
-                let d_len = ((self.delay_lengths[ch] as f32 * self.room_size) as usize)
+                let d_len = ((self.delay_lengths[ch] as f32 * room_size) as usize)
                     .clamp(16, MAX_FDN_DELAY - 1);
                 let w = self.write_indices[ch];
                 let r = (w + MAX_FDN_DELAY - d_len) % MAX_FDN_DELAY;
@@ -170,8 +212,8 @@ impl FdnReverb {
             let out_r = (read_samples[1] + read_samples[3] + read_samples[5] + read_samples[7]) * 0.5;
 
             // Wet/dry mix
-            left[i] = in_l * (1.0 - self.wet) + out_l * self.wet;
-            right[i] = in_r * (1.0 - self.wet) + out_r * self.wet;
+            left[i] = in_l * (1.0 - wet) + out_l * wet;
+            right[i] = in_r * (1.0 - wet) + out_r * wet;
         }
     }
 }

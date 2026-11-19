@@ -47,6 +47,9 @@ fn default_comp_release() -> f32 {
     50.0
 }
 
+/// Maximum number of return sends supported per track mixer strip.
+pub const MAX_MIXER_SENDS: usize = 32;
+
 /// Channel strip mixer state for an individual track.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct MixerState {
@@ -69,8 +72,8 @@ impl Default for MixerState {
             mute: false,
             solo: false,
             arm: false,
-            send_a_db: -60.0,
-            send_b_db: -60.0,
+            send_a_db: -70.0,
+            send_b_db: -70.0,
             sends_db: Vec::new(),
         }
     }
@@ -81,27 +84,18 @@ impl MixerState {
     /// synchronized with `sends_db`.
     pub fn get_send_db(&self, idx: usize) -> f32 {
         match idx {
-            0 => {
-                if !self.sends_db.is_empty() && (self.send_a_db - (-60.0)).abs() < 1e-4 {
-                    self.sends_db[0]
-                } else {
-                    self.send_a_db
-                }
-            }
-            1 => {
-                if self.sends_db.len() > 1 && (self.send_b_db - (-60.0)).abs() < 1e-4 {
-                    self.sends_db[1]
-                } else {
-                    self.send_b_db
-                }
-            }
+            0 => self.send_a_db,
+            1 => self.send_b_db,
             _ => self.sends_db.get(idx).copied().unwrap_or(-70.0),
         }
     }
 
     /// Set send level in dB for return index `idx`, keeping `send_a_db` (0), `send_b_db` (1),
-    /// and `sends_db` synchronized.
+    /// and `sends_db` synchronized. Ignores non-finite values and indices `>= MAX_MIXER_SENDS`.
     pub fn set_send_db(&mut self, idx: usize, db: f32) {
+        if idx >= MAX_MIXER_SENDS || !db.is_finite() {
+            return;
+        }
         let clamped = db.clamp(-70.0, 6.0);
         if idx == 0 {
             self.send_a_db = clamped;
@@ -112,18 +106,26 @@ impl MixerState {
             let old_len = self.sends_db.len();
             self.sends_db.resize(idx + 1, -70.0);
             if old_len == 0 && idx > 0 {
-                self.sends_db[0] = self.send_a_db;
+                self.sends_db[0] = if self.send_a_db.is_finite() {
+                    self.send_a_db.clamp(-70.0, 6.0)
+                } else {
+                    -70.0
+                };
             }
             if old_len <= 1 && idx > 1 {
-                self.sends_db[1] = self.send_b_db;
+                self.sends_db[1] = if self.send_b_db.is_finite() {
+                    self.send_b_db.clamp(-70.0, 6.0)
+                } else {
+                    -70.0
+                };
             }
         }
         self.sends_db[idx] = clamped;
     }
 
-    /// Return effective send levels for `0..max(2, sends_db.len())`.
+    /// Return effective send levels for `0..max(2, sends_db.len()).min(MAX_MIXER_SENDS)`.
     pub fn effective_sends_db(&self) -> Vec<f32> {
-        let count = self.sends_db.len().max(2);
+        let count = self.sends_db.len().clamp(2, MAX_MIXER_SENDS);
         (0..count).map(|i| self.get_send_db(i)).collect()
     }
 }
@@ -259,5 +261,52 @@ impl Default for MasterTrackDefinition {
             reverb_decay_ms: 0.0,
             reverb_mix: 0.0,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_mixer_default_silence_and_send_60db_not_sentinel() {
+        let mut m = MixerState::default();
+        assert_eq!(m.send_a_db, -70.0);
+        assert_eq!(m.send_b_db, -70.0);
+        assert_eq!(m.get_send_db(0), -70.0);
+        assert_eq!(m.get_send_db(1), -70.0);
+
+        // -60.0 must never be treated as an unset sentinel
+        m.set_send_db(0, -12.0);
+        m.set_send_db(1, -6.0);
+        m.send_a_db = -60.0;
+        m.send_b_db = -60.0;
+        assert_eq!(m.get_send_db(0), -60.0);
+        assert_eq!(m.get_send_db(1), -60.0);
+
+        m.set_send_db(2, -9.0);
+        assert_eq!(m.get_send_db(0), -60.0);
+        assert_eq!(m.get_send_db(1), -60.0);
+        assert_eq!(m.get_send_db(2), -9.0);
+    }
+
+    #[test]
+    fn test_mixer_send_cap_and_non_finite_guard() {
+        let mut m = MixerState::default();
+        m.set_send_db(0, -10.0);
+        m.set_send_db(0, f32::NAN);
+        m.set_send_db(0, f32::INFINITY);
+        m.set_send_db(0, f32::NEG_INFINITY);
+        assert_eq!(m.get_send_db(0), -10.0);
+
+        // Huge index must be safely ignored (capped at MAX_MIXER_SENDS = 32)
+        m.set_send_db(32, -6.0);
+        m.set_send_db(10_000_000, -6.0);
+        assert!(m.sends_db.len() <= MAX_MIXER_SENDS);
+        assert_eq!(m.get_send_db(32), -70.0);
+
+        m.set_send_db(31, -3.5);
+        assert_eq!(m.get_send_db(31), -3.5);
+        assert_eq!(m.effective_sends_db().len(), 32);
     }
 }

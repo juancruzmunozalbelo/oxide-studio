@@ -17,8 +17,44 @@ pub struct BundleInfo {
     pub parameters: Vec<PluginParameter>,
 }
 
-/// Extracts metadata from an AU (.component) or VST3 (.vst3) bundle.
+/// Extracts metadata from an AU (.component) or VST3 (.vst3) bundle, returning defaults on plist parse errors.
 pub fn extract_bundle_info(bundle_path: &Path, format: PluginFormat) -> BundleInfo {
+    match try_extract_bundle_info(bundle_path, format) {
+        Ok(info) => info,
+        Err(_) => extract_bundle_info_defaults(bundle_path, format),
+    }
+}
+
+/// Extracts metadata from an AU (.component) or VST3 (.vst3) bundle, returning an explicit error
+/// if a binary `bplist00` plist cannot be decoded (e.g., when `plutil` is absent) or XML is invalid UTF-8.
+pub fn try_extract_bundle_info(bundle_path: &Path, format: PluginFormat) -> Result<BundleInfo, String> {
+    try_extract_bundle_info_with_plutil(bundle_path, format, "plutil")
+}
+
+fn extract_bundle_info_defaults(bundle_path: &Path, format: PluginFormat) -> BundleInfo {
+    let default_name = bundle_path
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("Unknown")
+        .to_string();
+    let category = PluginCategory::Effect;
+    BundleInfo {
+        name: default_name.clone(),
+        identifier: format!("local.{}.{}", format.as_str().to_lowercase(), default_name),
+        vendor: "Unknown".to_string(),
+        version: "1.0.0".to_string(),
+        category,
+        executable_name: None,
+        architectures: vec![std::env::consts::ARCH.to_string()],
+        parameters: synthesize_parameters(category),
+    }
+}
+
+fn try_extract_bundle_info_with_plutil(
+    bundle_path: &Path,
+    format: PluginFormat,
+    plutil_cmd: &str,
+) -> Result<BundleInfo, String> {
     let default_name = bundle_path
         .file_stem()
         .and_then(|s| s.to_str())
@@ -56,10 +92,34 @@ pub fn extract_bundle_info(bundle_path: &Path, format: PluginFormat) -> BundleIn
             executable_name: &mut executable_name,
         };
 
-        if let Some(parsed) = parse_plist_json(plist_file) {
-            apply_plist_json(&parsed, &mut acc);
-        } else if let Ok(content) = fs::read_to_string(plist_file) {
-            apply_plist_xml(&content, &mut acc);
+        let bytes = fs::read(plist_file).map_err(|e| {
+            format!(
+                "Failed to read Info.plist at '{}': {}",
+                plist_file.display(),
+                e
+            )
+        })?;
+
+        match parse_plist_json_with(plutil_cmd, plist_file) {
+            Ok(parsed) => apply_plist_json(&parsed, &mut acc),
+            Err(plutil_err) => {
+                if bytes.starts_with(b"bplist") {
+                    return Err(format!(
+                        "Binary Info.plist (bplist00) at '{}' cannot be parsed because plutil is absent or failed: {}",
+                        plist_file.display(),
+                        plutil_err
+                    ));
+                }
+                let content = std::str::from_utf8(&bytes).map_err(|e| {
+                    format!(
+                        "Info.plist at '{}' is neither valid UTF-8 XML nor convertible by plutil ({}): {}",
+                        plist_file.display(),
+                        plutil_err,
+                        e
+                    )
+                })?;
+                apply_plist_xml(content, &mut acc);
+            }
         }
     }
 
@@ -134,7 +194,7 @@ pub fn extract_bundle_info(bundle_path: &Path, format: PluginFormat) -> BundleIn
     // Synthesize standard exposed parameters based on category
     let parameters = synthesize_parameters(category);
 
-    BundleInfo {
+    Ok(BundleInfo {
         name,
         identifier,
         vendor,
@@ -143,24 +203,30 @@ pub fn extract_bundle_info(bundle_path: &Path, format: PluginFormat) -> BundleIn
         executable_name,
         architectures,
         parameters,
-    }
+    })
 }
 
-/// Convert and parse Info.plist to JSON using macOS plutil.
-fn parse_plist_json(plist_path: &Path) -> Option<serde_json::Value> {
-    let output = Command::new("plutil")
+/// Convert and parse Info.plist to JSON using the configured plutil command.
+fn parse_plist_json_with(plutil_cmd: &str, plist_path: &Path) -> Result<serde_json::Value, String> {
+    let output = Command::new(plutil_cmd)
         .arg("-convert")
         .arg("json")
         .arg("-o")
         .arg("-")
         .arg(plist_path)
         .output()
-        .ok()?;
+        .map_err(|e| format!("failed to invoke '{}': {}", plutil_cmd, e))?;
 
     if output.status.success() {
-        serde_json::from_slice(&output.stdout).ok()
+        serde_json::from_slice(&output.stdout)
+            .map_err(|e| format!("failed to parse JSON emitted by plutil: {}", e))
     } else {
-        None
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        Err(format!(
+            "plutil exited with {}: {}",
+            output.status,
+            stderr.trim()
+        ))
     }
 }
 
@@ -329,10 +395,14 @@ fn apply_plist_xml(xml: &str, acc: &mut PlistAccumulator<'_>) {
 fn extract_xml_string(xml: &str, key: &str) -> Option<String> {
     let key_tag = format!("<key>{}</key>", key);
     let key_pos = xml.find(&key_tag)?;
-    let after_key = &xml[key_pos + key_tag.len()..];
-    let str_start = after_key.find("<string>")? + "<string>".len();
-    let str_end = after_key[str_start..].find("</string>")? + str_start;
-    Some(after_key[str_start..str_end].trim().to_string())
+    let mut after_key = xml[key_pos + key_tag.len()..].trim_start();
+    while let Some(rest) = after_key.strip_prefix("<!--") {
+        let end_comment = rest.find("-->")?;
+        after_key = rest[end_comment + 3..].trim_start();
+    }
+    let after_open = after_key.strip_prefix("<string>")?;
+    let str_end = after_open.find("</string>")?;
+    Some(after_open[..str_end].trim().to_string())
 }
 
 fn uppercase_first_letter(s: &str) -> String {
@@ -497,6 +567,59 @@ mod tests {
         .unwrap();
         let inst_info = extract_bundle_info(&inst_bundle, PluginFormat::Vst3);
         assert_eq!(inst_info.category, PluginCategory::Instrument);
+
+        let _ = fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn test_xml_key_extraction_scoped_to_immediate_sibling() {
+        let xml = r#"
+        <dict>
+            <key>CFBundleDisplayName</key>
+            <false/>
+            <key>CFBundleSignature</key>
+            <integer>1234</integer>
+            <key>UnrelatedKey</key>
+            <string>WrongStringValue</string>
+            <key>CFBundleIdentifier</key>
+            <!-- comment -->
+            <string>com.oxide.ScopedTest</string>
+        </dict>
+        "#;
+        assert_eq!(extract_xml_string(xml, "CFBundleDisplayName"), None);
+        assert_eq!(extract_xml_string(xml, "CFBundleSignature"), None);
+        assert_eq!(
+            extract_xml_string(xml, "CFBundleIdentifier").as_deref(),
+            Some("com.oxide.ScopedTest")
+        );
+    }
+
+    #[test]
+    fn test_binary_bplist_fails_explicitly_when_plutil_absent() {
+        let base = std::env::temp_dir().join("oxide_bplist_missing_plutil_test");
+        let _ = fs::remove_dir_all(&base);
+        let bundle = base.join("BinaryPlistPlugin.component");
+        fs::create_dir_all(bundle.join("Contents")).unwrap();
+        let mut bplist = Vec::from(&b"bplist00"[..]);
+        bplist.extend_from_slice(&[0u8; 24]);
+        fs::write(bundle.join("Contents/Info.plist"), &bplist).unwrap();
+
+        let res = try_extract_bundle_info_with_plutil(
+            &bundle,
+            PluginFormat::AudioUnit,
+            "__nonexistent_oxide_plutil_binary__",
+        );
+        assert!(
+            res.is_err(),
+            "Binary bplist00 must return Err when plutil is absent, got {:?}",
+            res
+        );
+        let err = res.unwrap_err();
+        assert!(
+            err.contains("bplist00"),
+            "Error message should mention bplist00, got: {}",
+            err
+        );
 
         let _ = fs::remove_dir_all(&base);
     }

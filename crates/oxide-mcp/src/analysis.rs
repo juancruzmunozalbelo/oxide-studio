@@ -45,46 +45,55 @@ impl AudioAnalysisMetrics {
         let total_frames = samples.len() / channels;
         let duration_seconds = total_frames as f64 / sample_rate as f64;
 
-        // 1. Peak, RMS, Zero-crossings
+        // 1. Peak, RMS, Per-channel Zero-crossings (de-interleaved so L/R never cause false crossings)
         let mut peak = 0.0f32;
         let mut sum_sq = 0.0f64;
         let mut zero_crossings = 0usize;
-        let mut prev_sign = false;
         let mut has_clipping = false;
 
-        for (i, &s) in samples.iter().enumerate() {
-            let abs_s = s.abs();
-            if abs_s > peak {
-                peak = abs_s;
-            }
-            if abs_s >= 0.9999 {
-                has_clipping = true;
-            }
-            sum_sq += (s * s) as f64;
+        let active_samples = total_frames * channels;
+        for ch in 0..channels {
+            let mut prev_sign = false;
+            for f in 0..total_frames {
+                let raw = samples[f * channels + ch];
+                let s = if raw.is_finite() { raw } else { 0.0 };
+                let abs_s = s.abs();
+                if abs_s > peak {
+                    peak = abs_s;
+                }
+                if abs_s >= 0.9999 {
+                    has_clipping = true;
+                }
+                sum_sq += (s * s) as f64;
 
-            let cur_sign = s >= 0.0;
-            if i > 0 && cur_sign != prev_sign {
-                zero_crossings += 1;
+                let cur_sign = s >= 0.0;
+                if f > 0 && cur_sign != prev_sign {
+                    zero_crossings += 1;
+                }
+                prev_sign = cur_sign;
             }
-            prev_sign = cur_sign;
         }
 
-        let mean_sq = sum_sq / samples.len() as f64;
+        let sample_denom = active_samples.max(1) as f64;
+        let mean_sq = sum_sq / sample_denom;
         let rms = mean_sq.sqrt() as f32;
 
         let peak_dbfs = 20.0 * peak.max(1e-5).log10();
         let rms_dbfs = 20.0 * rms.max(1e-5).log10();
         let crest_factor_db = peak_dbfs - rms_dbfs;
 
-        let zcr = zero_crossings as f32 / samples.len() as f32;
+        let zcr = zero_crossings as f32 / sample_denom as f32;
         let is_silent = rms < 1e-4;
 
-        // 2. Mix to mono for Spectral Analysis
+        // 2. Mix to mono for Spectral Analysis (sanitizing non-finite samples)
         let mut mono = Vec::with_capacity(total_frames);
         for f in 0..total_frames {
             let mut sum = 0.0f32;
             for c in 0..channels {
-                sum += samples[f * channels + c];
+                let raw = samples[f * channels + c];
+                if raw.is_finite() {
+                    sum += raw;
+                }
             }
             mono.push(sum / channels as f32);
         }
@@ -308,14 +317,7 @@ fn compute_spectral_metrics(mono: &[f32], sample_rate: u32) -> (f32, FourBandEne
     let mut windowed = [0.0f32; FFT_SIZE];
     let num_bins = FFT_SIZE / 2;
 
-    let mut offset = 0;
-    while offset + FFT_SIZE <= mono.len() {
-        for i in 0..FFT_SIZE {
-            windowed[i] = mono[offset + i] * window[i];
-        }
-
-        // Discrete Fourier Transform for first num_bins
-        // Optimized with step sampling across bins for fast computation
+    let mut run_dft = |frame: &[f32; FFT_SIZE]| {
         for k in 1..num_bins {
             let freq = k as f32 * bin_freq_step;
             let omega = 2.0 * PI * (k as f32) / (FFT_SIZE as f32);
@@ -323,7 +325,7 @@ fn compute_spectral_metrics(mono: &[f32], sample_rate: u32) -> (f32, FourBandEne
             let mut real = 0.0f32;
             let mut imag = 0.0f32;
 
-            for (n, &s) in windowed.iter().enumerate() {
+            for (n, &s) in frame.iter().enumerate() {
                 let angle = omega * n as f32;
                 real += s * angle.cos();
                 imag -= s * angle.sin();
@@ -345,8 +347,29 @@ fn compute_spectral_metrics(mono: &[f32], sample_rate: u32) -> (f32, FourBandEne
                 energy_high += power;
             }
         }
+    };
 
-        offset += HOP_SIZE; // 50% Hann window overlap
+    if mono.len() < FFT_SIZE {
+        let len = mono.len();
+        windowed.fill(0.0);
+        for (i, &s) in mono.iter().enumerate() {
+            let w = if len > 1 {
+                0.5 * (1.0 - (2.0 * PI * i as f32 / (len as f32 - 1.0)).cos())
+            } else {
+                1.0
+            };
+            windowed[i] = s * w;
+        }
+        run_dft(&windowed);
+    } else {
+        let mut offset = 0;
+        while offset + FFT_SIZE <= mono.len() {
+            for i in 0..FFT_SIZE {
+                windowed[i] = mono[offset + i] * window[i];
+            }
+            run_dft(&windowed);
+            offset += HOP_SIZE; // 50% Hann window overlap
+        }
     }
 
     let centroid_hz = if total_magnitude_sum > 1e-9 {
@@ -413,6 +436,26 @@ mod tests {
         );
         assert!(!metrics.is_silent);
         assert!(!metrics.has_clipping);
+    }
+
+    #[test]
+    fn test_deinterleaved_zcr_and_short_zero_padded_spectrum() {
+        // Stereo constant +0.5 L and -0.5 R must yield 0.0 zero crossings per channel
+        let mut stereo_dc = Vec::with_capacity(2048);
+        for _ in 0..1024 {
+            stereo_dc.push(0.5);
+            stereo_dc.push(-0.5);
+        }
+        let m_dc = AudioAnalysisMetrics::analyze_interleaved(&stereo_dc, 44100, 2);
+        assert_eq!(m_dc.zero_crossing_rate, 0.0, "Opposite DC stereo channels must have 0 ZCR");
+
+        // Short 512-sample 440 Hz sine measures ~440 Hz instead of fake 1000.0 Hz / 25%
+        let short_440: Vec<f32> = (0..512)
+            .map(|i| (2.0 * PI * 440.0 * (i as f32 / 44100.0)).sin() * 0.6)
+            .collect();
+        let m_short = AudioAnalysisMetrics::analyze_interleaved(&short_440, 44100, 1);
+        assert!((m_short.spectral_centroid_hz - 440.0).abs() < 250.0);
+        assert!(m_short.spectral_bands.low_mid_energy_pct > 60.0);
     }
 }
 

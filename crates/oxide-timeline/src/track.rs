@@ -144,7 +144,9 @@ impl Track {
 
     /// Set volume in decibels [-70.0, +6.0 dB].
     pub fn set_volume_db(&mut self, db: f32) {
-        self.volume_db = db.clamp(-70.0, 6.0);
+        if db.is_finite() {
+            self.volume_db = db.clamp(-70.0, 6.0);
+        }
     }
 
     /// Linear volume multiplier.
@@ -158,16 +160,23 @@ impl Track {
 
     /// Set pan [-1.0, 1.0].
     pub fn set_pan(&mut self, pan: f32) {
-        self.pan = pan.clamp(-1.0, 1.0);
+        if pan.is_finite() {
+            self.pan = pan.clamp(-1.0, 1.0);
+        }
     }
 
     /// Set track delay in milliseconds [-100.0, +100.0 ms].
     pub fn set_track_delay_ms(&mut self, ms: f32) {
-        self.track_delay_ms = ms.clamp(-100.0, 100.0);
+        if ms.is_finite() {
+            self.track_delay_ms = ms.clamp(-100.0, 100.0);
+        }
     }
 
     /// Set send level to a return track. Creates send if not present.
     pub fn set_send(&mut self, return_track_id: u32, level_db: f32, mode: SendRoutingMode) {
+        if !level_db.is_finite() {
+            return;
+        }
         if let Some(send) = self.sends.iter_mut().find(|s| s.return_track_id == return_track_id) {
             send.level_db = level_db.clamp(-70.0, 6.0);
             send.mode = mode;
@@ -303,7 +312,9 @@ impl TrackManager {
 
     /// Set crossfader position in range [-1.0, 1.0].
     pub fn set_crossfader(&mut self, pos: f32) {
-        self.crossfader_position = pos.clamp(-1.0, 1.0);
+        if pos.is_finite() {
+            self.crossfader_position = pos.clamp(-1.0, 1.0);
+        }
     }
 
     /// Check if any track or return track has solo engaged.

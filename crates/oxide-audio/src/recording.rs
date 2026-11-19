@@ -489,9 +489,21 @@ impl Default for TrackRecorderState {
             peak_meter_l: 0.0,
             peak_meter_r: 0.0,
             recorded_frames: 0,
-            take_buffer_l: vec![0.0; DEFAULT_TAKE_CAPACITY_FRAMES],
-            take_buffer_r: vec![0.0; DEFAULT_TAKE_CAPACITY_FRAMES],
+            take_buffer_l: Vec::new(),
+            take_buffer_r: Vec::new(),
             take_count: 0,
+        }
+    }
+}
+
+impl TrackRecorderState {
+    /// Lazily allocate the full take buffer once when a track is armed or recording starts.
+    pub fn ensure_take_capacity(&mut self) {
+        if self.take_buffer_l.len() < DEFAULT_TAKE_CAPACITY_FRAMES {
+            self.take_buffer_l.resize(DEFAULT_TAKE_CAPACITY_FRAMES, 0.0);
+        }
+        if self.take_buffer_r.len() < DEFAULT_TAKE_CAPACITY_FRAMES {
+            self.take_buffer_r.resize(DEFAULT_TAKE_CAPACITY_FRAMES, 0.0);
         }
     }
 }
@@ -534,6 +546,9 @@ impl MultiTrackRecorder {
     pub fn arm_track(&mut self, track_id: usize, armed: bool) {
         if track_id < MAX_RECORDING_TRACKS {
             self.tracks[track_id].armed = armed;
+            if armed {
+                self.tracks[track_id].ensure_take_capacity();
+            }
         }
     }
 
@@ -555,6 +570,7 @@ impl MultiTrackRecorder {
         self.record_start_beat = current_beat;
         for track in &mut self.tracks {
             if track.armed {
+                track.ensure_take_capacity();
                 track.recorded_frames = 0;
                 track.peak_meter_l = 0.0;
                 track.peak_meter_r = 0.0;
@@ -621,10 +637,13 @@ impl MultiTrackRecorder {
             if !track.armed {
                 continue;
             }
+            track.ensure_take_capacity();
 
             let input = track_inputs[track_id];
-            let abs_l = input[0].abs();
-            let abs_r = input[1].abs();
+            let sample_l = if input[0].is_finite() { input[0] } else { 0.0 };
+            let sample_r = if input[1].is_finite() { input[1] } else { 0.0 };
+            let abs_l = sample_l.abs();
+            let abs_r = sample_r.abs();
             if abs_l > track.peak_meter_l {
                 track.peak_meter_l = abs_l;
             }
@@ -636,10 +655,59 @@ impl MultiTrackRecorder {
             let end = (start + frames).min(DEFAULT_TAKE_CAPACITY_FRAMES);
 
             for f in start..end {
-                track.take_buffer_l[f] = input[0];
-                track.take_buffer_r[f] = input[1];
+                track.take_buffer_l[f] = sample_l;
+                track.take_buffer_r[f] = sample_r;
             }
             track.recorded_frames = end;
+        }
+    }
+
+    /// Capture true per-frame planar audio blocks for all armed tracks with per-sample peak metering.
+    pub fn record_block_frames(
+        &mut self,
+        track_inputs_l: &[&[f32]; MAX_RECORDING_TRACKS],
+        track_inputs_r: &[&[f32]; MAX_RECORDING_TRACKS],
+        frames: usize,
+        current_beat: f64,
+        is_playing: bool,
+    ) {
+        if !self.is_recording || !is_playing || frames == 0 {
+            return;
+        }
+
+        if !self.is_punch_active(current_beat) {
+            return;
+        }
+
+        for track_id in 0..MAX_RECORDING_TRACKS {
+            let track = &mut self.tracks[track_id];
+            if !track.armed {
+                continue;
+            }
+            track.ensure_take_capacity();
+
+            let src_l = track_inputs_l[track_id];
+            let src_r = track_inputs_r[track_id];
+            let available = frames.min(src_l.len()).min(src_r.len());
+            let start = track.recorded_frames;
+            let end = (start + available).min(DEFAULT_TAKE_CAPACITY_FRAMES);
+            let count = end.saturating_sub(start);
+
+            for i in 0..count {
+                let l = if src_l[i].is_finite() { src_l[i] } else { 0.0 };
+                let r = if src_r[i].is_finite() { src_r[i] } else { 0.0 };
+                let abs_l = l.abs();
+                let abs_r = r.abs();
+                if abs_l > track.peak_meter_l {
+                    track.peak_meter_l = abs_l;
+                }
+                if abs_r > track.peak_meter_r {
+                    track.peak_meter_r = abs_r;
+                }
+                track.take_buffer_l[start + i] = l;
+                track.take_buffer_r[start + i] = r;
+            }
+            track.recorded_frames = start + count;
         }
     }
 
@@ -781,6 +849,33 @@ mod tests {
         assert_eq!(committed.latency_offset_samples, 576);
         assert_eq!(committed.left_channel.len(), 1000 - 576);
         assert!((committed.left_channel[0] - 0.9).abs() < 1e-4);
+    }
+
+    #[test]
+    fn test_lazy_take_allocation_and_record_block_frames() {
+        let mut recorder = MultiTrackRecorder::new();
+        // Unarmed tracks start empty instead of pre-allocating 196MB upfront
+        assert!(recorder.tracks[0].take_buffer_l.is_empty());
+        assert!(recorder.tracks[5].take_buffer_l.is_empty());
+
+        recorder.arm_track(0, true);
+        assert_eq!(recorder.tracks[0].take_buffer_l.len(), DEFAULT_TAKE_CAPACITY_FRAMES);
+        assert!(recorder.tracks[5].take_buffer_l.is_empty());
+
+        recorder.start_recording(0.0);
+        let l0 = [0.25f32, -0.75, 0.5, -0.1];
+        let r0 = [-0.25f32, 0.4, -0.9, 0.2];
+        let empty: [f32; 4] = [0.0; 4];
+        let inputs_l: [&[f32]; MAX_RECORDING_TRACKS] = std::array::from_fn(|i| if i == 0 { &l0[..] } else { &empty[..] });
+        let inputs_r: [&[f32]; MAX_RECORDING_TRACKS] = std::array::from_fn(|i| if i == 0 { &r0[..] } else { &empty[..] });
+        recorder.record_block_frames(&inputs_l, &inputs_r, 4, 0.0, true);
+
+        assert_eq!(recorder.tracks[0].recorded_frames, 4);
+        assert_eq!(&recorder.tracks[0].take_buffer_l[..4], &l0);
+        assert_eq!(&recorder.tracks[0].take_buffer_r[..4], &r0);
+        let (pl, pr) = recorder.get_peak_meters(0);
+        assert!((pl - 0.75).abs() < 1e-6);
+        assert!((pr - 0.9).abs() < 1e-6);
     }
 
     #[test]

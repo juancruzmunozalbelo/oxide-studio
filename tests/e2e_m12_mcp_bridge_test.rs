@@ -572,7 +572,11 @@ fn test_mcp_master_fx() {
 
 #[test]
 fn test_live12_lom_offline_fallback() {
-    let mut server = McpServer::with_lom_port(19876);
+    let free_port = {
+        let l = TcpListener::bind("127.0.0.1:0").unwrap();
+        l.local_addr().unwrap().port()
+    };
+    let mut server = McpServer::with_lom_port(free_port);
 
     // When no Oxide Studio GUI RPC is listening on 19876, live12_* tools must return
     // structured fallback envelopes and mutate DawState cleanly.

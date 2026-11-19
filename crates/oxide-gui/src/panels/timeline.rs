@@ -147,6 +147,7 @@ pub fn render_arrangement_timeline(
         // 2. Timeline Canvas: Ruler + Tracks + Automation Lanes + Take Lanes
         let available_size = vec2(ui.available_width().max(600.0), ui.available_height().max(320.0));
         let (rect, response) = ui.allocate_exact_size(available_size, Sense::click_and_drag());
+        ui.data_mut(|d| d.insert_temp(egui::Id::new("oxide_timeline_canvas_rect"), rect));
 
         let pixels_per_beat = gui_state.zoom_pixels_per_beat;
         let track_header_w = 120.0;
@@ -212,7 +213,7 @@ pub fn render_arrangement_timeline(
                                     break;
                                 }
                             }
-                            check_y += 56.0;
+                            check_y += 48.0;
                         }
                     }
                 }
@@ -563,6 +564,62 @@ mod tests {
                 assert_eq!(gui_state.audition_take, Some(1));
                 assert_eq!(gui_state.selected_take_region, Some((1, 4.0, 8.0)));
                 assert!(action.seek_beat.is_none());
+            });
+        });
+    }
+
+    #[test]
+    fn test_timeline_hit_test_track_below_comping_uses_48px_stride() {
+        let ctx = egui::Context::default();
+        let mut timeline = ArrangementTimeline::new();
+        timeline.tracks.push(ArrangementTrack::new(1, "Track 1", "MidiSynth"));
+        timeline.tracks.push(ArrangementTrack::new(2, "Track 2", "Audio"));
+        timeline.tracks.push(ArrangementTrack::new(3, "Track 3", "Audio"));
+
+        let mut gui_state = TimelineGuiState::default();
+        gui_state.show_automation = false;
+        gui_state.show_comping = true;
+
+        // Track 0 top = ruler (28) .. 72; Track 1 top = 72, end = 116;
+        // 2 comping lanes = 48.0 -> Track 2 starts at 116 + 48 = 164..208.
+        // Clicking at y = 170 relative to canvas_rect.top() (< 116+56 = 172!) must select Track 2!
+        let mut canvas_rect = egui::Rect::NOTHING;
+        let _ = ctx.run(egui::RawInput::default(), |ctx| {
+            egui::CentralPanel::default().show(ctx, |ui| {
+                let _ = render_arrangement_timeline(ui, &mut timeline, &mut gui_state, 0.0, false);
+                canvas_rect = ui.data(|d| {
+                    d.get_temp::<egui::Rect>(egui::Id::new("oxide_timeline_canvas_rect"))
+                        .unwrap_or(egui::Rect::NOTHING)
+                });
+            });
+        });
+
+        let click_pos = egui::pos2(canvas_rect.left() + 40.0, canvas_rect.top() + 28.0 + 44.0 + 44.0 + 48.0 + 6.0);
+        let mut input = egui::RawInput::default();
+        input.events.push(egui::Event::PointerMoved(click_pos));
+        input.events.push(egui::Event::PointerButton {
+            pos: click_pos,
+            button: egui::PointerButton::Primary,
+            pressed: true,
+            modifiers: egui::Modifiers::NONE,
+        });
+        let _ = ctx.run(input.clone(), |ctx| {
+            egui::CentralPanel::default().show(ctx, |ui| {
+                let _ = render_arrangement_timeline(ui, &mut timeline, &mut gui_state, 0.0, false);
+            });
+        });
+        let mut release = egui::RawInput::default();
+        release.events.push(egui::Event::PointerMoved(click_pos));
+        release.events.push(egui::Event::PointerButton {
+            pos: click_pos,
+            button: egui::PointerButton::Primary,
+            pressed: false,
+            modifiers: egui::Modifiers::NONE,
+        });
+        let _ = ctx.run(release, |ctx| {
+            egui::CentralPanel::default().show(ctx, |ui| {
+                let action = render_arrangement_timeline(ui, &mut timeline, &mut gui_state, 0.0, false);
+                assert_eq!(action.track_selected, Some(2));
             });
         });
     }

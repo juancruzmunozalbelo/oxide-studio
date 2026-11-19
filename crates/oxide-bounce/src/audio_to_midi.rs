@@ -218,7 +218,8 @@ impl AudioToMidiConverter {
                 }
 
                 // Compute spectral centroid and band energy around peak
-                let window_size = 1024.min(samples.len() - peak_pos);
+                let target_win = ((sample_rate as usize * 1024) / 44100).max(1024);
+                let window_size = target_win.min(samples.len() - peak_pos);
                 if window_size >= 64 {
                     let start = peak_pos.saturating_sub(32);
                     let end = (start + window_size).min(samples.len());
@@ -241,7 +242,7 @@ impl AudioToMidiConverter {
 
                 i = peak_pos + min_peak_distance;
             } else {
-                i += 64;
+                i += 1;
             }
         }
 
@@ -262,8 +263,8 @@ impl AudioToMidiConverter {
             return results;
         }
 
-        let window_size = 2048;
-        let hop_size = 512;
+        let window_size = ((sample_rate as usize).saturating_mul(2048) / 44100).max(2048);
+        let hop_size = (window_size / 4).max(1);
         let seconds_per_hop = hop_size as f64 / sample_rate as f64;
         let beats_per_hop = seconds_per_hop * (bpm / 60.0);
 
@@ -278,29 +279,38 @@ impl AudioToMidiConverter {
             let sum_sq: f32 = frame.iter().map(|&x| x * x).sum();
             let rms = (sum_sq / window_size as f32).sqrt();
 
-            if rms > 0.015 {
-                if let Some(f0) = estimate_pitch_yin(frame, sample_rate) {
-                    if f0 >= 55.0 && f0 <= 2000.0 {
+            let detected = if rms > 0.015 {
+                estimate_pitch_yin(frame, sample_rate).and_then(|f0| {
+                    if (55.0..=2000.0).contains(&f0) {
                         let midi_pitch = (69.0 + 12.0 * (f0 / 440.0).log2()).round() as u8;
                         let vel = (rms * 127.0 * 2.0).clamp(32.0, 127.0) as u8;
-
-                        match current_note {
-                            Some((note, ref mut v, _start_beat, ref mut dur)) if note == midi_pitch => {
-                                *dur += beats_per_hop;
-                                *v = (*v + vel) / 2;
-                            }
-                            Some((note, v, start_beat, dur)) => {
-                                results.push(TranscribedMidiNote::new(note, v, start_beat, dur));
-                                current_note = Some((midi_pitch, vel, frame_beat, beats_per_hop));
-                            }
-                            None => {
-                                current_note = Some((midi_pitch, vel, frame_beat, beats_per_hop));
-                            }
-                        }
+                        Some((midi_pitch, vel))
+                    } else {
+                        None
                     }
+                })
+            } else {
+                None
+            };
+
+            match (detected, current_note.take()) {
+                (Some((midi_pitch, vel)), Some((note, v, start_beat, dur)))
+                    if note == midi_pitch =>
+                {
+                    let avg_v = ((v as u16 + vel as u16) / 2) as u8;
+                    current_note = Some((note, avg_v, start_beat, dur + beats_per_hop));
                 }
-            } else if let Some((note, v, start_beat, dur)) = current_note.take() {
-                results.push(TranscribedMidiNote::new(note, v, start_beat, dur));
+                (Some((midi_pitch, vel)), Some((note, v, start_beat, dur))) => {
+                    results.push(TranscribedMidiNote::new(note, v, start_beat, dur));
+                    current_note = Some((midi_pitch, vel, frame_beat, beats_per_hop));
+                }
+                (Some((midi_pitch, vel)), None) => {
+                    current_note = Some((midi_pitch, vel, frame_beat, beats_per_hop));
+                }
+                (None, Some((note, v, start_beat, dur))) => {
+                    results.push(TranscribedMidiNote::new(note, v, start_beat, dur));
+                }
+                (None, None) => {}
             }
 
             pos += hop_size;
@@ -316,7 +326,7 @@ impl AudioToMidiConverter {
     /// Polyphonic multi-pitch transcription using multi-band spectral peak analysis.
     ///
     /// Identifies root, 3rd, 5th, and 7th harmonic structures while pruning overtones
-    /// to transcribe clean triads and seventh chords.
+    /// to transcribe clean triads and seventh chords across all analysis windows.
     pub fn convert_harmony_to_midi(
         samples: &[f32],
         sample_rate: u32,
@@ -327,73 +337,122 @@ impl AudioToMidiConverter {
             return results;
         }
 
-        let n = 2048.min(samples.len());
-        let slice = &samples[0..n];
+        let target_win = ((sample_rate as usize).saturating_mul(2048) / 44100).max(2048);
+        let win_len = target_win.min(samples.len());
+        let step_beats = (win_len as f64 / sample_rate as f64) * (bpm / 60.0);
+        let total_duration_beats = (samples.len() as f64 / sample_rate as f64) * (bpm / 60.0);
 
-        // Discrete spectral peak extraction across musical pitch range (C2 65 Hz to C6 1046 Hz)
-        let mut detected_notes: Vec<(u8, f32)> = Vec::new();
-
-        // Scan standard MIDI notes from 48 (C3) to 84 (C6)
-        for midi_note in 48..=84 {
-            let freq = 440.0 * 2.0f64.powf((midi_note as f64 - 69.0) / 12.0);
-            let mag = compute_fourier_magnitude_at_freq(slice, sample_rate, freq);
-            if mag > 0.05 {
-                detected_notes.push((midi_note, mag));
+        if samples.len() <= win_len {
+            let chord_notes = extract_window_chord_pitches(samples, sample_rate);
+            let note_duration = total_duration_beats.max(1.0);
+            for note in chord_notes {
+                results.push(TranscribedMidiNote::new(note, 100, 0.0, note_duration));
             }
-        }
-
-        if detected_notes.is_empty() {
             return results;
         }
 
-        // Find max magnitude
-        let max_mag = detected_notes
-            .iter()
-            .map(|(_, m)| *m)
-            .fold(0.0f32, |acc, x| acc.max(x));
+        let mut active: [Option<(f64, f64)>; 128] = [None; 128];
+        let mut pos = 0;
+        while pos < samples.len() {
+            let end = (pos + win_len).min(samples.len());
+            if pos > 0 && end - pos < win_len / 4 {
+                break;
+            }
+            let slice = &samples[pos..end];
+            let win_beats = (slice.len() as f64 / sample_rate as f64) * (bpm / 60.0);
+            let win_start_beat = (pos as f64 / sample_rate as f64) * (bpm / 60.0);
+            let pitches = extract_window_chord_pitches(slice, sample_rate);
 
-        // Filter peaks with at least 18% of max magnitude
-        let threshold = max_mag * 0.18;
-        let candidates: Vec<(u8, f32)> = detected_notes
-            .into_iter()
-            .filter(|&(_, m)| m >= threshold)
-            .collect();
+            let mut present = [false; 128];
+            for &p in &pitches {
+                present[p as usize] = true;
+            }
 
-        // Prune harmonic overtones (octaves: +12, octaves+fifth: +19)
-        // If a note has an overtone at +12 or +19 that is weaker, prune it
-        let mut chord_notes = Vec::new();
-        for i in 0..candidates.len() {
-            let (note_i, mag_i) = candidates[i];
-            let mut is_overtone = false;
-
-            for j in 0..candidates.len() {
-                if i == j {
-                    continue;
-                }
-                let (note_j, mag_j) = candidates[j];
-                if (note_i == note_j + 12 || note_i == note_j + 19) && mag_i < mag_j * 0.75 {
-                    is_overtone = true;
-                    break;
+            for pitch in 48..=84usize {
+                if present[pitch] {
+                    match active[pitch] {
+                        Some((start_b, dur_b)) => {
+                            active[pitch] = Some((start_b, dur_b + win_beats));
+                        }
+                        None => {
+                            active[pitch] = Some((win_start_beat, win_beats.max(step_beats.min(win_beats))));
+                        }
+                    }
+                } else if let Some((start_b, dur_b)) = active[pitch].take() {
+                    results.push(TranscribedMidiNote::new(pitch as u8, 100, start_b, dur_b));
                 }
             }
 
-            if !is_overtone {
-                chord_notes.push(note_i);
+            pos += win_len;
+        }
+
+        for (pitch, slot) in active.iter_mut().enumerate() {
+            if let Some((start_b, dur_b)) = slot.take() {
+                results.push(TranscribedMidiNote::new(pitch as u8, 100, start_b, dur_b));
             }
         }
 
-        chord_notes.sort_unstable();
-        chord_notes.dedup();
-
-        let total_duration_beats = (samples.len() as f64 / sample_rate as f64) * (bpm / 60.0);
-        let note_duration = total_duration_beats.max(1.0);
-
-        for note in chord_notes {
-            results.push(TranscribedMidiNote::new(note, 100, 0.0, note_duration));
-        }
+        results.sort_by(|a, b| {
+            a.start_beat
+                .total_cmp(&b.start_beat)
+                .then_with(|| a.note.cmp(&b.note))
+        });
 
         results
     }
+}
+
+fn extract_window_chord_pitches(slice: &[f32], sample_rate: u32) -> Vec<u8> {
+    let mut detected_notes: Vec<(u8, f32)> = Vec::new();
+    for midi_note in 48..=84 {
+        let freq = 440.0 * 2.0f64.powf((midi_note as f64 - 69.0) / 12.0);
+        let mag = compute_fourier_magnitude_at_freq(slice, sample_rate, freq);
+        if mag > 0.05 {
+            detected_notes.push((midi_note, mag));
+        }
+    }
+
+    if detected_notes.is_empty() {
+        return Vec::new();
+    }
+
+    let max_mag = detected_notes
+        .iter()
+        .map(|(_, m)| *m)
+        .fold(0.0f32, |acc, x| acc.max(x));
+
+    let threshold = max_mag * 0.18;
+    let candidates: Vec<(u8, f32)> = detected_notes
+        .into_iter()
+        .filter(|&(_, m)| m >= threshold)
+        .collect();
+
+    let mut chord_notes = Vec::new();
+    for i in 0..candidates.len() {
+        let (note_i, mag_i) = candidates[i];
+        let mut is_overtone = false;
+
+        for j in 0..candidates.len() {
+            if i == j {
+                continue;
+            }
+            let (note_j, mag_j) = candidates[j];
+            if (note_j.checked_add(12) == Some(note_i) || note_j.checked_add(19) == Some(note_i))
+                && mag_i < mag_j * 0.75
+            {
+                is_overtone = true;
+                break;
+            }
+        }
+
+        if !is_overtone {
+            chord_notes.push(note_i);
+        }
+    }
+
+    chord_notes.sort_unstable();
+    chord_notes.dedup();
+    chord_notes
 }
 
 /// Helper: Compute spectral centroid and multi-band energies for transient classification.
@@ -737,5 +796,67 @@ mod tests {
         for &vel in groove.velocity_scalings.iter() {
             assert!(vel >= 0.0 && vel <= 2.0, "Velocity scaling {} out of [0.0, 2.0]", vel);
         }
+    }
+
+    #[test]
+    fn test_drums_detects_narrow_transients_and_melody_handles_96khz_and_unvoiced_gaps() {
+        let mut narrow = vec![0.0f32; 8000];
+        // Place narrow 4-sample click at index 100 (between multiples of 64!)
+        for k in 100..104 {
+            narrow[k] = 0.8;
+        }
+        let drums = AudioToMidiConverter::convert_drums_to_midi(&narrow, 44100, 120.0);
+        assert_eq!(drums.len(), 1, "Sample-by-sample scan must catch narrow transient at sample 100");
+
+        // 96 kHz A4 (440 Hz) -> unvoiced 25 Hz sub rumble (> threshold RMS, outside 55..=2000) -> A4
+        let sr = 96000u32;
+        let len_96k = sr as usize; // 1.0s
+        let mut melody = Vec::with_capacity(len_96k);
+        for i in 0..len_96k {
+            let t = i as f64 / sr as f64;
+            if i < sr as usize / 3 || i >= (2 * sr as usize) / 3 {
+                melody.push((2.0 * PI * 440.0 * t).sin() as f32 * 0.5);
+            } else {
+                // Out-of-range low rumble with significant RMS
+                melody.push((2.0 * PI * 25.0 * t).sin() as f32 * 0.4);
+            }
+        }
+        let notes = AudioToMidiConverter::convert_melody_to_midi(&melody, sr, 120.0);
+        let a4_notes: Vec<_> = notes.iter().filter(|n| n.note == 69).collect();
+        assert!(
+            a4_notes.len() >= 2,
+            "96 kHz melody must detect A4 and flush across unvoiced/out-of-range middle gap, got {:?}",
+            notes
+        );
+    }
+
+    #[test]
+    fn test_harmony_multi_window_chord_progression() {
+        let sr = 44100u32;
+        let bpm = 120.0;
+        let half = sr as usize / 2; // 0.5s = 1 beat
+        let mut samples = vec![0.0f32; sr as usize];
+        for i in 0..sr as usize {
+            let t = i as f64 / sr as f64;
+            if i < half {
+                // C major triad: 60 (261.63), 64 (329.63), 67 (392.00)
+                samples[i] = ((2.0 * PI * 261.63 * t).sin()
+                    + (2.0 * PI * 329.63 * t).sin()
+                    + (2.0 * PI * 392.00 * t).sin()) as f32
+                    * 0.25;
+            } else {
+                // F# major / unrelated: 66 (369.99), 70 (466.16), 73 (554.37)
+                samples[i] = ((2.0 * PI * 369.99 * t).sin()
+                    + (2.0 * PI * 466.16 * t).sin()
+                    + (2.0 * PI * 554.37 * t).sin()) as f32
+                    * 0.25;
+            }
+        }
+        let chord_notes = AudioToMidiConverter::convert_harmony_to_midi(&samples, sr, bpm);
+        assert!(
+            chord_notes.iter().any(|n| n.note == 66 && n.start_beat >= 0.8),
+            "Multi-window harmony must transcribe chord change in second half, got {:?}",
+            chord_notes
+        );
     }
 }

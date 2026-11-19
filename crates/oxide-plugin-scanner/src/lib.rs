@@ -12,7 +12,9 @@ pub use types::{
     PluginCategory, PluginDescriptor, PluginFormat, PluginManifest, PluginParameter,
 };
 pub use discovery::{discover_candidate_bundles, standard_search_paths, CandidateBundle};
-pub use info_plist::{detect_macho_architectures, extract_bundle_info, BundleInfo};
+pub use info_plist::{
+    detect_macho_architectures, extract_bundle_info, try_extract_bundle_info, BundleInfo,
+};
 pub use supervisor::PluginScannerSupervisor;
 pub use instance::{HostedPluginDevice, HostedPluginInstance, PluginInstance};
 

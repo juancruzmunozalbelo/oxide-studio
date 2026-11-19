@@ -7,7 +7,7 @@ pub struct NoteLength {
     pub enabled: bool,
     pub length_beats: f64, // Fixed note length in beats
     pub gate_percent: f32, // 0.1 .. 2.0
-    active_notes: Vec<(u8, f64)>, // (pitch, note_on_beat)
+    active_notes: Vec<(u8, u8, f64)>, // (channel, pitch, note_on_beat)
 }
 
 impl NoteLength {
@@ -17,7 +17,7 @@ impl NoteLength {
             enabled: true,
             length_beats: 0.25, // 1/16th note
             gate_percent: 1.0,
-            active_notes: Vec::new(),
+            active_notes: Vec::with_capacity(16),
         }
     }
 }
@@ -66,9 +66,11 @@ impl MidiEffectDevice for NoteLength {
 
         for ev in events_in {
             match ev {
-                MidiEvent::NoteOn { note, .. } => {
+                MidiEvent::NoteOn { channel, note, velocity } => {
                     events_out.push(*ev);
-                    self.active_notes.push((*note, time.beat));
+                    if *velocity > 0 {
+                        self.active_notes.push((*channel, *note, time.beat));
+                    }
                 }
                 MidiEvent::NoteOff { .. } => {
                     // Suppress immediate NoteOff if we manage note duration
@@ -77,19 +79,16 @@ impl MidiEffectDevice for NoteLength {
             }
         }
 
-        // Check if any note has reached its target length
-        let mut expired = Vec::new();
-        self.active_notes.retain(|(note, start_beat)| {
-            if time.beat >= *start_beat + target_len {
-                expired.push(*note);
-                false
+        // Check in-place if any note has reached its target length (zero allocations)
+        let mut idx = 0;
+        while idx < self.active_notes.len() {
+            let (channel, note, start_beat) = self.active_notes[idx];
+            if time.beat >= start_beat + target_len {
+                events_out.push(MidiEvent::NoteOff { channel, note });
+                self.active_notes.swap_remove(idx);
             } else {
-                true
+                idx += 1;
             }
-        });
-
-        for note in expired {
-            events_out.push(MidiEvent::NoteOff { channel: 0, note });
         }
     }
 }

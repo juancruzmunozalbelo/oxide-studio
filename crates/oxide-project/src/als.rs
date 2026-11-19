@@ -1,6 +1,6 @@
 //! Bidirectional Ableton Live 12 `.als` Live Set XML generation, gzip compression/decompression, and parsing.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
@@ -24,61 +24,48 @@ use crate::track::{InstrumentConfig, TrackDefinition, TrackType};
 pub const MAX_ALS_XML_BYTES: u64 = 64 * 1024 * 1024; // 64 MiB cap
 
 /// Ableton Live unity fader value (`0.0 dB`).
-pub const ABLETON_UNITY_LINEAR: f32 = 0.85;
+pub const ABLETON_UNITY_LINEAR: f32 = 1.0;
+/// Ableton Live maximum (`+6.0 dB`) fader/send linear value.
+pub const ABLETON_MAX_LINEAR: f32 = 1.99526238;
 /// Ableton Live silence (`-70.0 dB` / `-inf`) fader/send linear value.
 pub const ABLETON_SILENCE_LINEAR: f32 = 0.00031622776;
 pub const ABLETON_MIN_DB: f32 = -70.0;
 pub const ABLETON_MAX_DB: f32 = 6.0;
 
-/// Convert Oxide dB (`[-70.0, +6.0]`) to Ableton Live `.als` linear gain:
-/// - `0.0 dB` -> `0.85`
+/// Convert Oxide dB (`[-70.0, +6.0]`) to Ableton Live `.als` linear amplitude `10^(dB/20)`:
+/// - `0.0 dB` -> `1.0`
 /// - `-70.0 dB` -> `0.00031622776`
-/// - `+6.0 dB` -> `1.0`
+/// - `+6.0 dB` -> `1.99526238`
 /// Invertible with [`ableton_linear_to_db`].
 pub fn db_to_ableton_linear(db: f32) -> f32 {
     if !db.is_finite() || db <= ABLETON_MIN_DB {
         return ABLETON_SILENCE_LINEAR;
     }
     if db >= ABLETON_MAX_DB {
-        return 1.0;
+        return ABLETON_MAX_LINEAR;
     }
-    let unity = ABLETON_UNITY_LINEAR as f64;
-    if db >= 0.0 {
-        let t = (db as f64) / (ABLETON_MAX_DB as f64);
-        (unity * (1.0_f64 / unity).powf(t)) as f32
-    } else {
-        let min_lin = ABLETON_SILENCE_LINEAR as f64;
-        let t = (db as f64 - ABLETON_MIN_DB as f64) / (0.0 - ABLETON_MIN_DB as f64);
-        (min_lin * (unity / min_lin).powf(t)) as f32
+    if db == 0.0 {
+        return ABLETON_UNITY_LINEAR;
     }
+    (10.0_f64.powf((db as f64) / 20.0) as f32).clamp(ABLETON_SILENCE_LINEAR, ABLETON_MAX_LINEAR)
 }
 
-/// Convert Ableton Live `.als` linear gain to Oxide dB (`[-70.0, +6.0]`):
-/// - `0.85` -> `0.0 dB`
+/// Convert Ableton Live `.als` linear amplitude (`10^(dB/20)`) to Oxide dB (`[-70.0, +6.0]`):
+/// - `1.0` -> `0.0 dB`
 /// - `<= 0.00031622776` -> `-70.0 dB`
-/// - `>= 1.0` -> `+6.0 dB`
+/// - `>= 1.99526238` -> `+6.0 dB`
 /// Invertible with [`db_to_ableton_linear`].
 pub fn ableton_linear_to_db(lin: f32) -> f32 {
     if !lin.is_finite() || lin <= ABLETON_SILENCE_LINEAR {
         return ABLETON_MIN_DB;
     }
-    if lin >= 1.0 {
+    if lin >= ABLETON_MAX_LINEAR {
         return ABLETON_MAX_DB;
     }
-    let lin64 = lin as f64;
-    let unity = ABLETON_UNITY_LINEAR as f64;
-    if (lin64 - unity).abs() < 1e-9 {
+    if ((lin as f64) - 1.0).abs() < 1e-9 {
         return 0.0;
     }
-    if lin64 > unity {
-        let t = (lin64 / unity).ln() / (1.0_f64 / unity).ln();
-        (t * (ABLETON_MAX_DB as f64)).clamp(0.0, ABLETON_MAX_DB as f64) as f32
-    } else {
-        let min_lin = ABLETON_SILENCE_LINEAR as f64;
-        let t = (lin64 / min_lin).ln() / (unity / min_lin).ln();
-        (ABLETON_MIN_DB as f64 + t * (0.0 - ABLETON_MIN_DB as f64))
-            .clamp(ABLETON_MIN_DB as f64, 0.0) as f32
-    }
+    (20.0 * (lin as f64).log10()).clamp(ABLETON_MIN_DB as f64, ABLETON_MAX_DB as f64) as f32
 }
 
 fn format_ableton_linear(lin: f32) -> String {
@@ -278,52 +265,110 @@ pub fn read_wav_full<P: AsRef<Path>>(path: P) -> Option<(u32, u16, Vec<f32>)> {
 /// Read PCM samples from a standard RIFF WAV file, capped to `max_seconds` (if `> 0.0`).
 /// Returns `(sample_rate, channels, interleaved_stereo_samples)`.
 pub fn read_wav_preview<P: AsRef<Path>>(path: P, max_seconds: f64) -> Option<(u32, u16, Vec<f32>)> {
-    let bytes = fs::read(path).ok()?;
-    if bytes.len() < 44 || &bytes[0..4] != b"RIFF" || &bytes[8..12] != b"WAVE" {
-        return None;
+    read_wav_preview_checked(path, max_seconds).ok()
+}
+
+/// Read PCM samples from a standard RIFF WAV file with explicit error reporting.
+/// Returns `(sample_rate, 2, interleaved_stereo_samples)`.
+pub fn read_wav_preview_checked<P: AsRef<Path>>(
+    path: P,
+    max_seconds: f64,
+) -> Result<(u32, u16, Vec<f32>), DAWProjectError> {
+    let bytes = fs::read(path)?;
+    decode_wav_bytes(&bytes, max_seconds)
+}
+
+/// Decode PCM / IEEE-float WAV bytes into interleaved stereo `f32` samples.
+/// Handles arbitrary RIFF chunk ordering (`"data"` before `"fmt "`), rejects non-PCM formats
+/// (`audio_format != 1 && audio_format != 3`), and rejects `channels == 0` or `sample_rate == 0`.
+pub fn decode_wav_bytes(
+    bytes: &[u8],
+    max_seconds: f64,
+) -> Result<(u32, u16, Vec<f32>), DAWProjectError> {
+    if bytes.len() < 12 || &bytes[0..4] != b"RIFF" || &bytes[8..12] != b"WAVE" {
+        return Err(DAWProjectError::Validation(
+            "Invalid RIFF/WAVE header".to_string(),
+        ));
     }
 
-    let mut pos = 12;
-    let mut sample_rate = 44100u32;
-    let mut channels = 2u16;
-    let mut bits_per_sample = 16u16;
-    let mut audio_format = 1u16;
-    let mut data_offset = 0;
-    let mut data_len = 0;
+    let mut pos = 12usize;
+    let mut fmt_info: Option<(u16, u16, u32, u16)> = None;
+    let mut data_range: Option<(usize, usize)> = None;
 
     while pos + 8 <= bytes.len() {
         let chunk_id = &bytes[pos..pos + 4];
-        let chunk_size = u32::from_le_bytes(bytes[pos + 4..pos + 8].try_into().ok()?) as usize;
+        let chunk_size = u32::from_le_bytes(
+            bytes[pos + 4..pos + 8]
+                .try_into()
+                .map_err(|_| DAWProjectError::Validation("Truncated WAV chunk header".to_string()))?,
+        ) as usize;
         pos += 8;
 
         if chunk_id == b"fmt " {
             if chunk_size < 16 || pos + 16 > bytes.len() {
-                return None;
+                return Err(DAWProjectError::Validation(
+                    "Truncated or malformed WAV fmt chunk".to_string(),
+                ));
             }
-            audio_format = u16::from_le_bytes(bytes[pos..pos + 2].try_into().ok()?);
-            channels = u16::from_le_bytes(bytes[pos + 2..pos + 4].try_into().ok()?);
-            sample_rate = u32::from_le_bytes(bytes[pos + 4..pos + 8].try_into().ok()?);
-            bits_per_sample = u16::from_le_bytes(bytes[pos + 14..pos + 16].try_into().ok()?);
+            let mut audio_format = u16::from_le_bytes([bytes[pos], bytes[pos + 1]]);
+            let channels = u16::from_le_bytes([bytes[pos + 2], bytes[pos + 3]]);
+            let sample_rate = u32::from_le_bytes([
+                bytes[pos + 4],
+                bytes[pos + 5],
+                bytes[pos + 6],
+                bytes[pos + 7],
+            ]);
+            let bits_per_sample = u16::from_le_bytes([bytes[pos + 14], bytes[pos + 15]]);
             if audio_format == 0xFFFE && chunk_size >= 40 && pos + 26 <= bytes.len() {
-                let sub_format = u16::from_le_bytes(bytes[pos + 24..pos + 26].try_into().ok()?);
-                audio_format = sub_format;
+                audio_format = u16::from_le_bytes([bytes[pos + 24], bytes[pos + 25]]);
             }
-            pos += chunk_size + (chunk_size & 1);
+            if audio_format != 1 && audio_format != 3 {
+                return Err(DAWProjectError::Validation(format!(
+                    "Unsupported non-PCM WAV audio_format={audio_format}"
+                )));
+            }
+            if channels == 0 || sample_rate == 0 {
+                return Err(DAWProjectError::Validation(format!(
+                    "Invalid WAV format: channels={channels}, sample_rate={sample_rate}"
+                )));
+            }
+            fmt_info = Some((audio_format, channels, sample_rate, bits_per_sample));
         } else if chunk_id == b"data" {
-            data_offset = pos;
-            data_len = chunk_size.min(bytes.len().saturating_sub(pos));
-            break;
-        } else {
-            pos += chunk_size + (chunk_size & 1);
+            let avail = bytes.len().saturating_sub(pos);
+            let data_len = chunk_size.min(avail);
+            data_range = Some((pos, data_len));
         }
+
+        if fmt_info.is_some() && data_range.is_some() {
+            break;
+        }
+        let padded = chunk_size.saturating_add(chunk_size & 1);
+        pos = match pos.checked_add(padded) {
+            Some(next) if next > pos || padded == 0 => next,
+            _ => break,
+        };
     }
 
-    if data_offset == 0 || channels == 0 || sample_rate == 0 {
-        return None;
+    let (audio_format, channels, sample_rate, bits_per_sample) = fmt_info.ok_or_else(|| {
+        DAWProjectError::Validation("Missing WAV fmt chunk".to_string())
+    })?;
+    let (data_offset, data_len) = data_range.ok_or_else(|| {
+        DAWProjectError::Validation("Missing WAV data chunk".to_string())
+    })?;
+
+    if audio_format != 1 && audio_format != 3 {
+        return Err(DAWProjectError::Validation(format!(
+            "Unsupported non-PCM WAV audio_format={audio_format}"
+        )));
+    }
+    if channels == 0 || sample_rate == 0 {
+        return Err(DAWProjectError::Validation(format!(
+            "Invalid WAV format: channels={channels}, sample_rate={sample_rate}"
+        )));
     }
 
     let raw_data = &bytes[data_offset..data_offset + data_len];
-    let max_frames = if max_seconds > 0.0 {
+    let max_frames = if max_seconds > 0.0 && max_seconds.is_finite() {
         (max_seconds * sample_rate as f64).ceil() as usize
     } else {
         usize::MAX
@@ -331,17 +376,25 @@ pub fn read_wav_preview<P: AsRef<Path>>(path: P, max_seconds: f64) -> Option<(u3
 
     let mut stereo_samples = Vec::new();
     let is_float = audio_format == 3;
+    let ch_usize = channels as usize;
 
     if is_float && bits_per_sample == 32 {
-        let count = data_len / 4;
-        let total_frames = count / (channels as usize);
+        let total_frames = (data_len / 4) / ch_usize;
         let frames_to_read = total_frames.min(max_frames);
         stereo_samples.reserve(frames_to_read * 2);
         for f in 0..frames_to_read {
-            let base = f * (channels as usize);
-            let s_left = f32::from_le_bytes(raw_data[base * 4..(base + 1) * 4].try_into().ok()?);
+            let base = f * ch_usize;
+            let s_left = f32::from_le_bytes(
+                raw_data[base * 4..(base + 1) * 4]
+                    .try_into()
+                    .map_err(|_| DAWProjectError::Validation("Truncated float WAV frame".to_string()))?,
+            );
             let s_right = if channels > 1 {
-                f32::from_le_bytes(raw_data[(base + 1) * 4..(base + 2) * 4].try_into().ok()?)
+                f32::from_le_bytes(
+                    raw_data[(base + 1) * 4..(base + 2) * 4]
+                        .try_into()
+                        .map_err(|_| DAWProjectError::Validation("Truncated float WAV frame".to_string()))?,
+                )
             } else {
                 s_left
             };
@@ -349,16 +402,23 @@ pub fn read_wav_preview<P: AsRef<Path>>(path: P, max_seconds: f64) -> Option<(u3
             stereo_samples.push(if s_right.is_finite() { s_right.clamp(-16.0, 16.0) } else { 0.0 });
         }
     } else if !is_float && bits_per_sample == 32 {
-        let count = data_len / 4;
-        let total_frames = count / (channels as usize);
+        let total_frames = (data_len / 4) / ch_usize;
         let frames_to_read = total_frames.min(max_frames);
         stereo_samples.reserve(frames_to_read * 2);
         for f in 0..frames_to_read {
-            let base = f * (channels as usize);
-            let v_left = i32::from_le_bytes(raw_data[base * 4..(base + 1) * 4].try_into().ok()?);
+            let base = f * ch_usize;
+            let v_left = i32::from_le_bytes(
+                raw_data[base * 4..(base + 1) * 4]
+                    .try_into()
+                    .map_err(|_| DAWProjectError::Validation("Truncated 32-bit PCM WAV frame".to_string()))?,
+            );
             let s_left = v_left as f32 / 2_147_483_648.0;
             let s_right = if channels > 1 {
-                let v_right = i32::from_le_bytes(raw_data[(base + 1) * 4..(base + 2) * 4].try_into().ok()?);
+                let v_right = i32::from_le_bytes(
+                    raw_data[(base + 1) * 4..(base + 2) * 4]
+                        .try_into()
+                        .map_err(|_| DAWProjectError::Validation("Truncated 32-bit PCM WAV frame".to_string()))?,
+                );
                 v_right as f32 / 2_147_483_648.0
             } else {
                 s_left
@@ -366,13 +426,12 @@ pub fn read_wav_preview<P: AsRef<Path>>(path: P, max_seconds: f64) -> Option<(u3
             stereo_samples.push(if s_left.is_finite() { s_left } else { 0.0 });
             stereo_samples.push(if s_right.is_finite() { s_right } else { 0.0 });
         }
-    } else if bits_per_sample == 24 {
-        let count = data_len / 3;
-        let total_frames = count / (channels as usize);
+    } else if !is_float && bits_per_sample == 24 {
+        let total_frames = (data_len / 3) / ch_usize;
         let frames_to_read = total_frames.min(max_frames);
         stereo_samples.reserve(frames_to_read * 2);
         for f in 0..frames_to_read {
-            let base = f * (channels as usize);
+            let base = f * ch_usize;
             let b0 = &raw_data[base * 3..(base + 1) * 3];
             let raw0 = ((b0[2] as i32) << 24) | ((b0[1] as i32) << 16) | ((b0[0] as i32) << 8);
             let s_left = (raw0 >> 8) as f32 / 8_388_608.0;
@@ -387,18 +446,25 @@ pub fn read_wav_preview<P: AsRef<Path>>(path: P, max_seconds: f64) -> Option<(u3
             stereo_samples.push(if s_left.is_finite() { s_left } else { 0.0 });
             stereo_samples.push(if s_right.is_finite() { s_right } else { 0.0 });
         }
-    } else if bits_per_sample == 16 {
-        let count = data_len / 2;
-        let total_frames = count / (channels as usize);
+    } else if !is_float && bits_per_sample == 16 {
+        let total_frames = (data_len / 2) / ch_usize;
         let frames_to_read = total_frames.min(max_frames);
         stereo_samples.reserve(frames_to_read * 2);
         for f in 0..frames_to_read {
-            let base = f * (channels as usize);
-            let val0 = i16::from_le_bytes(raw_data[base * 2..(base + 1) * 2].try_into().ok()?);
+            let base = f * ch_usize;
+            let val0 = i16::from_le_bytes(
+                raw_data[base * 2..(base + 1) * 2]
+                    .try_into()
+                    .map_err(|_| DAWProjectError::Validation("Truncated 16-bit PCM WAV frame".to_string()))?,
+            );
             let s_left = val0 as f32 / 32768.0;
 
             let s_right = if channels > 1 {
-                let val1 = i16::from_le_bytes(raw_data[(base + 1) * 2..(base + 2) * 2].try_into().ok()?);
+                let val1 = i16::from_le_bytes(
+                    raw_data[(base + 1) * 2..(base + 2) * 2]
+                        .try_into()
+                        .map_err(|_| DAWProjectError::Validation("Truncated 16-bit PCM WAV frame".to_string()))?,
+                );
                 val1 as f32 / 32768.0
             } else {
                 s_left
@@ -407,10 +473,12 @@ pub fn read_wav_preview<P: AsRef<Path>>(path: P, max_seconds: f64) -> Option<(u3
             stereo_samples.push(if s_right.is_finite() { s_right } else { 0.0 });
         }
     } else {
-        return None;
+        return Err(DAWProjectError::Validation(format!(
+            "Unsupported WAV format: audio_format={audio_format}, bits_per_sample={bits_per_sample}"
+        )));
     }
 
-    Some((sample_rate, 2, stereo_samples))
+    Ok((sample_rate, 2, stereo_samples))
 }
 
 /// Resolves an audio sample path against the filesystem or relative to the ALS base directory.
@@ -488,10 +556,6 @@ fn parse_oxide_comment_json(node: &XmlNode, prefix: &str) -> Option<serde_json::
     None
 }
 
-fn find_child_or_descendant<'a>(node: &'a XmlNode, tag: &str) -> Option<&'a XmlNode> {
-    node.find_child(tag).or_else(|| node.find_descendant(tag))
-}
-
 fn read_manual_or_attr_f32(node: &XmlNode, child_tag: &str, attr_name: &str) -> Option<f32> {
     node.get_attr(attr_name)
         .and_then(|v| v.parse::<f32>().ok())
@@ -506,12 +570,40 @@ fn read_manual_or_attr_f32(node: &XmlNode, child_tag: &str, attr_name: &str) -> 
         })
 }
 
+struct ParsedMidiClip {
+    clip_id: u32,
+    name: String,
+    color_hex: String,
+    muted: bool,
+    loop_on: bool,
+    loop_start: f64,
+    loop_end: f64,
+    pattern_offset_beats: f64,
+    cur_start: f64,
+    cur_end: f64,
+    pattern: MidiPattern,
+}
+
+struct ParsedAudioClip {
+    clip_id: u32,
+    name: String,
+    color_hex: String,
+    muted: bool,
+    loop_on: bool,
+    loop_start: f64,
+    loop_end: f64,
+    pattern_offset_beats: f64,
+    cur_start: f64,
+    cur_end: f64,
+    audio_data: oxide_timeline::AudioClipData,
+}
+
 fn parse_midi_clip_node(
     node: &XmlNode,
     fallback_id: u32,
     fallback_name: &str,
     fallback_color: &str,
-) -> (u32, String, String, bool, f64, f64, f64, f64, MidiPattern) {
+) -> ParsedMidiClip {
     let clip_id = node
         .get_attr("Id")
         .or_else(|| node.find_child("LomId").and_then(|l| l.get_attr_or_text("Value")))
@@ -535,6 +627,17 @@ fn parse_midi_clip_node(
                 .and_then(|m| m.get("color_hex").and_then(|v| v.as_str()).map(|s| s.to_string()))
         })
         .unwrap_or_else(|| fallback_color.to_string());
+
+    let muted = node
+        .find_child("Disabled")
+        .and_then(|d| d.get_attr_or_text("Value"))
+        .and_then(|v| v.parse::<bool>().ok())
+        .or_else(|| {
+            clip_meta
+                .as_ref()
+                .and_then(|m| m.get("muted").and_then(|v| v.as_bool()))
+        })
+        .unwrap_or(false);
 
     let cur_start = node
         .find_child("CurrentStart")
@@ -567,6 +670,19 @@ fn parse_midi_clip_node(
                 .map(|ce| loop_start + (ce - cur_start).max(0.0625))
                 .unwrap_or(4.0)
         });
+    let start_relative = loop_node
+        .and_then(|l| l.find_child("StartRelative"))
+        .and_then(|v| v.get_attr_or_text("Value"))
+        .and_then(|v| v.parse::<f64>().ok())
+        .unwrap_or(0.0);
+
+    let meta_pattern_offset = clip_meta
+        .as_ref()
+        .and_then(|m| m.get("pattern_offset_beats").and_then(|v| v.as_f64()));
+    let is_oxide_session = clip_meta
+        .as_ref()
+        .and_then(|m| m.get("is_oxide_session").and_then(|v| v.as_bool()))
+        .unwrap_or(false);
 
     let cur_end = explicit_cur_end.unwrap_or_else(|| cur_start + (loop_end - loop_start).max(0.0625));
 
@@ -678,29 +794,57 @@ fn parse_midi_clip_node(
         }
     }
 
+    let pat_len = (loop_end - loop_start).max(0.0625);
+    let adjust_loop_start = meta_pattern_offset.is_none() && !is_oxide_session && loop_start > 0.0;
+    if adjust_loop_start {
+        let mut shifted = Vec::with_capacity(notes.len());
+        for mut n in notes {
+            if n.start_beat + n.duration_beats <= loop_start {
+                continue;
+            }
+            if n.start_beat < loop_start {
+                n.duration_beats = (n.start_beat + n.duration_beats - loop_start).max(0.0625);
+                n.start_beat = 0.0;
+            } else {
+                n.start_beat -= loop_start;
+            }
+            shifted.push(n);
+        }
+        notes = shifted;
+    }
+
     notes.sort_by(|a, b| {
         a.start_beat
             .partial_cmp(&b.start_beat)
             .unwrap_or(std::cmp::Ordering::Equal)
             .then_with(|| a.pitch.cmp(&b.pitch))
     });
-    let pat_len = (loop_end - loop_start).max(0.0625);
+
+    let pattern_offset_beats = meta_pattern_offset.unwrap_or(start_relative.max(0.0));
+    let (eff_loop_start, eff_loop_end) = if adjust_loop_start {
+        (pattern_offset_beats, pat_len)
+    } else {
+        (loop_start, loop_end)
+    };
+
     let pattern = MidiPattern {
         length_beats: pat_len,
         notes,
     };
 
-    (
+    ParsedMidiClip {
         clip_id,
         name,
-        clip_color,
+        color_hex: clip_color,
+        muted,
         loop_on,
-        loop_start,
-        loop_end,
+        loop_start: eff_loop_start,
+        loop_end: eff_loop_end,
+        pattern_offset_beats,
         cur_start,
         cur_end,
         pattern,
-    )
+    }
 }
 
 fn parse_audio_clip_node(
@@ -710,7 +854,7 @@ fn parse_audio_clip_node(
     fallback_color: &str,
     base_dir: Option<&Path>,
     sample_cache: &mut HashMap<PathBuf, (u32, u16, Vec<f32>)>,
-) -> (u32, String, String, bool, f64, f64, f64, f64, oxide_timeline::AudioClipData) {
+) -> ParsedAudioClip {
     let clip_id = node
         .get_attr("Id")
         .or_else(|| node.find_child("LomId").and_then(|l| l.get_attr_or_text("Value")))
@@ -734,6 +878,17 @@ fn parse_audio_clip_node(
                 .and_then(|m| m.get("color_hex").and_then(|v| v.as_str()).map(|s| s.to_string()))
         })
         .unwrap_or_else(|| fallback_color.to_string());
+
+    let muted = node
+        .find_child("Disabled")
+        .and_then(|d| d.get_attr_or_text("Value"))
+        .and_then(|v| v.parse::<bool>().ok())
+        .or_else(|| {
+            clip_meta
+                .as_ref()
+                .and_then(|m| m.get("muted").and_then(|v| v.as_bool()))
+        })
+        .unwrap_or(false);
 
     let cur_start = node
         .find_child("CurrentStart")
@@ -766,6 +921,16 @@ fn parse_audio_clip_node(
                 .map(|ce| loop_start + (ce - cur_start).max(0.0625))
                 .unwrap_or(4.0)
         });
+    let start_relative = loop_node
+        .and_then(|l| l.find_child("StartRelative"))
+        .and_then(|v| v.get_attr_or_text("Value"))
+        .and_then(|v| v.parse::<f64>().ok())
+        .unwrap_or(0.0);
+
+    let pattern_offset_beats = clip_meta
+        .as_ref()
+        .and_then(|m| m.get("pattern_offset_beats").and_then(|v| v.as_f64()))
+        .unwrap_or_else(|| (loop_start + start_relative).max(0.0));
 
     let cur_end = explicit_cur_end.unwrap_or_else(|| cur_start + (loop_end - loop_start).max(0.0625));
 
@@ -796,17 +961,19 @@ fn parse_audio_clip_node(
     );
     audio_data.samples = samples;
 
-    (
+    ParsedAudioClip {
         clip_id,
         name,
-        clip_color,
+        color_hex: clip_color,
+        muted,
         loop_on,
         loop_start,
         loop_end,
+        pattern_offset_beats,
         cur_start,
         cur_end,
         audio_data,
-    )
+    }
 }
 
 fn alloc_id(next_id: &mut u32) -> u32 {
@@ -861,6 +1028,13 @@ fn write_midi_notes_xml(
     out.push_str(&format!("{indent}</Notes>\n"));
 }
 
+struct ClipWriteMeta {
+    muted: bool,
+    start_relative: f64,
+    pattern_offset_beats: Option<f64>,
+    is_oxide_session: bool,
+}
+
 fn write_midi_clip_xml(
     out: &mut String,
     clip_id: u32,
@@ -872,6 +1046,7 @@ fn write_midi_clip_xml(
     cur_start: f64,
     cur_end: f64,
     notes: &[MidiNote],
+    meta: ClipWriteMeta,
     indent: &str,
     next_id: &mut u32,
 ) {
@@ -885,10 +1060,17 @@ fn write_midi_clip_xml(
         "{indent}  <Name Value=\"{}\"/>\n",
         xml_escape(name)
     ));
-    let clip_meta = sanitize_xml_comment(
-        &serde_json::json!({ "color_hex": color_hex }).to_string(),
-    );
+    let mut meta_obj = serde_json::json!({
+        "color_hex": color_hex,
+        "muted": meta.muted,
+        "is_oxide_session": meta.is_oxide_session,
+    });
+    if let Some(offset) = meta.pattern_offset_beats {
+        meta_obj["pattern_offset_beats"] = serde_json::json!(offset);
+    }
+    let clip_meta = sanitize_xml_comment(&meta_obj.to_string());
     out.push_str(&format!("{indent}  <!-- oxide-clip:{clip_meta} -->\n"));
+    out.push_str(&format!("{indent}  <Disabled Value=\"{}\"/>\n", meta.muted));
     out.push_str(&format!("{indent}  <Loop>\n"));
     out.push_str(&format!("{indent}    <LoopOn Value=\"{loop_on}\"/>\n"));
     out.push_str(&format!(
@@ -901,7 +1083,7 @@ fn write_midi_clip_xml(
     ));
     out.push_str(&format!(
         "{indent}    <StartRelative Value=\"{:.4}\"/>\n",
-        loop_start
+        meta.start_relative
     ));
     out.push_str(&format!(
         "{indent}    <OutMarker Value=\"{:.4}\"/>\n",
@@ -940,6 +1122,7 @@ fn write_audio_clip_xml(
     cur_start: f64,
     cur_end: f64,
     file_path: &str,
+    meta: ClipWriteMeta,
     indent: &str,
     next_id: &mut u32,
 ) {
@@ -953,10 +1136,17 @@ fn write_audio_clip_xml(
         "{indent}  <Name Value=\"{}\"/>\n",
         xml_escape(name)
     ));
-    let clip_meta = sanitize_xml_comment(
-        &serde_json::json!({ "color_hex": color_hex }).to_string(),
-    );
+    let mut meta_obj = serde_json::json!({
+        "color_hex": color_hex,
+        "muted": meta.muted,
+        "is_oxide_session": meta.is_oxide_session,
+    });
+    if let Some(offset) = meta.pattern_offset_beats {
+        meta_obj["pattern_offset_beats"] = serde_json::json!(offset);
+    }
+    let clip_meta = sanitize_xml_comment(&meta_obj.to_string());
     out.push_str(&format!("{indent}  <!-- oxide-clip:{clip_meta} -->\n"));
+    out.push_str(&format!("{indent}  <Disabled Value=\"{}\"/>\n", meta.muted));
     out.push_str(&format!("{indent}  <Loop>\n"));
     out.push_str(&format!("{indent}    <LoopOn Value=\"{loop_on}\"/>\n"));
     out.push_str(&format!(
@@ -966,6 +1156,10 @@ fn write_audio_clip_xml(
     out.push_str(&format!(
         "{indent}    <LoopEnd Value=\"{:.4}\"/>\n",
         loop_end
+    ));
+    out.push_str(&format!(
+        "{indent}    <StartRelative Value=\"{:.4}\"/>\n",
+        meta.start_relative
     ));
     out.push_str(&format!("{indent}  </Loop>\n"));
     out.push_str(&format!(
@@ -993,6 +1187,44 @@ fn write_audio_clip_xml(
     out.push_str(&format!("{indent}    </FileRef>\n"));
     out.push_str(&format!("{indent}  </SampleRef>\n"));
     out.push_str(&format!("{indent}</AudioClip>\n"));
+}
+
+fn eq8_uses_zero_based_keys(params: &HashMap<String, f32>) -> bool {
+    let has_zero = params
+        .keys()
+        .any(|k| k.starts_with("band0_") || k.starts_with("band_0_"));
+    let has_eight = params
+        .keys()
+        .any(|k| k.starts_with("band8_") || k.starts_with("band_8_"));
+    has_zero && !has_eight
+}
+
+fn eq8_lookup_band_param(
+    params: &HashMap<String, f32>,
+    band_idx: usize,
+    zero_based: bool,
+    suffixes: &[&str],
+    legacy_keys: &[&str],
+    default_val: f32,
+) -> f32 {
+    let num = if zero_based { band_idx } else { band_idx + 1 };
+    for suf in suffixes {
+        for key in [format!("band{num}_{suf}"), format!("band_{num}_{suf}")] {
+            if let Some(&v) = params.get(&key) {
+                if v.is_finite() {
+                    return v;
+                }
+            }
+        }
+    }
+    for &lk in legacy_keys {
+        if let Some(&v) = params.get(lk) {
+            if v.is_finite() {
+                return v;
+            }
+        }
+    }
+    default_val
 }
 
 fn write_insert_fx_xml(
@@ -1038,9 +1270,48 @@ fn write_insert_fx_xml(
         }
         InsertEffectConfig::EqEight { params } => {
             let meta_json = sanitize_xml_comment(&serde_json::to_string(params).unwrap_or_else(|_| "{}".to_string()));
-            out.push_str(&format!(
-                "{indent}<Eq8 Id=\"{dev_id}\"><UserName Value=\"EQ Eight\"/><!-- oxide-eq8:{meta_json} --></Eq8>\n"
-            ));
+            let zero_based = eq8_uses_zero_based_keys(params);
+            let default_freqs = [30.0f32, 200.0, 1000.0, 5000.0, 100.0, 10000.0, 5000.0, 18000.0];
+            let default_modes = [2u8, 3, 3, 5, 3, 3, 3, 6];
+            out.push_str(&format!("{indent}<Eq8 Id=\"{dev_id}\">\n"));
+            out.push_str(&format!("{indent}  <UserName Value=\"EQ Eight\"/>\n"));
+            out.push_str(&format!("{indent}  <!-- oxide-eq8:{meta_json} -->\n"));
+            for i in 0..8usize {
+                let freq_legacy: &[&str] = match i {
+                    0 => &["highpass_freq", "lowcut_freq"],
+                    7 => &["lowpass_freq", "highcut_freq"],
+                    _ => &[],
+                };
+                let gain_legacy: &[&str] = match i {
+                    1 => &["low_gain", "low_gain_db"],
+                    3 => &["mid_gain", "mid_gain_db"],
+                    6 => &["high_gain", "high_gain_db"],
+                    _ => &[],
+                };
+                let freq = eq8_lookup_band_param(params, i, zero_based, &["freq_hz", "freq"], freq_legacy, default_freqs[i]);
+                let gain = eq8_lookup_band_param(params, i, zero_based, &["gain_db", "gain"], gain_legacy, 0.0);
+                let q = eq8_lookup_band_param(
+                    params,
+                    i,
+                    zero_based,
+                    &["q"],
+                    &[],
+                    std::f32::consts::FRAC_1_SQRT_2,
+                );
+                let def_on = if i < 4 { 1.0 } else { 0.0 };
+                let is_on = eq8_lookup_band_param(params, i, zero_based, &["enabled"], &[], def_on) >= 0.5;
+                let mode = eq8_lookup_band_param(params, i, zero_based, &["mode"], &[], default_modes[i] as f32).round() as i32;
+                out.push_str(&format!("{indent}  <Bands.{i}>\n"));
+                out.push_str(&format!("{indent}    <ParameterA>\n"));
+                out.push_str(&format!("{indent}      <IsOn><Manual Value=\"{is_on}\"/></IsOn>\n"));
+                out.push_str(&format!("{indent}      <Mode><Manual Value=\"{mode}\"/></Mode>\n"));
+                out.push_str(&format!("{indent}      <Freq><Manual Value=\"{freq:.4}\"/></Freq>\n"));
+                out.push_str(&format!("{indent}      <Gain><Manual Value=\"{gain:.4}\"/></Gain>\n"));
+                out.push_str(&format!("{indent}      <Q><Manual Value=\"{q:.6}\"/></Q>\n"));
+                out.push_str(&format!("{indent}    </ParameterA>\n"));
+                out.push_str(&format!("{indent}  </Bands.{i}>\n"));
+            }
+            out.push_str(&format!("{indent}</Eq8>\n"));
         }
         InsertEffectConfig::GlueCompressor {
             threshold_db,
@@ -1105,6 +1376,69 @@ fn write_insert_fx_xml(
             out.push_str(&format!("{indent}<!-- oxide-device:{meta_json} -->\n"));
         }
     }
+}
+
+fn parse_eq8_band_node(band_node: &XmlNode, band_num: usize, params: &mut HashMap<String, f32>) {
+    let target = band_node.find_child("ParameterA").unwrap_or(band_node);
+    if let Some(is_on_str) = target
+        .find_child("IsOn")
+        .and_then(|n| {
+            n.find_child("Manual")
+                .and_then(|m| m.get_attr_or_text("Value"))
+                .or_else(|| n.get_attr_or_text("Value"))
+        })
+        .or_else(|| target.get_attr("IsOn"))
+    {
+        if let Ok(enabled) = is_on_str.parse::<bool>() {
+            params.insert(
+                format!("band{band_num}_enabled"),
+                if enabled { 1.0 } else { 0.0 },
+            );
+        }
+    }
+    if let Some(freq) = read_manual_or_attr_f32(target, "Freq", "Freq") {
+        params.insert(format!("band{band_num}_freq_hz"), freq);
+    }
+    if let Some(gain) = read_manual_or_attr_f32(target, "Gain", "Gain") {
+        params.insert(format!("band{band_num}_gain_db"), gain);
+    }
+    if let Some(q) = read_manual_or_attr_f32(target, "Q", "Q") {
+        params.insert(format!("band{band_num}_q"), q);
+    }
+}
+
+fn parse_eq8_params(dev: &XmlNode) -> HashMap<String, f32> {
+    if let Some(meta) = parse_oxide_comment_json(dev, "oxide-eq8:") {
+        if let Ok(parsed) = serde_json::from_value::<HashMap<String, f32>>(meta) {
+            return parsed;
+        }
+    }
+
+    let mut params = HashMap::new();
+    for i in 0..8usize {
+        let tag = format!("Bands.{i}");
+        let band_node = dev
+            .find_child(&tag)
+            .or_else(|| dev.find_child("Bands").and_then(|b| b.find_child(&tag)));
+        if let Some(bn) = band_node {
+            parse_eq8_band_node(bn, i + 1, &mut params);
+        }
+    }
+    if params.is_empty() {
+        if let Some(bands_node) = dev.find_child("Bands") {
+            for (idx, bn) in bands_node.find_children("Band").into_iter().take(8).enumerate() {
+                let band_num = bn
+                    .get_attr("Id")
+                    .and_then(|v| v.parse::<usize>().ok())
+                    .map(|id| if id < 8 { id + 1 } else { idx + 1 })
+                    .unwrap_or(idx + 1);
+                if (1..=8).contains(&band_num) {
+                    parse_eq8_band_node(bn, band_num, &mut params);
+                }
+            }
+        }
+    }
+    params
 }
 
 fn parse_insert_fx_from_devices_node(devs: &XmlNode) -> Vec<InsertEffectConfig> {
@@ -1178,9 +1512,7 @@ fn parse_insert_fx_from_devices_node(devs: &XmlNode) -> Vec<InsertEffectConfig> 
                 });
             }
             "Eq8" => {
-                let params = parse_oxide_comment_json(dev, "oxide-eq8:")
-                    .and_then(|v| serde_json::from_value::<HashMap<String, f32>>(v).ok())
-                    .unwrap_or_default();
+                let params = parse_eq8_params(dev);
                 insert_fx.push(InsertEffectConfig::EqEight { params });
             }
             "GlueCompressor" => {
@@ -1224,7 +1556,82 @@ fn parse_insert_fx_from_devices_node(devs: &XmlNode) -> Vec<InsertEffectConfig> 
     insert_fx
 }
 
-fn parse_track_automation_envelopes(track_node: &XmlNode) -> Vec<AutomationLane> {
+fn collect_track_automation_targets(
+    mixer_node: Option<&XmlNode>,
+    devices_node: Option<&XmlNode>,
+) -> HashMap<u32, String> {
+    let mut map = HashMap::new();
+    if let Some(m) = mixer_node {
+        for (tag, name) in [
+            ("Volume", "volume_db"),
+            ("Pan", "pan"),
+            ("Speaker", "mute"),
+            ("On", "mute"),
+        ] {
+            if let Some(id) = m
+                .find_child(tag)
+                .and_then(|n| n.find_child("AutomationTarget"))
+                .and_then(|at| at.get_attr("Id"))
+                .and_then(|v| v.parse::<u32>().ok())
+            {
+                map.entry(id).or_insert_with(|| name.to_string());
+            }
+        }
+        if let Some(sends) = m.find_child("Sends") {
+            for (idx, holder) in sends.find_children("TrackSendHolder").into_iter().take(32).enumerate() {
+                if let Some(id) = holder
+                    .find_child("Send")
+                    .and_then(|s| s.find_child("AutomationTarget"))
+                    .and_then(|at| at.get_attr("Id"))
+                    .and_then(|v| v.parse::<u32>().ok())
+                {
+                    map.insert(id, format!("send_{idx}"));
+                }
+            }
+        }
+    }
+    if let Some(devs) = devices_node {
+        for dev in &devs.children {
+            if dev.tag == "Parameter" {
+                if let Some(pname) = dev.get_attr("Name") {
+                    if let Some(id) = dev
+                        .find_child("AutomationTarget")
+                        .and_then(|at| at.get_attr("Id"))
+                        .and_then(|v| v.parse::<u32>().ok())
+                    {
+                        map.insert(id, pname);
+                    }
+                }
+                continue;
+            }
+            for child in &dev.children {
+                if child.tag == "Parameter" {
+                    if let Some(pname) = child.get_attr("Name") {
+                        if let Some(id) = child
+                            .find_child("AutomationTarget")
+                            .and_then(|at| at.get_attr("Id"))
+                            .and_then(|v| v.parse::<u32>().ok())
+                        {
+                            map.insert(id, pname);
+                        }
+                    }
+                } else if let Some(id) = child
+                    .find_child("AutomationTarget")
+                    .and_then(|at| at.get_attr("Id"))
+                    .and_then(|v| v.parse::<u32>().ok())
+                {
+                    map.entry(id).or_insert_with(|| child.tag.clone());
+                }
+            }
+        }
+    }
+    map
+}
+
+fn parse_track_automation_envelopes(
+    track_node: &XmlNode,
+    pointee_to_param: &HashMap<u32, String>,
+) -> Vec<AutomationLane> {
     let mut lanes = Vec::new();
     let Some(auto_envs) = track_node.find_child("AutomationEnvelopes") else {
         return lanes;
@@ -1248,6 +1655,7 @@ fn parse_track_automation_envelopes(track_node: &XmlNode) -> Vec<AutomationLane>
             .as_ref()
             .and_then(|m| m.get("parameter_name").and_then(|v| v.as_str()))
             .map(|s| s.to_string())
+            .or_else(|| pointee_to_param.get(&pointee_id).cloned())
             .unwrap_or_else(|| format!("envelope_{}", pointee_id));
 
         let mut lane = AutomationLane::new(param_id, param_name);
@@ -1299,11 +1707,35 @@ impl DAWProject {
         let max_existing_id = self
             .tracks
             .iter()
-            .map(|t| t.id)
+            .flat_map(|t| {
+                std::iter::once(t.id)
+                    .chain(t.group_id)
+                    .chain(t.session_clips.iter().flatten().map(|c| c.id))
+                    .chain(t.arrangement_clips.iter().map(|c| c.id))
+                    .chain(t.automation_lanes.iter().map(|l| l.parameter_id))
+            })
             .chain(self.scenes.iter().map(|s| s.id))
             .max()
             .unwrap_or(0);
-        let mut next_id: u32 = max_existing_id.saturating_add(100);
+        let mut next_id: u32 = max_existing_id.saturating_add(100).max(100);
+
+        // Assign unique exported track IDs >= 1 (0 is reserved for MainTrack).
+        let mut used_track_ids: HashSet<u32> = HashSet::new();
+        used_track_ids.insert(0);
+        let mut track_id_remap: HashMap<u32, u32> = HashMap::with_capacity(self.tracks.len());
+        let mut exported_track_ids: Vec<u32> = Vec::with_capacity(self.tracks.len());
+        for track in &self.tracks {
+            let exp_id = if track.id >= 1 && used_track_ids.insert(track.id) {
+                track.id
+            } else {
+                let nid = alloc_id(&mut next_id);
+                used_track_ids.insert(nid);
+                nid
+            };
+            track_id_remap.entry(track.id).or_insert(exp_id);
+            exported_track_ids.push(exp_id);
+        }
+
         let mut body = String::with_capacity(16384);
 
         // Metadata & Annotation (Oxide extra fields in XML comment for clean Live 12 compatibility)
@@ -1321,14 +1753,6 @@ impl DAWProject {
             .to_string(),
         );
         body.push_str(&format!("    <!-- oxide-metadata:{meta_json} -->\n"));
-
-        // Tempo
-        body.push_str("    <Tempo>\n");
-        body.push_str(&format!(
-            "      <Manual Value=\"{:.4}\"/>\n",
-            self.transport.bpm
-        ));
-        body.push_str("    </Tempo>\n");
 
         // Time Signature
         body.push_str("    <TimeSignature>\n");
@@ -1364,9 +1788,12 @@ impl DAWProject {
         ));
         body.push_str("    </Transport>\n");
 
-        // Master Track
+        // Main Track (Live 12 MainTrack Id="0")
         let master_vol_lin = db_to_ableton_linear(self.master_track.volume_db);
-        body.push_str("    <MasterTrack Id=\"0\">\n");
+        let main_tempo_at_id = alloc_id(&mut next_id);
+        let main_vol_at_id = alloc_id(&mut next_id);
+        let main_pan_at_id = alloc_id(&mut next_id);
+        body.push_str("    <MainTrack Id=\"0\">\n");
         body.push_str("      <Name>\n");
         body.push_str("        <EffectiveName Value=\"Master\"/>\n");
         body.push_str("        <UserName Value=\"Master\"/>\n");
@@ -1377,12 +1804,21 @@ impl DAWProject {
         body.push_str(&format!("      <!-- oxide-master:{master_meta} -->\n"));
         body.push_str("      <DeviceChain>\n");
         body.push_str("        <Mixer>\n");
+        body.push_str("          <Tempo>\n");
         body.push_str(&format!(
-            "          <Volume><Manual Value=\"{}\"/></Volume>\n",
+            "            <Manual Value=\"{:.4}\"/>\n",
+            self.transport.bpm
+        ));
+        body.push_str(&format!(
+            "            <AutomationTarget Id=\"{main_tempo_at_id}\"><LockEnvelope Value=\"0\"/></AutomationTarget>\n"
+        ));
+        body.push_str("          </Tempo>\n");
+        body.push_str(&format!(
+            "          <Volume><Manual Value=\"{}\"/><AutomationTarget Id=\"{main_vol_at_id}\"><LockEnvelope Value=\"0\"/></AutomationTarget></Volume>\n",
             format_ableton_linear(master_vol_lin)
         ));
         body.push_str(&format!(
-            "          <Pan><Manual Value=\"{:.4}\"/></Pan>\n",
+            "          <Pan><Manual Value=\"{:.4}\"/><AutomationTarget Id=\"{main_pan_at_id}\"><LockEnvelope Value=\"0\"/></AutomationTarget></Pan>\n",
             self.master_track.pan
         ));
         body.push_str("        </Mixer>\n");
@@ -1413,11 +1849,27 @@ impl DAWProject {
         }
         body.push_str("        </Devices>\n");
         body.push_str("      </DeviceChain>\n");
-        body.push_str("    </MasterTrack>\n");
+        body.push_str("    </MainTrack>\n");
+
+        // PreHearTrack (required sibling of MainTrack in Live 12 schema)
+        body.push_str("    <PreHearTrack>\n");
+        body.push_str("      <Name>\n");
+        body.push_str("        <EffectiveName Value=\"Master\"/>\n");
+        body.push_str("        <UserName Value=\"\"/>\n");
+        body.push_str("      </Name>\n");
+        body.push_str("      <DeviceChain>\n");
+        body.push_str("        <Mixer>\n");
+        body.push_str("          <Volume><Manual Value=\"1.0000000\"/></Volume>\n");
+        body.push_str("          <Pan><Manual Value=\"0.0000\"/></Pan>\n");
+        body.push_str("          <On><Manual Value=\"true\"/></On>\n");
+        body.push_str("          <Speaker><Manual Value=\"true\"/></Speaker>\n");
+        body.push_str("        </Mixer>\n");
+        body.push_str("      </DeviceChain>\n");
+        body.push_str("    </PreHearTrack>\n");
 
         // Tracks
         body.push_str("    <Tracks>\n");
-        for track in &self.tracks {
+        for (track, &exported_id) in self.tracks.iter().zip(exported_track_ids.iter()) {
             let (tag, color_idx) = match track.track_type {
                 TrackType::Audio => ("AudioTrack", 24),
                 TrackType::DrumRack => ("MidiTrack", 48),
@@ -1426,7 +1878,12 @@ impl DAWProject {
                 TrackType::Group => ("GroupTrack", 30),
             };
 
-            body.push_str(&format!("      <{} Id=\"{}\">\n", tag, track.id));
+            let mapped_group_id = track
+                .group_id
+                .map(|gid| *track_id_remap.get(&gid).unwrap_or(&gid) as i64)
+                .unwrap_or(-1);
+
+            body.push_str(&format!("      <{} Id=\"{}\">\n", tag, exported_id));
             body.push_str("        <Name>\n");
             body.push_str(&format!(
                 "          <EffectiveName Value=\"{}\"/>\n",
@@ -1438,36 +1895,79 @@ impl DAWProject {
             ));
             body.push_str("        </Name>\n");
             body.push_str(&format!("        <Color Value=\"{}\"/>\n", color_idx));
+            body.push_str(&format!("        <TrackGroupId Value=\"{mapped_group_id}\"/>\n"));
             let track_meta = sanitize_xml_comment(
                 &serde_json::json!({
                     "track_type": format!("{:?}", track.track_type),
                     "color_hex": track.color_hex,
+                    "group_id": track.group_id.map(|gid| *track_id_remap.get(&gid).unwrap_or(&gid)),
                 })
                 .to_string(),
             );
             body.push_str(&format!("        <!-- oxide-track:{track_meta} -->\n"));
+            let inst_meta = sanitize_xml_comment(
+                &serde_json::to_string(&track.instrument).unwrap_or_else(|_| "null".to_string()),
+            );
+            body.push_str(&format!("        <!-- oxide-instrument:{inst_meta} -->\n"));
+
+            let vol_at_id = alloc_id(&mut next_id);
+            let pan_at_id = alloc_id(&mut next_id);
+            let on_at_id = alloc_id(&mut next_id);
+            let speaker_at_id = alloc_id(&mut next_id);
+            let effective_sends = track.mixer.effective_sends_db();
+            let send_at_ids: Vec<u32> = (0..effective_sends.len())
+                .map(|_| alloc_id(&mut next_id))
+                .collect();
+
+            // Resolve or allocate PointeeId / AutomationTarget IDs for every automation lane
+            let mut used_pointees: HashSet<u32> = HashSet::new();
+            let mut lane_pointee_ids: Vec<u32> = Vec::with_capacity(track.automation_lanes.len());
+            let mut device_auto_targets: Vec<(String, u32)> = Vec::new();
+            for lane in &track.automation_lanes {
+                let pname = lane.parameter_name.to_ascii_lowercase();
+                let candidate = match pname.as_str() {
+                    "volume" | "volume_db" => Some(vol_at_id),
+                    "pan" => Some(pan_at_id),
+                    "mute" | "speaker" => Some(speaker_at_id),
+                    "send_a" | "send_a_db" | "send_0" => send_at_ids.first().copied(),
+                    "send_b" | "send_b_db" | "send_1" => send_at_ids.get(1).copied(),
+                    other => other
+                        .strip_prefix("send_")
+                        .and_then(|s| s.parse::<usize>().ok())
+                        .and_then(|idx| send_at_ids.get(idx).copied()),
+                };
+                let pointee_id = match candidate {
+                    Some(id) if used_pointees.insert(id) => id,
+                    _ => {
+                        let id = alloc_id(&mut next_id);
+                        used_pointees.insert(id);
+                        device_auto_targets.push((lane.parameter_name.clone(), id));
+                        id
+                    }
+                };
+                lane_pointee_ids.push(pointee_id);
+            }
 
             body.push_str("        <DeviceChain>\n");
             body.push_str("          <Mixer>\n");
             let trk_vol_lin = db_to_ableton_linear(track.mixer.volume_db);
             body.push_str(&format!(
-                "            <Volume><Manual Value=\"{}\"/></Volume>\n",
+                "            <Volume><Manual Value=\"{}\"/><AutomationTarget Id=\"{vol_at_id}\"><LockEnvelope Value=\"0\"/></AutomationTarget></Volume>\n",
                 format_ableton_linear(trk_vol_lin)
             ));
             body.push_str(&format!(
-                "            <Pan><Manual Value=\"{:.4}\"/></Pan>\n",
+                "            <Pan><Manual Value=\"{:.4}\"/><AutomationTarget Id=\"{pan_at_id}\"><LockEnvelope Value=\"0\"/></AutomationTarget></Pan>\n",
                 track.mixer.pan
             ));
             body.push_str(&format!(
-                "            <On><Manual Value=\"{}\"/></On>\n",
-                !track.mixer.mute
+                "            <On><Manual Value=\"true\"/><AutomationTarget Id=\"{on_at_id}\"><LockEnvelope Value=\"0\"/></AutomationTarget></On>\n"
             ));
             body.push_str(&format!(
                 "            <SoloSink><Manual Value=\"{}\"/></SoloSink>\n",
                 track.mixer.solo
             ));
             body.push_str(&format!(
-                "            <Speaker><Manual Value=\"{}\"/></Speaker>\n",
+                "            <Speaker><Manual Value=\"{}\"/><AutomationTarget Id=\"{speaker_at_id}\"><LockEnvelope Value=\"0\"/></AutomationTarget></Speaker>\n",
                 !track.mixer.mute
             ));
             body.push_str(&format!(
@@ -1475,10 +1975,12 @@ impl DAWProject {
                 track.mixer.arm
             ));
             body.push_str("            <Sends>\n");
-            for (send_idx, send_db) in track.mixer.effective_sends_db().into_iter().enumerate() {
+            for (send_idx, (send_db, &send_at_id)) in
+                effective_sends.into_iter().zip(send_at_ids.iter()).enumerate()
+            {
                 let send_lin = db_to_ableton_linear(send_db);
                 body.push_str(&format!(
-                    "              <TrackSendHolder Id=\"{send_idx}\"><Send><Manual Value=\"{}\"/></Send></TrackSendHolder>\n",
+                    "              <TrackSendHolder Id=\"{send_idx}\"><Send><Manual Value=\"{}\"/><AutomationTarget Id=\"{send_at_id}\"><LockEnvelope Value=\"0\"/></AutomationTarget></Send></TrackSendHolder>\n",
                     format_ableton_linear(send_lin)
                 ));
             }
@@ -1493,6 +1995,12 @@ impl DAWProject {
                     body.push_str("                <ClipSlot>\n");
                     body.push_str("                  <Value>\n");
                     if let Some(clip) = maybe_clip {
+                        let sess_meta = ClipWriteMeta {
+                            muted: false,
+                            start_relative: clip.loop_start_beat,
+                            pattern_offset_beats: None,
+                            is_oxide_session: true,
+                        };
                         match &clip.pattern {
                             ClipPattern::Midi(midi_pat) => {
                                 write_midi_clip_xml(
@@ -1506,6 +2014,7 @@ impl DAWProject {
                                     clip.loop_start_beat,
                                     clip.loop_end_beat,
                                     &midi_pat.notes,
+                                    sess_meta,
                                     "                    ",
                                     &mut next_id,
                                 );
@@ -1523,6 +2032,7 @@ impl DAWProject {
                                     clip.loop_start_beat,
                                     clip.loop_end_beat,
                                     &notes,
+                                    sess_meta,
                                     "                    ",
                                     &mut next_id,
                                 );
@@ -1539,6 +2049,7 @@ impl DAWProject {
                                     clip.loop_start_beat,
                                     clip.loop_end_beat,
                                     &audio_data.file_path,
+                                    sess_meta,
                                     "                    ",
                                     &mut next_id,
                                 );
@@ -1558,17 +2069,24 @@ impl DAWProject {
                             body.push_str("                <Events>\n");
                             for clip in &track.arrangement_clips {
                                 if let ClipPattern::Audio(audio_data) = &clip.pattern {
+                                    let offset = clip.pattern_offset_beats.max(0.0);
                                     write_audio_clip_xml(
                                         &mut body,
                                         clip.id,
                                         &clip.name,
                                         &track.color_hex,
                                         true,
-                                        0.0,
-                                        audio_data.length_beats.max(0.0625),
+                                        offset,
+                                        offset + audio_data.length_beats.max(0.0625),
                                         clip.timeline_start_beat,
                                         clip.timeline_end_beat(),
                                         &audio_data.file_path,
+                                        ClipWriteMeta {
+                                            muted: clip.muted,
+                                            start_relative: 0.0,
+                                            pattern_offset_beats: Some(clip.pattern_offset_beats),
+                                            is_oxide_session: false,
+                                        },
                                         "                  ",
                                         &mut next_id,
                                     );
@@ -1583,6 +2101,12 @@ impl DAWProject {
                             body.push_str("              <ArrangerAutomation>\n");
                             body.push_str("                <Events>\n");
                             for clip in &track.arrangement_clips {
+                                let arr_meta = ClipWriteMeta {
+                                    muted: clip.muted,
+                                    start_relative: clip.pattern_offset_beats,
+                                    pattern_offset_beats: Some(clip.pattern_offset_beats),
+                                    is_oxide_session: false,
+                                };
                                 match &clip.pattern {
                                     ClipPattern::Midi(midi_pat) => {
                                         write_midi_clip_xml(
@@ -1596,6 +2120,7 @@ impl DAWProject {
                                             clip.timeline_start_beat,
                                             clip.timeline_end_beat(),
                                             &midi_pat.notes,
+                                            arr_meta,
                                             "                  ",
                                             &mut next_id,
                                         );
@@ -1613,6 +2138,7 @@ impl DAWProject {
                                             clip.timeline_start_beat,
                                             clip.timeline_end_beat(),
                                             &notes,
+                                            arr_meta,
                                             "                  ",
                                             &mut next_id,
                                         );
@@ -1631,12 +2157,21 @@ impl DAWProject {
 
             // Devices
             body.push_str("          <Devices>\n");
+            let write_dev_params = |out: &mut String, targets: &[(String, u32)], indent: &str| {
+                for (pname, pid) in targets {
+                    out.push_str(&format!(
+                        "{indent}<Parameter Name=\"{}\"><AutomationTarget Id=\"{pid}\"><LockEnvelope Value=\"0\"/></AutomationTarget></Parameter>\n",
+                        xml_escape(pname)
+                    ));
+                }
+            };
             match track.track_type {
                 TrackType::DrumRack => {
                     let dr_id = alloc_id(&mut next_id);
                     body.push_str(&format!("            <DrumGroupDevice Id=\"{dr_id}\">\n"));
                     body.push_str("              <UserName Value=\"909 Drum Rack\"/>\n");
                     body.push_str("              <IsExpanded Value=\"true\"/>\n");
+                    write_dev_params(&mut body, &device_auto_targets, "              ");
                     body.push_str("            </DrumGroupDevice>\n");
                 }
                 TrackType::MidiSynth => {
@@ -1644,9 +2179,12 @@ impl DAWProject {
                     body.push_str(&format!("            <Wavetable Id=\"{wt_id}\">\n"));
                     body.push_str("              <UserName Value=\"Wavetable\"/>\n");
                     body.push_str("              <IsExpanded Value=\"true\"/>\n");
+                    write_dev_params(&mut body, &device_auto_targets, "              ");
                     body.push_str("            </Wavetable>\n");
                 }
-                TrackType::Audio | TrackType::Return | TrackType::Group => {}
+                TrackType::Audio | TrackType::Return | TrackType::Group => {
+                    write_dev_params(&mut body, &device_auto_targets, "            ");
+                }
             }
             for fx in &track.insert_fx {
                 write_insert_fx_xml(&mut body, fx, "            ", &mut next_id);
@@ -1658,9 +2196,10 @@ impl DAWProject {
             if !track.automation_lanes.is_empty() {
                 body.push_str("        <AutomationEnvelopes>\n");
                 body.push_str("          <Envelopes>\n");
-                for lane in &track.automation_lanes {
+                for (lane, &pointee_id) in
+                    track.automation_lanes.iter().zip(lane_pointee_ids.iter())
+                {
                     let env_id = alloc_id(&mut next_id);
-                    let pointee_id = alloc_id(&mut next_id);
                     let auto_meta = sanitize_xml_comment(
                         &serde_json::json!({
                             "parameter_id": lane.parameter_id,
@@ -1705,6 +2244,10 @@ impl DAWProject {
         // Scenes
         body.push_str("    <Scenes>\n");
         for scene in &self.scenes {
+            let (scene_tempo, tempo_enabled) = match scene.bpm_override {
+                Some(bpm) if bpm.is_finite() && bpm > 0.0 => (bpm, true),
+                _ => (self.transport.bpm, false),
+            };
             body.push_str(&format!("      <Scene Id=\"{}\">\n", scene.id));
             body.push_str(&format!(
                 "        <Name Value=\"{}\"/>\n",
@@ -1712,7 +2255,11 @@ impl DAWProject {
             ));
             body.push_str(&format!(
                 "        <Tempo Value=\"{:.4}\"/>\n",
-                self.transport.bpm
+                scene_tempo
+            ));
+            body.push_str(&format!(
+                "        <IsTempoEnabled Value=\"{}\"/>\n",
+                tempo_enabled
             ));
             body.push_str("      </Scene>\n");
         }
@@ -1873,19 +2420,37 @@ impl DAWProject {
             }
         }
 
-        // Transport & Tempo
+        // Main / Master Track (Live 12 uses MainTrack; Live <= 11 uses MasterTrack)
+        let main_track_node = liveset
+            .find_child("MainTrack")
+            .or_else(|| liveset.find_child("MasterTrack"));
+        let main_mixer_node = main_track_node.and_then(|mt| {
+            mt.find_child("DeviceChain")
+                .and_then(|dc| dc.find_child("Mixer"))
+                .or_else(|| mt.find_child("Mixer"))
+        });
+
+        // Transport & Tempo (only check MainTrack/MasterTrack mixer or direct LiveSet child, never arbitrary nested Tempo)
         let mut transport = TransportConfig::default();
-        if let Some(bpm_str) = liveset.find_descendant("Tempo").and_then(|t| {
+        let tempo_node = main_mixer_node
+            .and_then(|m| m.find_child("Tempo"))
+            .or_else(|| liveset.find_child("Tempo"));
+        if let Some(bpm_str) = tempo_node.and_then(|t| {
             t.find_child("Manual")
                 .and_then(|m| m.get_attr_or_text("Value"))
                 .or_else(|| t.get_attr_or_text("Value"))
         }) {
             if let Ok(bpm) = bpm_str.parse::<f64>() {
-                transport.bpm = bpm;
+                if bpm.is_finite() && bpm > 0.0 {
+                    transport.bpm = bpm;
+                }
             }
         }
 
-        if let Some(ts) = liveset.find_descendant("TimeSignature") {
+        let ts_node = main_mixer_node
+            .and_then(|m| m.find_child("TimeSignature"))
+            .or_else(|| liveset.find_child("TimeSignature"));
+        if let Some(ts) = ts_node {
             if let Some(num) = ts
                 .find_descendant("Numerator")
                 .and_then(|n| n.get_attr_or_text("Value"))
@@ -1928,14 +2493,16 @@ impl DAWProject {
 
         // Master Track
         let mut master_track = MasterTrackDefinition::default();
-        if let Some(mt) = liveset.find_child("MasterTrack") {
+        if let Some(mt) = main_track_node {
             if let Some(master_json) = parse_oxide_comment_json(mt, "oxide-master:") {
                 if let Ok(parsed_master) = serde_json::from_value::<MasterTrackDefinition>(master_json) {
                     master_track = parsed_master;
                 }
             }
-            if let Some(vol) = mt
-                .find_descendant("Volume")
+            let vol_node = main_mixer_node
+                .and_then(|m| m.find_child("Volume"))
+                .or_else(|| mt.find_child("Volume"));
+            if let Some(vol) = vol_node
                 .and_then(|v| {
                     v.find_child("Manual")
                         .and_then(|m| m.get_attr_or_text("Value"))
@@ -1945,8 +2512,10 @@ impl DAWProject {
             {
                 master_track.volume_db = ableton_linear_to_db(vol);
             }
-            if let Some(pan) = mt
-                .find_descendant("Pan")
+            let pan_node = main_mixer_node
+                .and_then(|m| m.find_child("Pan"))
+                .or_else(|| mt.find_child("Pan"));
+            if let Some(pan) = pan_node
                 .and_then(|p| {
                     p.find_child("Manual")
                         .and_then(|m| m.get_attr_or_text("Value"))
@@ -2009,6 +2578,15 @@ impl DAWProject {
                         .and_then(|m| m.get("track_type").and_then(|v| v.as_str()).map(|s| s.to_string()))
                 });
 
+            let device_chain = child.find_child("DeviceChain");
+            let devices_node = device_chain
+                .and_then(|dc| {
+                    dc.find_child("DeviceChain")
+                        .and_then(|dc2| dc2.find_child("Devices"))
+                        .or_else(|| dc.find_child("Devices"))
+                })
+                .or_else(|| child.find_child("Devices"));
+
             let track_type = match track_type_str.as_deref() {
                 Some("Return") => TrackType::Return,
                 Some("Group") => TrackType::Group,
@@ -2020,10 +2598,14 @@ impl DAWProject {
                     "GroupTrack" => TrackType::Group,
                     "AudioTrack" => TrackType::Audio,
                     _ => {
-                        let is_drum = child.find_descendant("DrumGroupDevice").is_some()
-                            || track_name.to_lowercase().contains("drum")
-                            || track_name.to_lowercase().contains("909");
-                        if is_drum {
+                        let has_drum_device = devices_node
+                            .map(|d| d.find_descendant("DrumGroupDevice").is_some())
+                            .unwrap_or_else(|| {
+                                device_chain
+                                    .map(|dc| dc.find_descendant("DrumGroupDevice").is_some())
+                                    .unwrap_or(false)
+                            });
+                        if has_drum_device {
                             TrackType::DrumRack
                         } else {
                             TrackType::MidiSynth
@@ -2031,6 +2613,19 @@ impl DAWProject {
                     }
                 },
             };
+
+            let group_id = child
+                .find_child("TrackGroupId")
+                .and_then(|g| g.get_attr_or_text("Value"))
+                .and_then(|v| v.parse::<i64>().ok())
+                .filter(|&gid| gid >= 0)
+                .map(|gid| gid as u32)
+                .or_else(|| {
+                    track_meta
+                        .as_ref()
+                        .and_then(|m| m.get("group_id").and_then(|v| v.as_u64()))
+                        .map(|v| v as u32)
+                });
 
             let color_hex = child
                 .find_child("ColorHex")
@@ -2048,9 +2643,14 @@ impl DAWProject {
                     TrackType::Group => "#b388ff".to_string(),
                 });
 
+            // Find this track's own <DeviceChain><Mixer> (never descend into nested Rack chains)
+            let mixer_node = device_chain
+                .and_then(|dc| dc.find_child("Mixer"))
+                .or_else(|| child.find_child("Mixer"));
             let mut mixer = MixerState::default();
-            if let Some(mixer_node) = child.find_descendant("Mixer") {
-                if let Some(vol) = find_child_or_descendant(mixer_node, "Volume")
+            if let Some(mixer_node) = mixer_node {
+                if let Some(vol) = mixer_node
+                    .find_child("Volume")
                     .and_then(|v| {
                         v.find_child("Manual")
                             .and_then(|m| m.get_attr_or_text("Value"))
@@ -2060,7 +2660,8 @@ impl DAWProject {
                 {
                     mixer.volume_db = ableton_linear_to_db(vol);
                 }
-                if let Some(pan) = find_child_or_descendant(mixer_node, "Pan")
+                if let Some(pan) = mixer_node
+                    .find_child("Pan")
                     .and_then(|p| {
                         p.find_child("Manual")
                             .and_then(|m| m.get_attr_or_text("Value"))
@@ -2070,17 +2671,27 @@ impl DAWProject {
                 {
                     mixer.pan = pan;
                 }
-                if let Some(on) = find_child_or_descendant(mixer_node, "On")
+                let speaker_active = mixer_node
+                    .find_child("Speaker")
+                    .and_then(|s| {
+                        s.find_child("Manual")
+                            .and_then(|m| m.get_attr_or_text("Value"))
+                            .or_else(|| s.get_attr_or_text("Value"))
+                    })
+                    .and_then(|v| v.parse::<bool>().ok());
+                let on_active = mixer_node
+                    .find_child("On")
                     .and_then(|o| {
                         o.find_child("Manual")
                             .and_then(|m| m.get_attr_or_text("Value"))
                             .or_else(|| o.get_attr_or_text("Value"))
                     })
-                    .and_then(|v| v.parse::<bool>().ok())
-                {
-                    mixer.mute = !on;
+                    .and_then(|v| v.parse::<bool>().ok());
+                if let Some(active) = speaker_active.or(on_active) {
+                    mixer.mute = !active;
                 }
-                if let Some(solo) = find_child_or_descendant(mixer_node, "SoloSink")
+                if let Some(solo) = mixer_node
+                    .find_child("SoloSink")
                     .and_then(|s| {
                         s.find_child("Manual")
                             .and_then(|m| m.get_attr_or_text("Value"))
@@ -2090,7 +2701,8 @@ impl DAWProject {
                 {
                     mixer.solo = solo;
                 }
-                if let Some(arm) = find_child_or_descendant(mixer_node, "Arm")
+                if let Some(arm) = mixer_node
+                    .find_child("Arm")
                     .and_then(|a| {
                         a.find_child("Manual")
                             .and_then(|m| m.get_attr_or_text("Value"))
@@ -2101,11 +2713,12 @@ impl DAWProject {
                     mixer.arm = arm;
                 }
                 if let Some(sends) = mixer_node.find_child("Sends") {
-                    for (holder_idx, holder) in sends.find_children("TrackSendHolder").iter().enumerate() {
-                        let send_idx = holder
-                            .get_attr("Id")
-                            .and_then(|v| v.parse::<usize>().ok())
-                            .unwrap_or(holder_idx);
+                    for (holder_idx, holder) in sends
+                        .find_children("TrackSendHolder")
+                        .into_iter()
+                        .take(32)
+                        .enumerate()
+                    {
                         if let Some(s_val) = holder
                             .find_child("Send")
                             .and_then(|s| {
@@ -2120,13 +2733,16 @@ impl DAWProject {
                             })
                             .and_then(|v| v.parse::<f32>().ok())
                         {
-                            mixer.set_send_db(send_idx, ableton_linear_to_db(s_val));
+                            mixer.set_send_db(holder_idx, ableton_linear_to_db(s_val));
                         }
                     }
                 }
             }
 
-            let instrument = match track_type {
+            let parsed_instrument = parse_oxide_comment_json(child, "oxide-instrument:")
+                .or_else(|| devices_node.and_then(|d| parse_oxide_comment_json(d, "oxide-instrument:")))
+                .and_then(|v| serde_json::from_value::<InstrumentConfig>(v).ok());
+            let instrument = parsed_instrument.unwrap_or_else(|| match track_type {
                 TrackType::MidiSynth => InstrumentConfig::BuiltinSubtractiveSynth(
                     SynthPatchParameters::default(),
                 ),
@@ -2134,32 +2750,62 @@ impl DAWProject {
                     crate::drums::DrumRackDefinition::default_909(),
                 ),
                 TrackType::Audio | TrackType::Return | TrackType::Group => InstrumentConfig::None,
-            };
+            });
 
-            // 1. Session Clips
+            let main_seq = device_chain
+                .and_then(|dc| dc.find_child("MainSequencer"))
+                .or_else(|| child.find_child("MainSequencer"));
+            let freeze_seq = device_chain
+                .and_then(|dc| dc.find_child("FreezeSequencer"))
+                .or_else(|| child.find_child("FreezeSequencer"));
+
+            // 1. Session Clips (never enter TakeLanes)
             let mut session_clips = Vec::new();
             if track_type != TrackType::Return && track_type != TrackType::Group {
-                if let Some(slot_list) = child.find_descendant("ClipSlotList") {
+                let slot_list = main_seq
+                    .and_then(|ms| ms.find_child("ClipSlotList"))
+                    .or_else(|| freeze_seq.and_then(|fs| fs.find_child("ClipSlotList")))
+                    .or_else(|| device_chain.and_then(|dc| dc.find_child("ClipSlotList")))
+                    .or_else(|| child.find_child("ClipSlotList"));
+                if let Some(slot_list) = slot_list {
                     for (slot_idx, slot_node) in
                         slot_list.find_children("ClipSlot").iter().enumerate()
                     {
                         if let Some(midi_clip_node) = slot_node.find_descendant("MidiClip") {
-                            let (clip_id, name, clip_color, loop_on, loop_start, loop_end, _cur_start, _cur_end, pattern) =
-                                parse_midi_clip_node(midi_clip_node, slot_idx as u32, &format!("Clip {}", slot_idx + 1), &color_hex);
-                            let mut clip = SessionClip::new(clip_id, name, ClipPattern::Midi(pattern));
-                            clip.loop_enabled = loop_on;
-                            clip.loop_start_beat = loop_start;
-                            clip.loop_end_beat = loop_end;
-                            clip.color_hex = clip_color;
+                            let parsed = parse_midi_clip_node(
+                                midi_clip_node,
+                                slot_idx as u32,
+                                &format!("Clip {}", slot_idx + 1),
+                                &color_hex,
+                            );
+                            let mut clip = SessionClip::new(
+                                parsed.clip_id,
+                                parsed.name,
+                                ClipPattern::Midi(parsed.pattern),
+                            );
+                            clip.loop_enabled = parsed.loop_on;
+                            clip.loop_start_beat = parsed.loop_start;
+                            clip.loop_end_beat = parsed.loop_end;
+                            clip.color_hex = parsed.color_hex;
                             session_clips.push(Some(clip));
                         } else if let Some(audio_clip_node) = slot_node.find_descendant("AudioClip") {
-                            let (clip_id, name, clip_color, loop_on, loop_start, loop_end, _cur_start, _cur_end, audio_data) =
-                                parse_audio_clip_node(audio_clip_node, slot_idx as u32, &format!("Audio {}", slot_idx + 1), &color_hex, base_dir, &mut sample_cache);
-                            let mut clip = SessionClip::new(clip_id, name, ClipPattern::Audio(audio_data));
-                            clip.loop_enabled = loop_on;
-                            clip.loop_start_beat = loop_start;
-                            clip.loop_end_beat = loop_end;
-                            clip.color_hex = clip_color;
+                            let parsed = parse_audio_clip_node(
+                                audio_clip_node,
+                                slot_idx as u32,
+                                &format!("Audio {}", slot_idx + 1),
+                                &color_hex,
+                                base_dir,
+                                &mut sample_cache,
+                            );
+                            let mut clip = SessionClip::new(
+                                parsed.clip_id,
+                                parsed.name,
+                                ClipPattern::Audio(parsed.audio_data),
+                            );
+                            clip.loop_enabled = parsed.loop_on;
+                            clip.loop_start_beat = parsed.loop_start;
+                            clip.loop_end_beat = parsed.loop_end;
+                            clip.color_hex = parsed.color_hex;
                             session_clips.push(Some(clip));
                         } else {
                             session_clips.push(None);
@@ -2172,81 +2818,92 @@ impl DAWProject {
                 session_clips.clear();
             }
 
-            // 2. Arrangement Clips
+            // 2. Arrangement Clips: traverse ONLY DeviceChain -> MainSequencer -> (ClipTimeable | Sample) -> ArrangerAutomation
+            // (with FreezeSequencer fallback if MainSequencer yields none; NEVER descend into TakeLanes).
             let mut arrangement_clips = Vec::new();
             if track_type != TrackType::Return && track_type != TrackType::Group {
-                let main_seq = child.find_descendant("MainSequencer");
-                let automation_nodes = if let Some(ms) = main_seq {
-                    ms.find_descendants("ArrangerAutomation")
-                } else {
-                    child.find_descendants("ArrangerAutomation")
+                let mut collect_seq_clips = |seq: &XmlNode, out: &mut Vec<ArrangementClip>| {
+                    let mut aa_nodes = Vec::new();
+                    if let Some(ct) = seq.find_child("ClipTimeable") {
+                        if let Some(aa) = ct.find_child("ArrangerAutomation") {
+                            aa_nodes.push(aa);
+                        }
+                    }
+                    if let Some(sample) = seq.find_child("Sample") {
+                        if let Some(aa) = sample.find_child("ArrangerAutomation") {
+                            aa_nodes.push(aa);
+                        }
+                    }
+                    for aa in aa_nodes {
+                        if let Some(events) = aa.find_child("Events") {
+                            if track_type != TrackType::Audio {
+                                for (m_idx, mc_node) in events.find_children("MidiClip").iter().enumerate() {
+                                    let parsed = parse_midi_clip_node(
+                                        mc_node,
+                                        (out.len() + 1) as u32,
+                                        &format!("Midi {}", m_idx + 1),
+                                        &color_hex,
+                                    );
+                                    let dur = (parsed.cur_end - parsed.cur_start).max(0.0625);
+                                    let mut arr_clip = ArrangementClip::new(
+                                        parsed.clip_id,
+                                        parsed.name,
+                                        parsed.cur_start,
+                                        dur,
+                                        ClipPattern::Midi(parsed.pattern),
+                                    );
+                                    arr_clip.muted = parsed.muted;
+                                    arr_clip.pattern_offset_beats = parsed.pattern_offset_beats;
+                                    out.push(arr_clip);
+                                }
+                            }
+                            if track_type == TrackType::Audio || out.is_empty() {
+                                for (a_idx, ac_node) in events.find_children("AudioClip").iter().enumerate() {
+                                    let parsed = parse_audio_clip_node(
+                                        ac_node,
+                                        (out.len() + 1) as u32,
+                                        &format!("Audio {}", a_idx + 1),
+                                        &color_hex,
+                                        base_dir,
+                                        &mut sample_cache,
+                                    );
+                                    let dur = (parsed.cur_end - parsed.cur_start).max(0.0625);
+                                    let mut arr_clip = ArrangementClip::new(
+                                        parsed.clip_id,
+                                        parsed.name,
+                                        parsed.cur_start,
+                                        dur,
+                                        ClipPattern::Audio(parsed.audio_data),
+                                    );
+                                    arr_clip.muted = parsed.muted;
+                                    arr_clip.pattern_offset_beats = parsed.pattern_offset_beats;
+                                    out.push(arr_clip);
+                                }
+                            }
+                        }
+                    }
                 };
 
-                for aa in automation_nodes {
-                    if let Some(events) = aa.find_child("Events") {
-                        if track_type != TrackType::Audio {
-                            for (m_idx, mc_node) in events.find_children("MidiClip").iter().enumerate() {
-                                let (clip_id, name, _color, _loop_on, _l_start, _l_end, cur_start, cur_end, pattern) =
-                                    parse_midi_clip_node(mc_node, (arrangement_clips.len() + 1) as u32, &format!("Midi {}", m_idx + 1), &color_hex);
-                                let dur = (cur_end - cur_start).max(0.0625);
-                                let arr_clip = ArrangementClip::new(clip_id, name, cur_start, dur, ClipPattern::Midi(pattern));
-                                arrangement_clips.push(arr_clip);
-                            }
-                        }
-                        if track_type == TrackType::Audio || arrangement_clips.is_empty() {
-                            for (a_idx, ac_node) in events.find_children("AudioClip").iter().enumerate() {
-                                let (clip_id, name, _color, _loop_on, _l_start, _l_end, cur_start, cur_end, audio_data) =
-                                    parse_audio_clip_node(ac_node, (arrangement_clips.len() + 1) as u32, &format!("Audio {}", a_idx + 1), &color_hex, base_dir, &mut sample_cache);
-                                let dur = (cur_end - cur_start).max(0.0625);
-                                let arr_clip = ArrangementClip::new(clip_id, name, cur_start, dur, ClipPattern::Audio(audio_data));
-                                arrangement_clips.push(arr_clip);
-                            }
-                        }
+                if let Some(ms) = main_seq {
+                    collect_seq_clips(ms, &mut arrangement_clips);
+                }
+                if arrangement_clips.is_empty() {
+                    if let Some(fs) = freeze_seq {
+                        collect_seq_clips(fs, &mut arrangement_clips);
                     }
                 }
-            }
-
-            // 3. If session_clips is empty (producer worked in Arrangement View),
-            // populate up to 8 session_clips from first distinct arrangement clips.
-            if session_clips.is_empty() && !arrangement_clips.is_empty() {
-                let mut seen_keys = std::collections::HashSet::new();
-                let mut auto_session = Vec::new();
-                for arr_clip in &arrangement_clips {
-                    let key = match &arr_clip.pattern {
-                        ClipPattern::Midi(m) => format!("midi:{}:{}:{:.2}", arr_clip.name, m.notes.len(), m.length_beats),
-                        ClipPattern::Drum(d) => format!("drum:{}:{}", arr_clip.name, d.step_count),
-                        ClipPattern::Audio(a) => format!("audio:{}:{}:{:.2}", arr_clip.name, a.file_path, a.length_beats),
-                    };
-                    if seen_keys.insert(key) {
-                        let slot_idx = auto_session.len() as u32;
-                        let mut s_clip = SessionClip::new(slot_idx, arr_clip.name.clone(), arr_clip.pattern.clone());
-                        s_clip.loop_enabled = true;
-                        s_clip.loop_start_beat = 0.0;
-                        let pat_len = match &arr_clip.pattern {
-                            ClipPattern::Midi(m) => m.length_beats,
-                            ClipPattern::Drum(d) => d.length_beats(),
-                            ClipPattern::Audio(_) => arr_clip.duration_beats,
-                        };
-                        s_clip.loop_end_beat = pat_len.max(0.0625);
-                        s_clip.color_hex = color_hex.clone();
-                        auto_session.push(Some(s_clip));
-                        if auto_session.len() >= 8 {
-                            break;
-                        }
-                    }
-                }
-                session_clips = auto_session;
             }
 
             // Insert FX
-            let insert_fx = if let Some(devs) = child.find_descendant("Devices") {
+            let insert_fx = if let Some(devs) = devices_node {
                 parse_insert_fx_from_devices_node(devs)
             } else {
                 Vec::new()
             };
 
             // Automation Lanes
-            let automation_lanes = parse_track_automation_envelopes(child);
+            let pointee_to_param = collect_track_automation_targets(mixer_node, devices_node);
+            let automation_lanes = parse_track_automation_envelopes(child, &pointee_to_param);
 
             tracks.push(TrackDefinition {
                 id: track_id,
@@ -2259,6 +2916,7 @@ impl DAWProject {
                 session_clips,
                 arrangement_clips,
                 automation_lanes,
+                group_id,
             });
         }
 
@@ -2274,7 +2932,27 @@ impl DAWProject {
                     .find_child("Name")
                     .and_then(|n| n.get_attr_or_text("Value"))
                     .unwrap_or_else(|| format!("Scene {}", id));
-                scenes.push(Scene::new(id, name));
+                let tempo_enabled = sc_node
+                    .find_child("IsTempoEnabled")
+                    .and_then(|t| t.get_attr_or_text("Value"))
+                    .and_then(|v| v.parse::<bool>().ok())
+                    .unwrap_or(false);
+                let bpm_override = if tempo_enabled {
+                    sc_node
+                        .find_child("Tempo")
+                        .and_then(|t| {
+                            t.find_child("Manual")
+                                .and_then(|m| m.get_attr_or_text("Value"))
+                                .or_else(|| t.get_attr_or_text("Value"))
+                        })
+                        .and_then(|v| v.parse::<f64>().ok())
+                        .filter(|b| b.is_finite() && *b > 0.0)
+                } else {
+                    None
+                };
+                let mut scene = Scene::new(id, name);
+                scene.bpm_override = bpm_override;
+                scenes.push(scene);
             }
         }
 
@@ -2475,19 +3153,21 @@ mod tests {
 
     #[test]
     fn test_ableton_linear_db_conversion_exact_invertible() {
-        assert!((db_to_ableton_linear(0.0) - 0.85).abs() < 1e-6);
-        assert!(ableton_linear_to_db(0.85).abs() < 1e-6);
+        assert!((db_to_ableton_linear(0.0) - 1.0).abs() < 1e-6);
+        assert!(ableton_linear_to_db(1.0).abs() < 1e-6);
 
         assert!((db_to_ableton_linear(-70.0) - 0.00031622776).abs() < 1e-8);
         assert!((ableton_linear_to_db(0.00031622776) - (-70.0)).abs() < 1e-4);
         assert!((ableton_linear_to_db(0.000316) - (-70.0)).abs() < 1e-4);
 
-        assert!((db_to_ableton_linear(6.0) - 1.0).abs() < 1e-6);
-        assert!((ableton_linear_to_db(1.0) - 6.0).abs() < 1e-4);
+        assert!((db_to_ableton_linear(6.0) - 1.99526238).abs() < 1e-6);
+        assert!((ableton_linear_to_db(1.99526238) - 6.0).abs() < 1e-4);
+        assert!((db_to_ableton_linear(-6.0) - 0.50118723).abs() < 1e-5);
+        assert!((ableton_linear_to_db(0.50118723) - (-6.0)).abs() < 1e-3);
 
         for db in [-60.0, -24.0, -12.0, -6.0, -3.5, 0.0, 2.5, 6.0] {
             let lin = db_to_ableton_linear(db);
-            assert!(lin > 0.0 && lin <= 1.0);
+            assert!(lin > 0.0 && lin <= ABLETON_MAX_LINEAR);
             let round = ableton_linear_to_db(lin);
             assert!(
                 (round - db).abs() < 1e-3,
@@ -2505,8 +3185,14 @@ mod tests {
         // 1. Synth track with 2-beat loop, muted send A (-70 dB), active send B (-12 dB), and automation
         let mut synth = TrackDefinition::new_synth(1, "Lead Synth");
         synth.mixer.volume_db = 0.0;
+        synth.mixer.mute = true;
         synth.mixer.set_send_db(0, -70.0);
         synth.mixer.set_send_db(1, -12.0);
+        synth.group_id = Some(3);
+        if let InstrumentConfig::BuiltinSubtractiveSynth(ref mut patch) = synth.instrument {
+            patch.preset_name = Some("wowbass".to_string());
+            patch.set_overridden_parameter("filter_frequency", 3000.0);
+        }
 
         let mut two_beat = MidiPattern::new(2.0);
         two_beat.add_note(MidiNote::new(60, 110, 0.0, 0.5));
@@ -2521,22 +3207,29 @@ mod tests {
         synth.automation_lanes.push(auto);
         project.tracks.push(synth);
 
-        // 2. DrumRack track with Arrangement Clip (ClipPattern::Drum)
+        // 2. DrumRack track with Arrangement Clip (ClipPattern::Drum) + muted + offset
         let mut drums = TrackDefinition::new_drum_rack(2, "909 Kit");
         drums.mixer.volume_db = -3.0;
         drums.mixer.set_send_db(0, -70.0);
         drums.mixer.set_send_db(1, -70.0);
+        if let InstrumentConfig::ElectronicDrumRack(ref mut dr) = drums.instrument {
+            dr.pads[0].name = "Custom 909 Kick".to_string();
+            dr.pads[0].mute = true;
+        }
         let mut dpat = DrumStepPattern::new_16_step();
         dpat.toggle_step(0, 0); // Kick -> pitch 36
         dpat.toggle_step(2, 4); // Snare -> pitch 38
         dpat.toggle_step(6, 2); // Closed HH -> pitch 42
-        drums.arrangement_clips.push(ArrangementClip::new(
+        let mut arr_drum = ArrangementClip::new(
             20,
             "Drums Arr",
             0.0,
             8.0,
             ClipPattern::Drum(dpat),
-        ));
+        );
+        arr_drum.muted = true;
+        arr_drum.pattern_offset_beats = 1.0;
+        drums.arrangement_clips.push(arr_drum);
         project.tracks.push(drums);
 
         // 3. Group Track
@@ -2544,9 +3237,15 @@ mod tests {
         grp.mixer.volume_db = -1.5;
         project.tracks.push(grp);
 
-        // 4. Return Track
+        // 4. Return Track with Eq8
         let mut ret = TrackDefinition::new_return(4, "A-Reverb");
         ret.mixer.volume_db = 0.0;
+        let mut eq_params = HashMap::new();
+        eq_params.insert("band1_freq_hz".to_string(), 110.0);
+        eq_params.insert("band1_gain_db".to_string(), -4.5);
+        eq_params.insert("band1_q".to_string(), 1.1);
+        eq_params.insert("band1_enabled".to_string(), 1.0);
+        ret.insert_fx.push(InsertEffectConfig::EqEight { params: eq_params });
         ret.insert_fx.push(InsertEffectConfig::Reverb {
             ir_path: None,
             decay_ms: 2200.0,
@@ -2554,19 +3253,44 @@ mod tests {
         });
         project.tracks.push(ret);
 
+        let mut s1 = Scene::new(1, "Break");
+        s1.bpm_override = Some(138.0);
+        project.scenes.push(s1);
+
         let xml = project.to_als_xml();
 
         // Check Live 12 schema requirements
+        assert!(xml.contains("<MainTrack Id=\"0\">"));
+        assert!(xml.contains("<PreHearTrack>"));
         assert!(xml.contains("<NextPointeeId Value="));
         assert!(xml.contains("<ReturnTrack Id=\"4\">"));
         assert!(xml.contains("<GroupTrack Id=\"3\">"));
         assert!(xml.contains("<KeyTrack Id="));
         assert!(xml.contains("<MidiNoteEvent Id="));
-        assert!(xml.contains("Value=\"0.85"));
+        assert!(xml.contains("Value=\"1.0000000\""));
         assert!(xml.contains("Value=\"0.000316"));
+        assert!(xml.contains("<On><Manual Value=\"true\"/>"));
+        assert!(xml.contains("<Speaker><Manual Value=\"false\"/>"));
+        assert!(xml.contains("<TrackGroupId Value=\"3\"/>"));
+        assert!(xml.contains("<Bands.0>"));
         assert!(!xml.contains("<Metadata>"));
         assert!(!xml.contains("<TrackType "));
         assert!(!xml.contains("<ColorHex "));
+
+        // Verify every PointeeId in AutomationEnvelope has a matching AutomationTarget Id
+        let root_node = parse_xml_to_node(&xml).unwrap();
+        let all_targets: HashSet<String> = root_node
+            .find_descendants("AutomationTarget")
+            .into_iter()
+            .filter_map(|at| at.get_attr("Id"))
+            .collect();
+        for pnode in root_node.find_descendants("PointeeId") {
+            let val = pnode.get_attr_or_text("Value").unwrap();
+            assert!(
+                all_targets.contains(&val),
+                "Envelope PointeeId={val} must have matching AutomationTarget"
+            );
+        }
 
         // Parse back and verify lossless roundtrip
         let reloaded = DAWProject::from_als_xml(&xml).expect("Reload must succeed");
@@ -2574,9 +3298,17 @@ mod tests {
         assert!(reloaded.master_track.volume_db.abs() < 1e-3);
         assert_eq!(reloaded.tracks.len(), 4);
 
-        // Track 0: Synth + 2-beat loop + muted send (-70 dB) + automation
+        // Track 0: Synth + mute + group_id + instrument + 2-beat loop + muted send (-70 dB) + automation
         let t0 = &reloaded.tracks[0];
         assert_eq!(t0.track_type, TrackType::MidiSynth);
+        assert!(t0.mixer.mute, "Mute via <Speaker> must survive roundtrip");
+        assert_eq!(t0.group_id, Some(3));
+        if let InstrumentConfig::BuiltinSubtractiveSynth(ref patch) = t0.instrument {
+            assert_eq!(patch.preset_name.as_deref(), Some("wowbass"));
+            assert_eq!(patch.overridden_params, vec!["filter_frequency".to_string()]);
+        } else {
+            panic!("Expected BuiltinSubtractiveSynth");
+        }
         assert!(t0.mixer.volume_db.abs() < 1e-3);
         assert!((t0.mixer.send_a_db - (-70.0)).abs() < 1e-3);
         assert!((t0.mixer.send_b_db - (-12.0)).abs() < 1e-3);
@@ -2591,11 +3323,20 @@ mod tests {
         assert_eq!(t0.automation_lanes[0].parameter_name, "filter_frequency");
         assert_eq!(t0.automation_lanes[0].points.len(), 2);
 
-        // Track 1: DrumRack with Arrangement Clip exported and re-imported
+        // Track 1: DrumRack with Arrangement Clip (muted + offset) and NO fabricated session clips
         let t1 = &reloaded.tracks[1];
         assert_eq!(t1.track_type, TrackType::DrumRack);
+        assert!(t1.session_clips.is_empty(), "Arrangement-only track must not fabricate session_clips");
         assert_eq!(t1.arrangement_clips.len(), 1);
+        assert!(t1.arrangement_clips[0].muted);
+        assert!((t1.arrangement_clips[0].pattern_offset_beats - 1.0).abs() < 1e-3);
         assert!((t1.arrangement_clips[0].duration_beats - 8.0).abs() < 1e-3);
+        if let InstrumentConfig::ElectronicDrumRack(ref dr) = t1.instrument {
+            assert_eq!(dr.pads[0].name, "Custom 909 Kick");
+            assert!(dr.pads[0].mute);
+        } else {
+            panic!("Expected ElectronicDrumRack");
+        }
         if let ClipPattern::Midi(dp) = &t1.arrangement_clips[0].pattern {
             assert_eq!(dp.notes.len(), 3);
             assert!(dp.notes.iter().any(|n| n.pitch == 36));
@@ -2609,9 +3350,13 @@ mod tests {
         assert_eq!(reloaded.tracks[2].track_type, TrackType::Group);
         assert!((reloaded.tracks[2].mixer.volume_db - (-1.5)).abs() < 1e-3);
 
-        // Track 3: ReturnTrack with Reverb
+        // Track 3: ReturnTrack with Eq8 + Reverb
         assert_eq!(reloaded.tracks[3].track_type, TrackType::Return);
-        assert_eq!(reloaded.tracks[3].insert_fx.len(), 1);
+        assert_eq!(reloaded.tracks[3].insert_fx.len(), 2);
+
+        // Scene bpm_override
+        assert_eq!(reloaded.scenes.len(), 1);
+        assert_eq!(reloaded.scenes[0].bpm_override, Some(138.0));
     }
 
     #[test]
@@ -2619,21 +3364,26 @@ mod tests {
         let xml = r#"<?xml version="1.0" encoding="UTF-8"?>
 <Ableton MajorVersion="5" MinorVersion="12.0_12203" Creator="Ableton Live 12.2">
   <LiveSet>
-    <Tempo><Manual Value="128.0"/></Tempo>
-    <MasterTrack Id="0">
+    <MainTrack Id="0">
       <DeviceChain>
-        <Mixer><Volume><Manual Value="0.85"/></Volume></Mixer>
+        <Mixer>
+          <Tempo><Manual Value="128.0"/></Tempo>
+          <Volume><Manual Value="1.0"/></Volume>
+        </Mixer>
       </DeviceChain>
-    </MasterTrack>
+    </MainTrack>
     <Tracks>
       <MidiTrack Id="1">
-        <Name><EffectiveName Value="External Synth"/></Name>
+        <Name><EffectiveName Value="909 Lead Synth"/></Name>
+        <TrackGroupId Value="3"/>
         <DeviceChain>
           <Mixer>
-            <Volume><Manual Value="0.85"/></Volume>
+            <Volume><Manual Value="1.0"/></Volume>
+            <On><Manual Value="true"/></On>
+            <Speaker><Manual Value="false"/></Speaker>
             <Sends>
-              <TrackSendHolder Id="0"><Send><Manual Value="0.00031622776"/></Send></TrackSendHolder>
-              <TrackSendHolder Id="1"><Send><Manual Value="0.85"/></Send></TrackSendHolder>
+              <TrackSendHolder Id="62"><Send><Manual Value="0.00031622776"/></Send></TrackSendHolder>
+              <TrackSendHolder Id="63"><Send><Manual Value="1.0"/></Send></TrackSendHolder>
             </Sends>
           </Mixer>
           <MainSequencer>
@@ -2661,29 +3411,42 @@ mod tests {
       <ReturnTrack Id="2">
         <Name><EffectiveName Value="A-Reverb"/></Name>
         <DeviceChain>
-          <Mixer><Volume><Manual Value="0.85"/></Volume></Mixer>
+          <Mixer><Volume><Manual Value="1.0"/></Volume></Mixer>
         </DeviceChain>
       </ReturnTrack>
       <GroupTrack Id="3">
         <Name><EffectiveName Value="Drums Group"/></Name>
         <DeviceChain>
-          <Mixer><Volume><Manual Value="0.85"/></Volume></Mixer>
+          <Mixer><Volume><Manual Value="1.0"/></Volume></Mixer>
         </DeviceChain>
       </GroupTrack>
     </Tracks>
+    <Scenes>
+      <Scene Id="0">
+        <Name Value="Intro"/>
+        <Tempo Value="199.0"/>
+        <IsTempoEnabled Value="false"/>
+      </Scene>
+    </Scenes>
   </LiveSet>
 </Ableton>"#;
 
         let proj = DAWProject::from_als_xml(xml).expect("Parse external Live 12 XML");
+        assert!((proj.transport.bpm - 128.0).abs() < 1e-3, "Must read MainTrack Mixer Tempo, not Scene Tempo");
         assert!(proj.master_track.volume_db.abs() < 1e-3);
         assert_eq!(proj.tracks.len(), 3);
+        // Track named "909 Lead Synth" without DrumGroupDevice must remain MidiSynth!
         assert_eq!(proj.tracks[0].track_type, TrackType::MidiSynth);
+        assert_eq!(proj.tracks[0].group_id, Some(3));
+        assert!(proj.tracks[0].mixer.mute, "Speaker=false must mute even when On=true");
         assert_eq!(proj.tracks[1].track_type, TrackType::Return);
         assert_eq!(proj.tracks[2].track_type, TrackType::Group);
 
         assert!(proj.tracks[0].mixer.volume_db.abs() < 1e-3);
+        // Sequential TrackSendHolder indexing: Id=62 -> index 0, Id=63 -> index 1
         assert!((proj.tracks[0].mixer.send_a_db - (-70.0)).abs() < 1e-3);
         assert!(proj.tracks[0].mixer.send_b_db.abs() < 1e-3);
+        assert_eq!(proj.tracks[0].mixer.sends_db.len(), 2);
 
         let clip = proj.tracks[0].session_clips[0].as_ref().unwrap();
         assert!((clip.loop_end_beat - 2.0).abs() < 1e-3);
@@ -2693,5 +3456,221 @@ mod tests {
         } else {
             panic!("Expected Midi");
         }
+        assert_eq!(proj.scenes[0].bpm_override, None);
+    }
+
+    #[test]
+    fn test_als_export_unique_track_ids_from_zero_and_external_eq8_and_take_lanes_exclusion() {
+        // Track id == 0 must not collide with MainTrack Id="0", and clip/lane IDs inform NextPointeeId
+        let mut proj = DAWProject::new("ID Collision Guard");
+        let mut t0 = TrackDefinition::new_synth(0, "Zero Id Synth");
+        let mut lane = AutomationLane::new(5000, "volume_db");
+        lane.add_point(AutomationPoint::linear(0.0, 0.5));
+        t0.automation_lanes.push(lane);
+        let pat = MidiPattern::new(4.0);
+        let clip = SessionClip::new(6000, "BigClip", ClipPattern::Midi(pat));
+        t0.session_clips.push(Some(clip));
+        proj.tracks.push(t0);
+
+        let xml = proj.to_als_xml();
+        assert!(xml.contains("<MainTrack Id=\"0\">"));
+        assert!(!xml.contains("<MidiTrack Id=\"0\">"), "Track Id=0 must be remapped to >= 1");
+        assert!(xml.contains("<NextPointeeId Value=\"61"));
+
+        // External ALS with TakeLanes, nested Rack Mixer, external Eq8, LoopStart/StartRelative, Disabled
+        let ext_xml = r#"<?xml version="1.0" encoding="UTF-8"?>
+<Ableton MajorVersion="5" MinorVersion="12.0_12402" Creator="Ableton Live 12.4">
+  <LiveSet>
+    <MainTrack Id="0">
+      <DeviceChain>
+        <Mixer>
+          <Tempo><Manual Value="134.0"/></Tempo>
+          <Volume><Manual Value="1.99526238"/></Volume>
+        </Mixer>
+      </DeviceChain>
+    </MainTrack>
+    <Tracks>
+      <MidiTrack Id="5">
+        <Name><EffectiveName Value="Rumble Rack"/></Name>
+        <TrackGroupId Value="-1"/>
+        <TakeLanes>
+          <TakeLanes>
+            <TakeLane Id="0">
+              <ClipAutomation>
+                <Events>
+                  <MidiClip Id="999" Time="0">
+                    <CurrentStart Value="0.0"/><CurrentEnd Value="4.0"/>
+                    <Name Value="Unused Take"/>
+                  </MidiClip>
+                </Events>
+              </ClipAutomation>
+              <ArrangerAutomation>
+                <Events>
+                  <MidiClip Id="998" Time="0">
+                    <CurrentStart Value="0.0"/><CurrentEnd Value="4.0"/>
+                    <Name Value="Unused Take Arr"/>
+                  </MidiClip>
+                </Events>
+              </ArrangerAutomation>
+            </TakeLane>
+          </TakeLanes>
+        </TakeLanes>
+        <DeviceChain>
+          <Mixer>
+            <Volume><Manual Value="1.0"/></Volume>
+            <On><Manual Value="false"/></On>
+          </Mixer>
+          <MainSequencer>
+            <ClipTimeable>
+              <ArrangerAutomation>
+                <Events>
+                  <MidiClip Id="42" Time="8.0">
+                    <CurrentStart Value="8.0"/>
+                    <CurrentEnd Value="12.0"/>
+                    <Disabled Value="true"/>
+                    <Name Value="Main Riff"/>
+                    <Loop>
+                      <LoopStart Value="4.0"/>
+                      <LoopEnd Value="8.0"/>
+                      <StartRelative Value="1.0"/>
+                      <LoopOn Value="true"/>
+                    </Loop>
+                    <Notes>
+                      <KeyTracks>
+                        <KeyTrack>
+                          <MidiKey Value="36"/>
+                          <Notes>
+                            <MidiNoteEvent Time="2.0" Duration="0.5" Velocity="100"/>
+                            <MidiNoteEvent Time="4.0" Duration="0.5" Velocity="110"/>
+                            <MidiNoteEvent Time="5.5" Duration="0.5" Velocity="120"/>
+                          </Notes>
+                        </KeyTrack>
+                      </KeyTracks>
+                    </Notes>
+                  </MidiClip>
+                </Events>
+              </ArrangerAutomation>
+            </ClipTimeable>
+          </MainSequencer>
+          <DeviceChain>
+            <Devices>
+              <InstrumentGroupDevice Id="10">
+                <Branches>
+                  <InstrumentBranch>
+                    <DeviceChain>
+                      <Mixer>
+                        <Volume><Manual Value="0.00031622776"/></Volume>
+                        <Speaker><Manual Value="false"/></Speaker>
+                      </Mixer>
+                    </DeviceChain>
+                  </InstrumentBranch>
+                </Branches>
+              </InstrumentGroupDevice>
+              <Eq8 Id="11">
+                <Bands.0>
+                  <ParameterA>
+                    <IsOn><Manual Value="true"/></IsOn>
+                    <Freq><Manual Value="45.0"/></Freq>
+                    <Gain><Manual Value="0.0"/></Gain>
+                    <Q><Manual Value="0.707"/></Q>
+                  </ParameterA>
+                </Bands.0>
+                <Bands.2>
+                  <ParameterA>
+                    <IsOn><Manual Value="true"/></IsOn>
+                    <Freq><Manual Value="820.0"/></Freq>
+                    <Gain><Manual Value="-3.5"/></Gain>
+                    <Q><Manual Value="2.0"/></Q>
+                  </ParameterA>
+                </Bands.2>
+              </Eq8>
+            </Devices>
+          </DeviceChain>
+        </DeviceChain>
+      </MidiTrack>
+    </Tracks>
+  </LiveSet>
+</Ableton>"#;
+
+        let imported = DAWProject::from_als_xml(ext_xml).expect("Import external Live 12 XML");
+        assert!((imported.master_track.volume_db - 6.0).abs() < 1e-3);
+        let trk = &imported.tracks[0];
+        assert_eq!(trk.group_id, None);
+        // Track own mixer has Volume=1.0 (0 dB), not nested Rack Mixer 0.000316 (-70 dB)!
+        assert!(trk.mixer.volume_db.abs() < 1e-3);
+        // Speaker absent -> falls back to On=false -> mute=true
+        assert!(trk.mixer.mute);
+        // Only MainSequencer clip imported (TakeLanes ignored!), and no synthetic session_clips
+        assert!(trk.session_clips.is_empty());
+        assert_eq!(trk.arrangement_clips.len(), 1);
+        let clip = &trk.arrangement_clips[0];
+        assert_eq!(clip.name, "Main Riff");
+        assert!(clip.muted);
+        assert!((clip.pattern_offset_beats - 1.0).abs() < 1e-3);
+        if let ClipPattern::Midi(mp) = &clip.pattern {
+            assert!((mp.length_beats - 4.0).abs() < 1e-3);
+            assert_eq!(mp.notes.len(), 2, "Pre-loop note at 2.0 must be dropped");
+            assert!((mp.notes[0].start_beat - 0.0).abs() < 1e-3);
+            assert!((mp.notes[1].start_beat - 1.5).abs() < 1e-3);
+        } else {
+            panic!("Expected Midi");
+        }
+        // External Eq8 parsed without oxide-eq8 comment
+        assert_eq!(trk.insert_fx.len(), 1);
+        if let InsertEffectConfig::EqEight { params } = &trk.insert_fx[0] {
+            assert!((params["band1_freq_hz"] - 45.0).abs() < 1e-3);
+            assert!((params["band3_freq_hz"] - 820.0).abs() < 1e-3);
+            assert!((params["band3_gain_db"] - (-3.5)).abs() < 1e-3);
+        } else {
+            panic!("Expected EqEight");
+        }
+    }
+
+    #[test]
+    fn test_wav_decoder_data_before_fmt_and_invalid_formats() {
+        // 1. Valid WAV with "data" chunk BEFORE "fmt " chunk
+        let mut wav_data_first = Vec::new();
+        wav_data_first.extend_from_slice(b"RIFF");
+        wav_data_first.extend_from_slice(&0u32.to_le_bytes()); // placeholder size
+        wav_data_first.extend_from_slice(b"WAVE");
+        // data chunk first (2 mono 16-bit samples = 4 bytes)
+        wav_data_first.extend_from_slice(b"data");
+        wav_data_first.extend_from_slice(&4u32.to_le_bytes());
+        wav_data_first.extend_from_slice(&16384i16.to_le_bytes());
+        wav_data_first.extend_from_slice(&(-16384i16).to_le_bytes());
+        // fmt chunk second (48000 Hz, 1 ch, 16-bit PCM)
+        wav_data_first.extend_from_slice(b"fmt ");
+        wav_data_first.extend_from_slice(&16u32.to_le_bytes());
+        wav_data_first.extend_from_slice(&1u16.to_le_bytes()); // PCM
+        wav_data_first.extend_from_slice(&1u16.to_le_bytes()); // mono
+        wav_data_first.extend_from_slice(&48000u32.to_le_bytes());
+        wav_data_first.extend_from_slice(&(48000u32 * 2).to_le_bytes());
+        wav_data_first.extend_from_slice(&2u16.to_le_bytes());
+        wav_data_first.extend_from_slice(&16u16.to_le_bytes());
+        let riff_len = (wav_data_first.len() - 8) as u32;
+        wav_data_first[4..8].copy_from_slice(&riff_len.to_le_bytes());
+
+        let (sr, ch, samples) = decode_wav_bytes(&wav_data_first, 0.0).expect("data-before-fmt WAV must decode");
+        assert_eq!(sr, 48000);
+        assert_eq!(ch, 2);
+        assert_eq!(samples.len(), 4);
+        assert!((samples[0] - 0.5).abs() < 1e-3);
+        assert!((samples[2] - (-0.5)).abs() < 1e-3);
+
+        // 2. Non-PCM audio_format == 6 (A-law) must error
+        let mut non_pcm = wav_data_first.clone();
+        // audio_format is at offset 12 + 4(data) + 4(sz) + 4(payload) + 8(fmt hdr) = 32
+        non_pcm[32..34].copy_from_slice(&6u16.to_le_bytes());
+        assert!(decode_wav_bytes(&non_pcm, 0.0).is_err(), "Non-PCM audio_format=6 must return Err");
+
+        // 3. channels == 0 must error
+        let mut zero_ch = wav_data_first.clone();
+        zero_ch[34..36].copy_from_slice(&0u16.to_le_bytes());
+        assert!(decode_wav_bytes(&zero_ch, 0.0).is_err(), "channels=0 must return Err");
+
+        // 4. sample_rate == 0 must error
+        let mut zero_sr = wav_data_first.clone();
+        zero_sr[36..40].copy_from_slice(&0u32.to_le_bytes());
+        assert!(decode_wav_bytes(&zero_sr, 0.0).is_err(), "sample_rate=0 must return Err");
     }
 }

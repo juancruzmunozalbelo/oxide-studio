@@ -23,11 +23,14 @@ pub struct Arpeggiator {
     pub octaves: u8,     // 1 .. 4
     pub velocity_decay: f32, // 0.0 .. 1.0
 
-    held_notes: Vec<(u8, u8)>, // (pitch, velocity)
+    held_notes: Vec<(u8, u8, u8)>, // (channel, pitch, velocity)
     last_step: i64,
     current_index: usize,
     up_direction: bool,
-    active_playing_note: Option<u8>,
+    active_playing_note: Option<(u8, u8)>, // (channel, note)
+    sorted_scratch: Vec<(u8, u8, u8)>,
+    full_scratch: Vec<(u8, u8, u8)>,
+    seq_scratch: Vec<(u8, u8, u8)>,
 }
 
 impl Arpeggiator {
@@ -40,90 +43,89 @@ impl Arpeggiator {
             gate: 0.9,
             octaves: 1,
             velocity_decay: 0.0,
-            held_notes: Vec::new(),
+            held_notes: Vec::with_capacity(16),
             last_step: -1,
             current_index: 0,
             up_direction: true,
             active_playing_note: None,
+            sorted_scratch: Vec::with_capacity(16),
+            full_scratch: Vec::with_capacity(64),
+            seq_scratch: Vec::with_capacity(128),
         }
     }
 
-    fn build_note_sequence(&self) -> Vec<(u8, u8)> {
+    fn build_note_sequence(&mut self) {
+        self.seq_scratch.clear();
         if self.held_notes.is_empty() {
-            return Vec::new();
+            return;
         }
 
-        let mut sorted = self.held_notes.clone();
-        sorted.sort_by_key(|n| n.0);
+        self.sorted_scratch.clear();
+        self.sorted_scratch.extend_from_slice(&self.held_notes);
+        self.sorted_scratch.sort_by_key(|n| n.1);
 
-        let mut full_notes = Vec::new();
+        self.full_scratch.clear();
         let num_octaves = self.octaves.clamp(1, 4);
 
         for oct in 0..num_octaves {
-            for (p, v) in &sorted {
-                let shifted_p = (*p as u16 + (oct as u16 * 12)).min(127) as u8;
+            for &(ch, p, v) in &self.sorted_scratch {
+                let shifted_p = (p as u16 + (oct as u16 * 12)).min(127) as u8;
                 let decay_mult = (1.0 - self.velocity_decay * (oct as f32 / num_octaves as f32)).max(0.1);
-                let shifted_v = ((*v as f32 * decay_mult).clamp(1.0, 127.0)) as u8;
-                full_notes.push((shifted_p, shifted_v));
+                let shifted_v = ((v as f32 * decay_mult).clamp(1.0, 127.0)) as u8;
+                self.full_scratch.push((ch, shifted_p, shifted_v));
             }
         }
 
         match self.pattern {
-            ArpPattern::Up => full_notes,
+            ArpPattern::Up | ArpPattern::Random | ArpPattern::ChordTrigger => {
+                self.seq_scratch.extend_from_slice(&self.full_scratch);
+            }
             ArpPattern::Down => {
-                full_notes.reverse();
-                full_notes
+                self.seq_scratch.extend(self.full_scratch.iter().copied().rev());
             }
             ArpPattern::UpDown => {
-                let mut rev = full_notes.clone();
-                rev.reverse();
-                if full_notes.len() > 1 {
-                    full_notes.extend_from_slice(&rev[1..rev.len() - 1]);
+                self.seq_scratch.extend_from_slice(&self.full_scratch);
+                if self.full_scratch.len() > 2 {
+                    self.seq_scratch
+                        .extend(self.full_scratch[1..self.full_scratch.len() - 1].iter().copied().rev());
                 }
-                full_notes
             }
             ArpPattern::DownUp => {
-                let mut rev = full_notes.clone();
-                rev.reverse();
-                if rev.len() > 1 {
-                    let up = full_notes.clone();
-                    rev.extend_from_slice(&up[1..up.len() - 1]);
+                self.seq_scratch.extend(self.full_scratch.iter().copied().rev());
+                if self.full_scratch.len() > 2 {
+                    self.seq_scratch
+                        .extend_from_slice(&self.full_scratch[1..self.full_scratch.len() - 1]);
                 }
-                rev
             }
             ArpPattern::Converge => {
-                let mut result = Vec::new();
                 let mut l = 0;
-                let mut r = full_notes.len().saturating_sub(1);
+                let mut r = self.full_scratch.len().saturating_sub(1);
                 while l <= r {
-                    result.push(full_notes[l]);
+                    self.seq_scratch.push(self.full_scratch[l]);
                     if l != r {
-                        result.push(full_notes[r]);
+                        self.seq_scratch.push(self.full_scratch[r]);
                     }
                     l += 1;
                     if r == 0 { break; }
                     r -= 1;
                 }
-                result
             }
             ArpPattern::Diverge => {
-                let mut result = Vec::new();
-                let mid = full_notes.len() / 2;
+                let mid = self.full_scratch.len() / 2;
                 let mut offset = 0;
-                while mid + offset < full_notes.len() || (mid >= offset && mid - offset < full_notes.len()) {
-                    if mid + offset < full_notes.len() {
-                        result.push(full_notes[mid + offset]);
+                while mid + offset < self.full_scratch.len()
+                    || (mid >= offset && mid - offset < self.full_scratch.len())
+                {
+                    if mid + offset < self.full_scratch.len() {
+                        self.seq_scratch.push(self.full_scratch[mid + offset]);
                     }
                     if offset > 0 && mid >= offset {
-                        result.push(full_notes[mid - offset]);
+                        self.seq_scratch.push(self.full_scratch[mid - offset]);
                     }
                     offset += 1;
-                    if offset > full_notes.len() { break; }
+                    if offset > self.full_scratch.len() { break; }
                 }
-                result
             }
-            ArpPattern::Random => full_notes,
-            ArpPattern::ChordTrigger => full_notes,
         }
     }
 }
@@ -172,34 +174,34 @@ impl MidiEffectDevice for Arpeggiator {
             return;
         }
 
-        // Track incoming held notes
+        // Track incoming held notes with original MIDI channel
         for ev in events_in {
             match ev {
-                MidiEvent::NoteOn { note, velocity, .. } => {
+                MidiEvent::NoteOn { channel, note, velocity } => {
                     if *velocity > 0 {
-                        if !self.held_notes.iter().any(|(p, _)| p == note) {
-                            self.held_notes.push((*note, *velocity));
+                        if !self.held_notes.iter().any(|(ch, p, _)| ch == channel && p == note) {
+                            self.held_notes.push((*channel, *note, *velocity));
                         }
                     } else {
-                        self.held_notes.retain(|(p, _)| p != note);
+                        self.held_notes.retain(|(ch, p, _)| !(ch == channel && p == note));
                     }
                 }
-                MidiEvent::NoteOff { note, .. } => {
-                    self.held_notes.retain(|(p, _)| p != note);
+                MidiEvent::NoteOff { channel, note } => {
+                    self.held_notes.retain(|(ch, p, _)| !(ch == channel && p == note));
                 }
                 _ => events_out.push(*ev),
             }
         }
 
         if self.held_notes.is_empty() {
-            if let Some(note) = self.active_playing_note.take() {
-                events_out.push(MidiEvent::NoteOff { channel: 0, note });
+            if let Some((ch, note)) = self.active_playing_note.take() {
+                events_out.push(MidiEvent::NoteOff { channel: ch, note });
             }
             return;
         }
 
-        let seq = self.build_note_sequence();
-        if seq.is_empty() {
+        self.build_note_sequence();
+        if self.seq_scratch.is_empty() {
             return;
         }
 
@@ -210,28 +212,29 @@ impl MidiEffectDevice for Arpeggiator {
             self.last_step = step;
 
             // Turn off previous note
-            if let Some(note) = self.active_playing_note.take() {
-                events_out.push(MidiEvent::NoteOff { channel: 0, note });
+            if let Some((ch, note)) = self.active_playing_note.take() {
+                events_out.push(MidiEvent::NoteOff { channel: ch, note });
             }
 
+            let seq_len = self.seq_scratch.len();
             match self.pattern {
                 ArpPattern::ChordTrigger => {
-                    for (p, v) in &seq {
-                        events_out.push(MidiEvent::NoteOn { channel: 0, note: *p, velocity: *v });
+                    for &(ch, p, v) in &self.seq_scratch {
+                        events_out.push(MidiEvent::NoteOn { channel: ch, note: p, velocity: v });
                     }
                 }
                 ArpPattern::Random => {
-                    let idx = ((time.beat * 9876.5).fract().abs() * seq.len() as f64) as usize % seq.len();
-                    let (p, v) = seq[idx];
-                    events_out.push(MidiEvent::NoteOn { channel: 0, note: p, velocity: v });
-                    self.active_playing_note = Some(p);
+                    let idx = ((time.beat * 9876.5).fract().abs() * seq_len as f64) as usize % seq_len;
+                    let (ch, p, v) = self.seq_scratch[idx];
+                    events_out.push(MidiEvent::NoteOn { channel: ch, note: p, velocity: v });
+                    self.active_playing_note = Some((ch, p));
                 }
                 _ => {
-                    let idx = self.current_index % seq.len();
-                    let (p, v) = seq[idx];
-                    events_out.push(MidiEvent::NoteOn { channel: 0, note: p, velocity: v });
-                    self.active_playing_note = Some(p);
-                    self.current_index = (self.current_index + 1) % seq.len();
+                    let idx = self.current_index % seq_len;
+                    let (ch, p, v) = self.seq_scratch[idx];
+                    events_out.push(MidiEvent::NoteOn { channel: ch, note: p, velocity: v });
+                    self.active_playing_note = Some((ch, p));
+                    self.current_index = (self.current_index + 1) % seq_len;
                 }
             }
         }

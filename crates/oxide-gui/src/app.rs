@@ -17,14 +17,17 @@ use egui::{
     vec2, Button, CentralPanel, Color32, Context, Layout, RichText, SidePanel, Stroke, TopBottomPanel,
 };
 use oxide_audio::{
-    AudioEngine, AudioEngineProcessor, AudioStreamHandle, PARAM_BPM,
-    PARAM_ID_SYNTH_CUTOFF, PARAM_ID_SYNTH_PULSE_PW, PARAM_ID_SYNTH_RESONANCE,
-    PARAM_MASTER_VOL, PARAM_SYNTH_MACRO_X, PARAM_SYNTH_MACRO_Y,
+    AudioEngine, AudioEngineProcessor, AudioStreamHandle, PARAM_BPM, PARAM_FX_DRIVE,
+    PARAM_ID_SYNTH_CUTOFF, PARAM_ID_SYNTH_ENV_MOD, PARAM_ID_SYNTH_PULSE_PW,
+    PARAM_ID_SYNTH_RESONANCE, PARAM_MASTER_VOL, PARAM_SYNTH_MACRO_X, PARAM_SYNTH_MACRO_Y,
     PARAM_TRACK_PAN_BASE, PARAM_TRACK_VOL_BASE,
 };
-use oxide_bounce::{DemoArrangementRenderer, WavWriter};
+use oxide_bounce::render_project_to_wav;
 use oxide_core::{AudioCommand, AudioTelemetry, GlobalScale, ScaleMode, TuningSystem};
-use oxide_project::{DAWProject, TrackDefinition};
+use oxide_project::{
+    DAWProject, InsertEffectConfig, InstrumentConfig, SynthPatchParameters, TrackDefinition,
+    TrackType,
+};
 use oxide_timeline::{
     ArrangementClip, ArrangementTimeline, ArrangementTrack, ClipPattern, DrumStepPattern,
     MidiNote, MidiPattern, SessionClip, SessionMatrix, SessionTrack, SlotState,
@@ -168,6 +171,7 @@ impl OxideStudioApp {
     fn init_empty() -> Self {
         // Initialize 124 BPM Classic 909 House Intro pattern
         let mut drum_pattern = DrumStepPattern::new_16_step();
+        // Pad 0: Kick, Pad 1: Snare, Pad 5: Rimshot, Pad 8: Closed HH (canonical DrumRack)
         if let Some(kick_track) = drum_pattern.tracks.get_mut(0) {
             for &s in &[0, 4, 8, 12] {
                 kick_track.steps[s].active = true;
@@ -175,19 +179,19 @@ impl OxideStudioApp {
                 kick_track.steps[s].velocity = 124;
             }
         }
-        if let Some(rim_track) = drum_pattern.tracks.get_mut(1) {
+        if let Some(rim_track) = drum_pattern.tracks.get_mut(5) {
             for &s in &[3, 7, 11, 15] {
                 rim_track.steps[s].active = true;
                 rim_track.steps[s].velocity = 82;
             }
         }
-        if let Some(snare_track) = drum_pattern.tracks.get_mut(2) {
+        if let Some(snare_track) = drum_pattern.tracks.get_mut(1) {
             for &s in &[4, 12, 15] {
                 snare_track.steps[s].active = true;
                 snare_track.steps[s].velocity = if s == 15 { 78 } else { 115 };
             }
         }
-        if let Some(hh_track) = drum_pattern.tracks.get_mut(5) {
+        if let Some(hh_track) = drum_pattern.tracks.get_mut(8) {
             for &s in &[2, 6, 10, 14] {
                 hh_track.steps[s].active = true;
                 hh_track.steps[s].accent = true;
@@ -553,6 +557,7 @@ impl OxideStudioApp {
         }
 
         if !self.is_playing {
+            self.last_triggered_step = None;
             if !self.active_synth_notes.is_empty() {
                 let to_release: Vec<u8> =
                     self.active_synth_notes.drain(..).map(|(p, _)| p).collect();
@@ -567,8 +572,8 @@ impl OxideStudioApp {
             return;
         }
 
-        // Release notes whose duration_beats elapsed (or all notes if playhead rewound)
-        let playhead_rewound = self.current_beat + 0.25 < prev_beat;
+        // Release notes whose duration_beats elapsed (or all notes on any backward playhead rewind)
+        let playhead_rewound = self.current_beat < prev_beat;
         let mut expired = Vec::new();
         let cur_beat = self.current_beat;
         self.active_synth_notes.retain(|&(pitch, release_beat)| {
@@ -587,64 +592,113 @@ impl OxideStudioApp {
         }
         self.active_synth_note = self.active_synth_notes.last().map(|(p, _)| *p);
 
+        // Determine per-track session clip active status (honor SlotState::Stopped and Stop All)
+        let track_should_trigger = |track_idx: usize| -> bool {
+            let Some(trk) = self.matrix.tracks.get(track_idx) else {
+                return false;
+            };
+            if trk.slots.iter().any(|s| s.state.is_playing()) {
+                return true;
+            }
+            if !self.has_session_override
+                && self.workspace_view == WorkspaceView::ArrangementTimeline
+            {
+                return self
+                    .timeline
+                    .tracks
+                    .get(track_idx)
+                    .map(|at| !at.clips.is_empty())
+                    .unwrap_or(false);
+            }
+            false
+        };
+
         // Real-time 16th-note step sequencer driver for live GUI playback
         let global_step = (self.current_beat * 4.0).floor() as i64;
         if self.last_triggered_step != Some(global_step) {
             self.last_triggered_step = Some(global_step);
-            let step_16 = (global_step.rem_euclid(16)) as usize;
+            let drum_active = track_should_trigger(1);
+            let synth_active = track_should_trigger(0);
 
-            // Trigger active 909 drum pads on this 16th step
-            let mut drum_hits = Vec::new();
-            for (pad_idx, track) in self.drum_pattern.tracks.iter().enumerate() {
-                if !self.drum_sequencer.is_pad_audible(pad_idx) {
-                    continue;
-                }
-                if let Some(step) = track.steps.get(step_16) {
-                    if step.active {
-                        let midi_note = 36 + (pad_idx as u8).min(15);
-                        drum_hits.push((midi_note, step.velocity.max(95)));
+            // Trigger active 909 drum pads on this step if Track 1 (Drums) is playing
+            if drum_active {
+                let drum_steps = self
+                    .drum_pattern
+                    .tracks
+                    .iter()
+                    .map(|t| t.steps.len())
+                    .max()
+                    .unwrap_or(16)
+                    .max(16);
+                let step_drum = (global_step.rem_euclid(drum_steps as i64)) as usize;
+
+                let mut drum_hits = Vec::new();
+                for (pad_idx, track) in self.drum_pattern.tracks.iter().enumerate() {
+                    if !self.drum_sequencer.is_pad_audible(pad_idx) {
+                        continue;
+                    }
+                    if let Some(step) = track.steps.get(step_drum) {
+                        if step.active {
+                            let midi_note = 36 + (pad_idx as u8).min(15);
+                            drum_hits.push((midi_note, step.velocity.max(95)));
+                        }
                     }
                 }
-            }
-            for (note, velocity) in drum_hits {
-                self.send_command(AudioCommand::NoteOn {
-                    track_id: 1,
-                    note,
-                    velocity,
-                });
-            }
-
-            // Trigger all matching synth notes polyphonically on this 16th step, honoring duration_beats
-            let mut next_synth_notes = Vec::new();
-            for n in &self.midi_pattern.notes {
-                let note_step = ((n.start_beat * 4.0).round() as usize) % 16;
-                if note_step == step_16 {
-                    let pitch = if self.global_scale.scale_lock {
-                        self.global_scale.quantize(n.pitch)
-                    } else {
-                        n.pitch
-                    };
-                    let dur_beats = n.duration_beats.max(0.05);
-                    next_synth_notes.push((pitch, n.velocity, dur_beats));
-                }
-            }
-            for (pitch, vel, dur_beats) in next_synth_notes {
-                // Re-trigger cleanly if the exact pitch is still active
-                if let Some(pos) = self.active_synth_notes.iter().position(|(p, _)| *p == pitch) {
-                    self.active_synth_notes.remove(pos);
-                    self.send_command(AudioCommand::NoteOff {
-                        track_id: 0,
-                        note: pitch,
+                for (note, velocity) in drum_hits {
+                    self.send_command(AudioCommand::NoteOn {
+                        track_id: 1,
+                        note,
+                        velocity,
                     });
                 }
-                self.active_synth_notes
-                    .push((pitch, self.current_beat + dur_beats));
-                self.active_synth_note = Some(pitch);
-                self.send_command(AudioCommand::NoteOn {
-                    track_id: 0,
-                    note: pitch,
-                    velocity: vel,
-                });
+            }
+
+            // Trigger matching synth notes polyphonically using actual multi-bar pattern length
+            if synth_active {
+                let midi_steps = ((self.midi_pattern.length_beats * 4.0).round() as usize).max(16);
+                let step_midi = (global_step.rem_euclid(midi_steps as i64)) as usize;
+
+                // Coalesce duplicate pitches resolved on the same step so NoteOff never cancels a same-step NoteOn
+                let mut next_synth_notes: Vec<(u8, u8, f64)> = Vec::new();
+                for n in &self.midi_pattern.notes {
+                    let note_step =
+                        ((n.start_beat * 4.0).round() as i64).rem_euclid(midi_steps as i64) as usize;
+                    if note_step == step_midi {
+                        let pitch = if self.global_scale.scale_lock {
+                            self.global_scale.quantize(n.pitch)
+                        } else {
+                            n.pitch
+                        };
+                        let dur_beats = n.duration_beats.max(0.05);
+                        if let Some(existing) =
+                            next_synth_notes.iter_mut().find(|(p, _, _)| *p == pitch)
+                        {
+                            existing.1 = existing.1.max(n.velocity);
+                            existing.2 = existing.2.max(dur_beats);
+                        } else {
+                            next_synth_notes.push((pitch, n.velocity, dur_beats));
+                        }
+                    }
+                }
+                for (pitch, vel, dur_beats) in next_synth_notes {
+                    // Re-trigger cleanly if the exact pitch is already active from a prior step
+                    if let Some(pos) = self.active_synth_notes.iter().position(|(p, _)| *p == pitch)
+                    {
+                        self.active_synth_notes.remove(pos);
+                        self.send_command(AudioCommand::NoteOff {
+                            track_id: 0,
+                            note: pitch,
+                        });
+                    }
+                    self.active_synth_notes
+                        .push((pitch, self.current_beat + dur_beats));
+                    self.active_synth_note = Some(pitch);
+                    self.send_command(AudioCommand::NoteOn {
+                        track_id: 0,
+                        note: pitch,
+                        velocity: vel,
+                    });
+                }
             }
 
             // Update XY pad telemetry modulation indicator without clobbering user/MCP cutoff_hz
@@ -654,39 +708,333 @@ impl OxideStudioApp {
         }
     }
 
-    /// Perform one-click WAV bounce of the demo arrangement.
+    /// Construct a complete `DAWProject` snapshot from the live GUI session state.
+    pub fn build_daw_project(&self) -> DAWProject {
+        let mut project = DAWProject::new("Oxide Studio Session");
+        project.transport.bpm = self.bpm;
+        project.transport.time_signature_numerator = self.time_signature.0;
+        project.transport.time_signature_denominator = self.time_signature.1;
+        project.transport.swing_16th_ratio = self.swing;
+        project.transport.loop_enabled = self.timeline_gui.loop_enabled;
+        project.transport.loop_start_beat = self.timeline_gui.loop_start_beat;
+        project.transport.loop_end_beat =
+            self.timeline_gui.loop_start_beat + self.timeline_gui.loop_length_beats;
+        project.master_track.volume_db = if self.master_volume > 0.001 {
+            20.0 * self.master_volume.log10()
+        } else {
+            -70.0
+        };
+        project.scenes = self.matrix.scenes.clone();
+
+        for (idx, track) in self.matrix.tracks.iter().enumerate() {
+            let chain_opt = if idx == self.selected_track {
+                Some(&self.device_chain)
+            } else {
+                self.track_device_chains.get(idx)
+            };
+            let is_drum = idx == 1
+                || chain_opt
+                    .map(|c| c.devices.iter().any(|d| d.kind == DeviceKind::DrumRack))
+                    .unwrap_or(false)
+                || track.name.to_lowercase().contains("drum");
+            let is_audio = !is_drum
+                && track.name.to_lowercase().contains("audio")
+                && !chain_opt
+                    .map(|c| {
+                        c.devices
+                            .iter()
+                            .any(|d| matches!(d.kind, DeviceKind::Wavetable | DeviceKind::Operator))
+                    })
+                    .unwrap_or(false);
+
+            let mut trk_def = if is_drum {
+                TrackDefinition::new_drum_rack(track.id, &track.name)
+            } else if is_audio {
+                TrackDefinition::new_audio(track.id, &track.name)
+            } else {
+                TrackDefinition::new_synth(track.id, &track.name)
+            };
+
+            if idx == 0 {
+                if let InstrumentConfig::BuiltinSubtractiveSynth(ref mut patch) = trk_def.instrument
+                {
+                    patch.filter_frequency = self.synth_state.cutoff_hz.clamp(20.0, 20000.0);
+                    patch.filter_resonance = (self.synth_state.resonance / 5.0).clamp(0.0, 1.0);
+                    patch.oscillator_pulse_width =
+                        ((self.synth_state.pulse_pw - 0.5) / 0.45).clamp(-1.0, 1.0);
+                } else {
+                    let mut patch = SynthPatchParameters::default();
+                    patch.filter_frequency = self.synth_state.cutoff_hz.clamp(20.0, 20000.0);
+                    patch.filter_resonance = (self.synth_state.resonance / 5.0).clamp(0.0, 1.0);
+                    patch.oscillator_pulse_width =
+                        ((self.synth_state.pulse_pw - 0.5) / 0.45).clamp(-1.0, 1.0);
+                    trk_def.instrument = InstrumentConfig::BuiltinSubtractiveSynth(patch);
+                }
+            }
+
+            if let Some(gui_trk) = self.tracks_gui.get(idx) {
+                trk_def.mixer.volume_db = if gui_trk.volume_linear > 0.001 {
+                    20.0 * gui_trk.volume_linear.log10()
+                } else {
+                    -70.0
+                };
+                trk_def.mixer.pan = gui_trk.pan;
+                trk_def.mixer.mute = gui_trk.mute;
+                trk_def.mixer.solo = gui_trk.solo;
+                for (send_idx, &send_lin) in gui_trk.sends.iter().enumerate() {
+                    let db = if send_lin > 0.001 {
+                        20.0 * send_lin.log10()
+                    } else {
+                        -70.0
+                    };
+                    trk_def.mixer.set_send_db(send_idx, db);
+                }
+            }
+
+            if let Some(chain) = chain_opt {
+                for dev in &chain.devices {
+                    if !dev.is_enabled {
+                        continue;
+                    }
+                    match dev.kind {
+                        DeviceKind::Roar => trk_def.insert_fx.push(InsertEffectConfig::Roar {
+                            drive_db: dev.roar.drive_db,
+                            tone: dev.roar.tone,
+                            dry_wet: 1.0,
+                            output_gain_db: 0.0,
+                        }),
+                        DeviceKind::AutoFilter => {
+                            trk_def.insert_fx.push(InsertEffectConfig::AutoFilter {
+                                cutoff_hz: dev.auto_filter.cutoff_hz,
+                                resonance: dev.auto_filter.resonance,
+                                dry_wet: 1.0,
+                            });
+                        }
+                        DeviceKind::EQEight => {
+                            let mut params = std::collections::HashMap::new();
+                            for (b_idx, band) in dev.eq8.bands.iter().enumerate() {
+                                params.insert(format!("band{}_freq", b_idx), band.freq_hz);
+                                params.insert(format!("band{}_gain", b_idx), band.gain_db);
+                                params.insert(format!("band{}_q", b_idx), band.q);
+                            }
+                            trk_def
+                                .insert_fx
+                                .push(InsertEffectConfig::EqEight { params });
+                        }
+                        DeviceKind::GlueCompressor => {
+                            trk_def.insert_fx.push(InsertEffectConfig::GlueCompressor {
+                                threshold_db: dev.glue.threshold_db,
+                                ratio: dev.glue.ratio,
+                                attack_ms: dev.glue.attack_ms,
+                                release_s: (dev.glue.release_ms / 1000.0).max(0.05),
+                                makeup_gain_db: 0.0,
+                                dry_wet: 1.0,
+                            });
+                        }
+                        DeviceKind::OTT => {
+                            trk_def.insert_fx.push(InsertEffectConfig::MultibandDynamics {
+                                amount: dev.ott.depth,
+                                time_macro: dev.ott.time_scale,
+                                input_gain_db: 0.0,
+                                output_gain_db: dev.ott.output_gain_db,
+                            });
+                        }
+                        _ => {}
+                    }
+                }
+            }
+
+            trk_def.session_clips = track
+                .slots
+                .iter()
+                .enumerate()
+                .map(|(slot_idx, slot)| {
+                    let mut clip = slot.clip.clone()?;
+                    if self.selected_clip_slot == Some((idx, slot_idx)) {
+                        clip.pattern = if is_drum {
+                            ClipPattern::Drum(self.drum_pattern.clone())
+                        } else {
+                            ClipPattern::Midi(self.midi_pattern.clone())
+                        };
+                    }
+                    Some(clip)
+                })
+                .collect();
+
+            if let Some(arr_trk) = self.timeline.tracks.get(idx) {
+                trk_def.arrangement_clips = arr_trk.clips.clone();
+            }
+
+            project.tracks.push(trk_def);
+        }
+
+        project
+    }
+
+    /// Perform WAV bounce of the current GUI session/arrangement using `oxide_bounce::render_project_to_wav`.
     pub fn export_demo_wav(&mut self, output_path: &str) -> Result<(), String> {
-        let renderer = DemoArrangementRenderer::new(44100.0, self.bpm);
-        let interleaved = renderer.render_demo_seconds(4.5);
-        WavWriter::write_wav_16bit(std::path::Path::new(output_path), 44100, 2, &interleaved)
-            .map_err(|e| format!("Failed to export WAV: {}", e))?;
-        self.status_message = format!("Exported: {}", output_path);
-        Ok(())
+        let project = self.build_daw_project();
+        let path = std::path::Path::new(output_path);
+        match render_project_to_wav(&project, path) {
+            Ok(_) => {
+                let msg = format!("Exported: {}", output_path);
+                self.status_message = msg.clone();
+                self.export_status = Some(msg);
+                Ok(())
+            }
+            Err(e) => {
+                let msg = format!("Failed to export WAV ({}): {}", output_path, e);
+                self.status_message = msg.clone();
+                self.export_status = Some(msg.clone());
+                Err(msg)
+            }
+        }
     }
 
     /// Export current session snapshot as an Ableton Live `.als` project.
     pub fn export_als_project(&self, output_path: &str) -> Result<(), String> {
-        let mut project = DAWProject::new("Oxide Studio Session");
-        project.transport.bpm = self.bpm;
-        project.scenes = self.matrix.scenes.clone();
-        for (idx, track) in self.matrix.tracks.iter().enumerate() {
-            let mut trk_def = TrackDefinition::new_synth(track.id, &track.name);
-            if idx < self.tracks_gui.len() {
-                trk_def.mixer.volume_db = if self.tracks_gui[idx].volume_linear > 0.001 {
-                    20.0 * self.tracks_gui[idx].volume_linear.log10()
-                } else {
-                    -70.0
-                };
-                trk_def.mixer.pan = self.tracks_gui[idx].pan;
-                trk_def.mixer.mute = self.tracks_gui[idx].mute;
-                trk_def.mixer.solo = self.tracks_gui[idx].solo;
-            }
-            trk_def.session_clips = track.slots.iter().map(|s| s.clip.clone()).collect();
-            project.tracks.push(trk_def);
-        }
+        let project = self.build_daw_project();
         project
             .save_als(std::path::Path::new(output_path))
-            .map_err(|e| format!("Failed to export ALS: {}", e))?;
+            .map_err(|e| format!("Failed to export ALS: {}", e))
+    }
+
+    /// Import an Ableton Live `.als` project and populate GUI tracks, clips, mixer, and device chains.
+    pub fn import_als_project(&mut self, path: &std::path::Path) -> Result<(), String> {
+        let proj = DAWProject::load_als(path).map_err(|e| format!("Failed to import ALS: {}", e))?;
+        self.bpm = proj.transport.bpm.clamp(20.0, 999.0);
+        self.time_signature = (
+            proj.transport.time_signature_numerator.max(1),
+            proj.transport.time_signature_denominator.max(1),
+        );
+        self.swing = proj.transport.swing_16th_ratio;
+        self.master_volume = if proj.master_track.volume_db <= -69.5 {
+            0.0
+        } else {
+            10.0f32
+                .powf(proj.master_track.volume_db / 20.0)
+                .clamp(0.0, 2.0)
+        };
+        self.send_command(AudioCommand::SetTempo(self.bpm));
+        if let Some(ref handle) = self.audio_handle {
+            handle.params.set(PARAM_BPM, self.bpm as f32);
+        }
+
+        if !proj.scenes.is_empty() {
+            self.matrix.scenes = proj.scenes.clone();
+        }
+
+        if !proj.tracks.is_empty() {
+            let scene_count = self.matrix.scenes.len().max(8);
+            self.matrix.tracks.clear();
+            self.tracks_gui.clear();
+            self.timeline.tracks.clear();
+            self.track_device_chains.clear();
+
+            for (idx, trk) in proj.tracks.iter().enumerate() {
+                if trk.track_type == TrackType::Return {
+                    continue;
+                }
+                let mut sess_trk = SessionTrack::new(trk.id, &trk.name, scene_count);
+                for (slot_idx, clip_opt) in trk.session_clips.iter().enumerate() {
+                    while sess_trk.slots.len() <= slot_idx {
+                        sess_trk.slots.push(oxide_timeline::SessionSlot::default());
+                    }
+                    if let Some(clip) = clip_opt {
+                        sess_trk.slots[slot_idx].clip = Some(clip.clone());
+                        sess_trk.slots[slot_idx].state = SlotState::Stopped;
+                    }
+                }
+                self.matrix.tracks.push(sess_trk);
+
+                let vol_lin = if trk.mixer.volume_db <= -69.5 {
+                    0.0
+                } else {
+                    10.0f32.powf(trk.mixer.volume_db / 20.0).clamp(0.0, 4.0)
+                };
+                let sends_lin: Vec<f32> = trk
+                    .mixer
+                    .effective_sends_db()
+                    .into_iter()
+                    .map(|db| {
+                        if db <= -69.5 {
+                            0.0
+                        } else {
+                            10.0f32.powf(db / 20.0).clamp(0.0, 1.0)
+                        }
+                    })
+                    .collect();
+                self.tracks_gui.push(GuiTrackState {
+                    name: trk.name.clone(),
+                    volume_linear: vol_lin,
+                    pan: trk.mixer.pan,
+                    mute: trk.mixer.mute,
+                    solo: trk.mixer.solo,
+                    sends: sends_lin,
+                    input_routing: "All Ins".into(),
+                    output_routing: "Master".into(),
+                    monitor_mode: "Auto".into(),
+                    crossfader_assign: CrossfaderAssign::Off,
+                });
+
+                let mut arr_trk = ArrangementTrack::new(
+                    trk.id,
+                    &trk.name,
+                    match trk.track_type {
+                        TrackType::DrumRack => "DrumRack",
+                        TrackType::Audio => "Audio",
+                        _ => "MidiSynth",
+                    },
+                );
+                for clip in &trk.arrangement_clips {
+                    arr_trk.add_clip(clip.clone());
+                }
+                self.timeline.tracks.push(arr_trk);
+
+                let is_drum = trk.track_type == TrackType::DrumRack;
+                let chain = DeviceChainViewState::default_for_track(idx, is_drum);
+                self.track_device_chains.push(chain);
+
+                if idx == 0 {
+                    if let InstrumentConfig::BuiltinSubtractiveSynth(ref patch) = trk.instrument {
+                        self.synth_state.cutoff_hz = patch.filter_frequency.clamp(20.0, 20000.0);
+                        self.synth_state.resonance = (patch.filter_resonance * 5.0).clamp(0.0, 5.0);
+                        self.synth_state.pulse_pw =
+                            (patch.oscillator_pulse_width * 0.45 + 0.5).clamp(0.05, 0.95);
+                    }
+                    if let Some(ClipPattern::Midi(ref mp)) = trk
+                        .session_clips
+                        .iter()
+                        .flatten()
+                        .next()
+                        .map(|c| &c.pattern)
+                        .or_else(|| trk.arrangement_clips.first().map(|c| &c.pattern))
+                    {
+                        self.midi_pattern = mp.clone();
+                    }
+                } else if is_drum {
+                    if let Some(ClipPattern::Drum(ref dp)) = trk
+                        .session_clips
+                        .iter()
+                        .flatten()
+                        .next()
+                        .map(|c| &c.pattern)
+                        .or_else(|| trk.arrangement_clips.first().map(|c| &c.pattern))
+                    {
+                        self.drum_pattern = dp.clone();
+                    }
+                }
+            }
+
+            if !self.track_device_chains.is_empty() {
+                self.selected_track = self.selected_track.min(self.track_device_chains.len() - 1);
+                self.device_chain = self.track_device_chains[self.selected_track].clone();
+            }
+        }
+
+        let display = format!("Imported {}", path.display());
+        self.export_status = Some(display.clone());
+        self.status_message = display;
         Ok(())
     }
 
@@ -738,25 +1086,35 @@ impl OxideStudioApp {
                 };
 
                 if let Some(kind) = dev_kind {
-                    let new_id = (self.device_chain.devices.len() as u32) + 1;
-                    self.device_chain
-                        .devices
-                        .push(GuiDeviceModule::new(new_id, kind));
-                    if self.selected_track < self.track_device_chains.len() {
-                        self.track_device_chains[self.selected_track] = self.device_chain.clone();
+                    if self.device_chain.hot_swap.active && self.device_chain.hot_swap_commit(kind) {
+                        if self.selected_track < self.track_device_chains.len() {
+                            self.track_device_chains[self.selected_track] = self.device_chain.clone();
+                        }
+                        self.status_message = format!("Hot-Swapped: {}", item.name);
+                    } else {
+                        let new_id = (self.device_chain.devices.len() as u32) + 1;
+                        self.device_chain
+                            .devices
+                            .push(GuiDeviceModule::new(new_id, kind));
+                        if self.selected_track < self.track_device_chains.len() {
+                            self.track_device_chains[self.selected_track] = self.device_chain.clone();
+                        }
+                        self.status_message = format!("Loaded: {}", item.name);
                     }
-                    self.status_message = format!("Loaded: {}", item.name);
                 } else {
                     self.status_message = format!("Selected: {}", item.name);
                 }
             }
             BrowserCategory::Drums => {
+                // Canonical DrumRack map: 0=Kick, 1=Snare, 2=Low Tom, 5=Rimshot, 6=Clap, 8=Closed HH, 9=Open HH
                 let pad_idx = match item.id.as_str() {
                     "drum_909_kick" | "drum_808_sub_kick" => 0,
                     "drum_909_snare" | "drum_acoustic_snare" => 1,
-                    "drum_909_hihat" => 2,
-                    "drum_open_hihat" => 3,
-                    "drum_conga" => 4,
+                    "drum_conga" => 2,
+                    "drum_909_rimshot" | "drum_rimshot" => 5,
+                    "drum_909_clap" | "drum_clap" => 6,
+                    "drum_909_hihat" => 8,
+                    "drum_open_hihat" => 9,
                     _ => 0,
                 };
                 if let Some(track) = self.drum_pattern.tracks.get_mut(pad_idx) {
@@ -798,7 +1156,7 @@ impl OxideStudioApp {
                             snare.steps[s].velocity = 115;
                         }
                     }
-                    if let Some(hh) = self.drum_pattern.tracks.get_mut(2) {
+                    if let Some(hh) = self.drum_pattern.tracks.get_mut(8) {
                         for &s in &[2, 6, 10, 14] {
                             hh.steps[s].active = true;
                             hh.steps[s].velocity = 110;
@@ -924,9 +1282,19 @@ impl OxideStudioApp {
                 }
                 crate::shortcuts::StudioShortcutAction::TogglePlayStop => {
                     self.is_playing = !self.is_playing;
+                    self.last_triggered_step = None;
                     if self.is_playing {
                         self.send_command(AudioCommand::Play);
                     } else {
+                        let notes: Vec<u8> =
+                            self.active_synth_notes.drain(..).map(|(p, _)| p).collect();
+                        for pitch in notes {
+                            self.send_command(AudioCommand::NoteOff {
+                                track_id: 0,
+                                note: pitch,
+                            });
+                        }
+                        self.active_synth_note = None;
                         self.send_command(AudioCommand::Stop);
                     }
                 }
@@ -1034,33 +1402,66 @@ impl OxideStudioApp {
                     }
                 }
                 crate::shortcuts::StudioShortcutAction::ToggleDrawOrBounce => {
-                    let _ = self.export_demo_wav("/tmp/ableton_studio_export.wav");
-                    self.status_message = "Bounced Audio to /tmp/ableton_studio_export.wav".into();
+                    match self.export_demo_wav("/tmp/ableton_studio_export.wav") {
+                        Ok(()) => {
+                            self.status_message =
+                                "Bounced Audio to /tmp/ableton_studio_export.wav".into();
+                        }
+                        Err(e) => {
+                            self.status_message = e;
+                        }
+                    }
                 }
                 crate::shortcuts::StudioShortcutAction::ToggleBrowser => {
                     self.browser.is_collapsed = !self.browser.is_collapsed;
                 }
                 crate::shortcuts::StudioShortcutAction::ExportStems => {
-                    let _ = self.export_demo_wav("/tmp/oxide_studio_mix.wav");
-                    let _ = oxide_bounce::stems::export_remix_stems_from_wav(
-                        std::path::Path::new("/tmp/oxide_studio_mix.wav"),
-                        std::path::Path::new("/tmp/oxide_stems"),
-                    );
-                    self.export_status = Some("Stems exported to /tmp/oxide_stems/".to_string());
-                    self.status_message = "Stems exported to /tmp/oxide_stems/".into();
+                    if let Err(e) = self.export_demo_wav("/tmp/oxide_studio_mix.wav") {
+                        self.export_status = Some(e.clone());
+                        self.status_message = e;
+                    } else {
+                        match oxide_bounce::stems::export_remix_stems_from_wav(
+                            std::path::Path::new("/tmp/oxide_studio_mix.wav"),
+                            std::path::Path::new("/tmp/oxide_stems"),
+                        ) {
+                            Ok(_) => {
+                                self.export_status =
+                                    Some("Stems exported to /tmp/oxide_stems/".to_string());
+                                self.status_message =
+                                    "Stems exported to /tmp/oxide_stems/".into();
+                            }
+                            Err(e) => {
+                                let msg = format!("Stems export error: {}", e);
+                                self.export_status = Some(msg.clone());
+                                self.status_message = msg;
+                            }
+                        }
+                    }
                 }
                 crate::shortcuts::StudioShortcutAction::ToggleMuteSelected => {
                     let sel_track = self.selected_track;
                     if let Some(trk) = self.tracks_gui.get_mut(sel_track) {
                         trk.mute = !trk.mute;
-                        self.status_message = format!("Track {} Mute: {}", sel_track + 1, trk.mute);
+                        let is_muted = trk.mute;
+                        self.send_command(AudioCommand::SetParameter {
+                            track_id: sel_track,
+                            param_id: 1200 + sel_track as u32,
+                            value: if is_muted { 1.0 } else { 0.0 },
+                        });
+                        self.status_message = format!("Track {} Mute: {}", sel_track + 1, is_muted);
                     }
                 }
                 crate::shortcuts::StudioShortcutAction::ToggleSoloSelected => {
                     let sel_track = self.selected_track;
                     if let Some(trk) = self.tracks_gui.get_mut(sel_track) {
                         trk.solo = !trk.solo;
-                        self.status_message = format!("Track {} Solo: {}", sel_track + 1, trk.solo);
+                        let is_solo = trk.solo;
+                        self.send_command(AudioCommand::SetParameter {
+                            track_id: sel_track,
+                            param_id: 1300 + sel_track as u32,
+                            value: if is_solo { 1.0 } else { 0.0 },
+                        });
+                        self.status_message = format!("Track {} Solo: {}", sel_track + 1, is_solo);
                     }
                 }
                 crate::shortcuts::StudioShortcutAction::OctaveDown => {
@@ -1080,6 +1481,9 @@ impl OxideStudioApp {
                     self.status_message = format!("Keyboard Velocity: {}", self.keyboard.velocity);
                 }
                 crate::shortcuts::StudioShortcutAction::ToggleShortcutsModal => {}
+                crate::shortcuts::StudioShortcutAction::ToggleAiCopilot => {
+                    self.copilot_open = !self.copilot_open;
+                }
                 crate::shortcuts::StudioShortcutAction::ToggleMidiMapMode => {
                     self.status_message = "MIDI Map Mode toggled".to_string();
                 }
@@ -1117,15 +1521,35 @@ impl OxideStudioApp {
                 }
                 if action.toggle_play {
                     self.is_playing = !self.is_playing;
+                    self.last_triggered_step = None;
                     if self.is_playing {
                         self.send_command(AudioCommand::Play);
                     } else {
+                        let notes: Vec<u8> =
+                            self.active_synth_notes.drain(..).map(|(p, _)| p).collect();
+                        for pitch in notes {
+                            self.send_command(AudioCommand::NoteOff {
+                                track_id: 0,
+                                note: pitch,
+                            });
+                        }
+                        self.active_synth_note = None;
                         self.send_command(AudioCommand::Stop);
                     }
                 }
                 if action.stop {
                     self.is_playing = false;
                     self.current_beat = 0.0;
+                    self.last_triggered_step = None;
+                    let notes: Vec<u8> =
+                        self.active_synth_notes.drain(..).map(|(p, _)| p).collect();
+                    for pitch in notes {
+                        self.send_command(AudioCommand::NoteOff {
+                            track_id: 0,
+                            note: pitch,
+                        });
+                    }
+                    self.active_synth_note = None;
                     self.send_command(AudioCommand::Stop);
                 }
                 if action.toggle_record {
@@ -1148,35 +1572,58 @@ impl OxideStudioApp {
                     self.workspace_view = WorkspaceView::Arrangement;
                 }
                 if action.export_wav {
-                    let _ = self.export_demo_wav("/tmp/ableton_studio_export.wav");
+                    if let Err(e) = self.export_demo_wav("/tmp/ableton_studio_export.wav") {
+                        self.status_message = e;
+                    }
                 }
                 if action.export_als {
-                    let _ = self.export_als_project("/tmp/oxide_studio_session.als");
-                    self.export_status = Some("Exported /tmp/oxide_studio_session.als".to_string());
-                    self.status_message = "Exported /tmp/oxide_studio_session.als".into();
+                    match self.export_als_project("/tmp/oxide_studio_session.als") {
+                        Ok(()) => {
+                            self.export_status =
+                                Some("Exported /tmp/oxide_studio_session.als".to_string());
+                            self.status_message = "Exported /tmp/oxide_studio_session.als".into();
+                        }
+                        Err(e) => {
+                            self.export_status = Some(e.clone());
+                            self.status_message = e;
+                        }
+                    }
                 }
                 if action.import_als {
                     let p = std::path::Path::new("/tmp/oxide_studio_session.als");
                     if p.exists() {
-                        if let Ok(proj) = DAWProject::load_als(p) {
-                            self.bpm = proj.transport.bpm;
-                            self.send_command(AudioCommand::SetTempo(self.bpm));
-                            if let Some(ref handle) = self.audio_handle {
-                                handle.params.set(PARAM_BPM, self.bpm as f32);
-                            }
-                            self.export_status = Some("Imported /tmp/oxide_studio_session.als".to_string());
-                            self.status_message = "Imported /tmp/oxide_studio_session.als".into();
+                        if let Err(e) = self.import_als_project(p) {
+                            self.export_status = Some(e.clone());
+                            self.status_message = e;
                         }
+                    } else {
+                        let msg = "ALS file not found: /tmp/oxide_studio_session.als".to_string();
+                        self.export_status = Some(msg.clone());
+                        self.status_message = msg;
                     }
                 }
                 if action.split_stems {
-                    let _ = self.export_demo_wav("/tmp/oxide_studio_mix.wav");
-                    let _ = oxide_bounce::stems::export_remix_stems_from_wav(
-                        std::path::Path::new("/tmp/oxide_studio_mix.wav"),
-                        std::path::Path::new("/tmp/oxide_stems"),
-                    );
-                    self.export_status = Some("Stems exported to /tmp/oxide_stems/".to_string());
-                    self.status_message = "Stems exported to /tmp/oxide_stems/".into();
+                    if let Err(e) = self.export_demo_wav("/tmp/oxide_studio_mix.wav") {
+                        self.export_status = Some(e.clone());
+                        self.status_message = e;
+                    } else {
+                        match oxide_bounce::stems::export_remix_stems_from_wav(
+                            std::path::Path::new("/tmp/oxide_studio_mix.wav"),
+                            std::path::Path::new("/tmp/oxide_stems"),
+                        ) {
+                            Ok(_) => {
+                                self.export_status =
+                                    Some("Stems exported to /tmp/oxide_stems/".to_string());
+                                self.status_message =
+                                    "Stems exported to /tmp/oxide_stems/".into();
+                            }
+                            Err(e) => {
+                                let msg = format!("Stems export error: {}", e);
+                                self.export_status = Some(msg.clone());
+                                self.status_message = msg;
+                            }
+                        }
+                    }
                 }
             });
 
@@ -1312,6 +1759,7 @@ impl OxideStudioApp {
                     // Bottom Tab Content
                     match self.deck_tab {
                         DeckTab::ClipView => {
+                            self.clip_view.bpm = self.bpm;
                             let clip_act = render_clip_view(
                                 ui,
                                 &mut self.clip_view,
@@ -1319,6 +1767,13 @@ impl OxideStudioApp {
                                 &self.global_scale,
                                 self.current_beat,
                             );
+                            if let Some(off_pitch) = clip_act.audition_note_off {
+                                let sel_track = self.selected_track;
+                                self.send_command(AudioCommand::NoteOff {
+                                    track_id: sel_track,
+                                    note: off_pitch,
+                                });
+                            }
                             if let Some((note, vel)) = clip_act.audition_note {
                                 let sel_track = self.selected_track;
                                 self.send_command(AudioCommand::NoteOn {
@@ -1349,13 +1804,79 @@ impl OxideStudioApp {
                             if let Some(kind) = dev_act.insert_device {
                                 self.status_message = format!("Inserted Device: {}", kind.name());
                             } else if let Some(idx) = dev_act.toggle_bypass {
-                                let st = if let Some(d) = self.device_chain.devices.get(idx) {
-                                    if d.is_enabled { "Enabled" } else { "Bypassed" }
-                                } else {
-                                    "Toggled"
-                                };
+                                let is_enabled = self
+                                    .device_chain
+                                    .devices
+                                    .get(idx)
+                                    .map(|d| d.is_enabled)
+                                    .unwrap_or(true);
+                                self.send_command(AudioCommand::SetParameter {
+                                    track_id: self.selected_track,
+                                    param_id: 3500 + idx as u32,
+                                    value: if is_enabled { 1.0 } else { 0.0 },
+                                });
+                                let st = if is_enabled { "Enabled" } else { "Bypassed" };
                                 self.status_message = format!("Device #{} {}", idx + 1, st);
                             } else if let Some(idx) = dev_act.device_parameter_changed {
+                                let trk = self.selected_track;
+                                if let Some(dev) = self.device_chain.devices.get(idx).cloned() {
+                                    match dev.kind {
+                                        DeviceKind::Wavetable => {
+                                            if trk == 0 && idx == 0 {
+                                                self.synth_state.cutoff_hz =
+                                                    dev.wavetable.filter1_cutoff.clamp(20.0, 20000.0);
+                                                self.synth_state.resonance =
+                                                    dev.wavetable.filter1_res.clamp(0.0, 1.0);
+                                            }
+                                            self.send_command(AudioCommand::SetParameter {
+                                                track_id: trk,
+                                                param_id: PARAM_ID_SYNTH_CUTOFF,
+                                                value: dev.wavetable.filter1_cutoff,
+                                            });
+                                            self.send_command(AudioCommand::SetParameter {
+                                                track_id: trk,
+                                                param_id: PARAM_ID_SYNTH_RESONANCE,
+                                                value: dev.wavetable.filter1_res,
+                                            });
+                                            self.send_command(AudioCommand::SetParameter {
+                                                track_id: trk,
+                                                param_id: 100,
+                                                value: dev.wavetable.table_pos.clamp(0.0, 1.0),
+                                            });
+                                        }
+                                        DeviceKind::Roar => {
+                                            self.send_command(AudioCommand::SetParameter {
+                                                track_id: trk,
+                                                param_id: PARAM_FX_DRIVE as u32,
+                                                value: (dev.roar.drive_db / 12.0).clamp(0.0, 2.0),
+                                            });
+                                        }
+                                        DeviceKind::AutoFilter => {
+                                            self.send_command(AudioCommand::SetParameter {
+                                                track_id: trk,
+                                                param_id: PARAM_ID_SYNTH_CUTOFF,
+                                                value: dev.auto_filter.cutoff_hz,
+                                            });
+                                            self.send_command(AudioCommand::SetParameter {
+                                                track_id: trk,
+                                                param_id: PARAM_ID_SYNTH_RESONANCE,
+                                                value: dev.auto_filter.resonance,
+                                            });
+                                            self.send_command(AudioCommand::SetParameter {
+                                                track_id: trk,
+                                                param_id: PARAM_ID_SYNTH_ENV_MOD,
+                                                value: dev.auto_filter.env_amount,
+                                            });
+                                        }
+                                        _ => {
+                                            self.send_command(AudioCommand::SetParameter {
+                                                track_id: trk,
+                                                param_id: 3000 + (idx as u32).min(127) * 32,
+                                                value: 1.0,
+                                            });
+                                        }
+                                    }
+                                }
                                 self.status_message =
                                     format!("Device #{} Parameter Modulated", idx + 1);
                             }
@@ -1632,7 +2153,9 @@ impl OxideStudioApp {
                         }
                         for trk in &mut self.matrix.tracks {
                             for slot in &mut trk.slots {
-                                slot.state = SlotState::Stopped;
+                                if slot.clip.is_some() {
+                                    slot.state = SlotState::Stopped;
+                                }
                             }
                         }
                     }
@@ -1677,7 +2200,21 @@ impl OxideStudioApp {
                         }
                     }
                     if let Some(beat) = action.seek_beat {
-                        self.current_beat = beat;
+                        self.current_beat = beat.max(0.0);
+                        self.last_triggered_step = None;
+                        self.telemetry.playhead_beat = self.current_beat;
+                        let notes: Vec<u8> =
+                            self.active_synth_notes.drain(..).map(|(p, _)| p).collect();
+                        for pitch in notes {
+                            self.send_command(AudioCommand::NoteOff {
+                                track_id: 0,
+                                note: pitch,
+                            });
+                        }
+                        self.active_synth_note = None;
+                        if let Some(ref mut proc) = self.mock_processor {
+                            proc.transport.beat = self.current_beat;
+                        }
                     }
                 }
             }
@@ -1717,45 +2254,45 @@ mod tests {
     fn test_als_export_and_import() {
         let mut app = OxideStudioApp::new_mock(44100.0);
         app.bpm = 135.0;
-        let als_path = "/tmp/oxide_studio_session.als";
-        let res = app.export_als_project(als_path);
+        let als_path = std::env::temp_dir().join(format!(
+            "oxide_studio_session_{}.als",
+            std::process::id()
+        ));
+        let als_str = als_path.to_string_lossy().to_string();
+        let res = app.export_als_project(&als_str);
         assert!(res.is_ok());
-        assert!(std::path::Path::new(als_path).exists());
+        assert!(als_path.exists());
 
         // Test loading
-        let loaded = DAWProject::load_als(std::path::Path::new(als_path)).unwrap();
+        let loaded = DAWProject::load_als(&als_path).unwrap();
         assert_eq!(loaded.transport.bpm, 135.0);
+        assert_eq!(loaded.tracks[1].track_type, TrackType::DrumRack);
 
-        // Test import logic
+        // Test full import into app
         app.bpm = 120.0;
-        let p = std::path::Path::new(als_path);
-        if let Ok(proj) = DAWProject::load_als(p) {
-            app.bpm = proj.transport.bpm;
-            app.export_status = Some("Imported /tmp/oxide_studio_session.als".to_string());
-        }
+        app.import_als_project(&als_path).expect("ALS import must succeed");
         assert_eq!(app.bpm, 135.0);
-        assert_eq!(app.export_status, Some("Imported /tmp/oxide_studio_session.als".to_string()));
+        assert_eq!(app.tracks_gui.len(), loaded.tracks.len());
+        assert!(app.export_status.as_deref().unwrap_or("").contains("Imported"));
 
-        let _ = std::fs::remove_file(als_path);
+        let _ = std::fs::remove_file(&als_path);
     }
 
     #[test]
     fn test_stems_export() {
         let mut app = OxideStudioApp::new_mock(44100.0);
-        let wav_path = "/tmp/oxide_studio_mix.wav";
-        let stems_dir = "/tmp/oxide_stems";
-        let res = app.export_demo_wav(wav_path);
+        let pid = std::process::id();
+        let wav_path = std::env::temp_dir().join(format!("oxide_studio_mix_{}.wav", pid));
+        let stems_dir = std::env::temp_dir().join(format!("oxide_stems_{}", pid));
+        let res = app.export_demo_wav(wav_path.to_string_lossy().as_ref());
         assert!(res.is_ok());
-        let stems_res = oxide_bounce::stems::export_remix_stems_from_wav(
-            std::path::Path::new(wav_path),
-            std::path::Path::new(stems_dir),
-        );
+        let stems_res = oxide_bounce::stems::export_remix_stems_from_wav(&wav_path, &stems_dir);
         assert!(stems_res.is_ok());
-        app.export_status = Some("Stems exported to /tmp/oxide_stems/".to_string());
-        assert_eq!(app.export_status, Some("Stems exported to /tmp/oxide_stems/".to_string()));
+        app.export_status = Some("Stems exported".to_string());
+        assert_eq!(app.export_status, Some("Stems exported".to_string()));
 
-        let _ = std::fs::remove_file(wav_path);
-        let _ = std::fs::remove_dir_all(stems_dir);
+        let _ = std::fs::remove_file(&wav_path);
+        let _ = std::fs::remove_dir_all(&stems_dir);
     }
 
     #[test]
@@ -1763,19 +2300,22 @@ mod tests {
         let mut app = OxideStudioApp::new_mock(44100.0);
         assert!(matches!(app.matrix.tracks[0].slots[0].state, SlotState::Playing { .. }));
 
-        // Stop all clips
+        // Stop all clips (leaving empty slots as SlotState::Empty)
         for trk_idx in 0..app.matrix.tracks.len() {
             app.send_command(AudioCommand::StopClip { track_id: trk_idx });
         }
         for trk in &mut app.matrix.tracks {
             for slot in &mut trk.slots {
-                slot.state = SlotState::Stopped;
+                if slot.clip.is_some() {
+                    slot.state = SlotState::Stopped;
+                }
             }
         }
 
         assert_eq!(app.matrix.tracks[0].slots[0].state, SlotState::Stopped);
         assert_eq!(app.matrix.tracks[1].slots[0].state, SlotState::Stopped);
         assert_eq!(app.matrix.tracks[2].slots[0].state, SlotState::Stopped);
+        assert_eq!(app.matrix.tracks[0].slots[1].state, SlotState::Empty);
     }
 
     #[test]
@@ -1937,5 +2477,158 @@ mod tests {
             assert!(proc.mixer.tracks[0].mute);
             assert!((proc.crossfader - 0.5).abs() < 1e-4);
         }
+    }
+
+    #[test]
+    fn test_poll_audio_step_reset_rewind_multibar_and_stopped_slot() {
+        let mut app = OxideStudioApp::new_mock(44100.0);
+
+        // 1. Rewind < 0.25 beats must still drain active synth notes on poll_audio
+        app.is_playing = true;
+        app.current_beat = 1.1;
+        app.active_synth_notes.push((60, 4.0));
+        if let Some(ref mut proc) = app.mock_processor {
+            proc.transport.is_playing = true;
+            proc.transport.beat = 1.0; // backward by 0.1 beats -> telemetry updates playhead_beat to ~1.0
+        }
+        app.poll_audio();
+        assert!(
+            !app.active_synth_notes.iter().any(|(p, _)| *p == 60),
+            "Backward rewind < 0.25 beats must release previously active synth notes"
+        );
+
+        // 2. Stopping clears last_triggered_step so restarting triggers step 0 cleanly
+        app.is_playing = false;
+        app.poll_audio();
+        assert_eq!(app.last_triggered_step, None);
+
+        // 3. Multi-bar MIDI clip (> 4 beats / > 16 steps) triggers note at step 16 (beat 4.0)
+        app.midi_pattern = MidiPattern::new(8.0);
+        app.midi_pattern.notes.push(MidiNote::new(72, 110, 4.0, 0.5));
+        app.global_scale.scale_lock = false;
+        app.is_playing = true;
+        app.active_synth_notes.clear();
+        if let Some(ref mut proc) = app.mock_processor {
+            proc.transport.is_playing = true;
+            proc.transport.beat = 4.0;
+        }
+        app.poll_audio();
+        assert!(
+            app.active_synth_notes.iter().any(|(p, _)| *p == 72),
+            "Multi-bar note at beat 4.0 (step 16) must trigger cleanly instead of aliasing modulo 16"
+        );
+
+        // 4. Stopped Session slot prevents Track 0 from triggering new synth notes
+        app.active_synth_notes.clear();
+        app.matrix.tracks[0].slots[0].state = SlotState::Stopped;
+        app.last_triggered_step = None;
+        if let Some(ref mut proc) = app.mock_processor {
+            proc.transport.beat = 4.0;
+        }
+        app.poll_audio();
+        assert!(
+            app.active_synth_notes.is_empty(),
+            "Track with SlotState::Stopped must not fire steps in poll_audio"
+        );
+    }
+
+    #[test]
+    fn test_shortcuts_and_keyboard_zero_double_binding_and_f12() {
+        let mut app = OxideStudioApp::new_mock(44100.0);
+        let ctx = Context::default();
+        let screen_rect = egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(1440.0, 900.0));
+        let budget = crate::layout::ViewportBudget::compute(screen_rect, true, true);
+
+        assert_eq!(app.keyboard.octave_offset, 0);
+        let mut raw = egui::RawInput::default();
+        raw.screen_rect = Some(screen_rect);
+        raw.events.push(egui::Event::Key {
+            key: egui::Key::Z,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers: egui::Modifiers::NONE,
+        });
+        let _ = ctx.run(raw, |ctx| {
+            app.render_frame_with_budget(ctx, &budget);
+        });
+        assert_eq!(
+            app.keyboard.octave_offset, -1,
+            "Z must decrement octave_offset exactly once (-1), not double-fire (-2)"
+        );
+
+        // S toggles Solo and emits AudioCommand::SetParameter(1300) without triggering NoteOn
+        assert!(!app.tracks_gui[0].solo);
+        let mut raw_s = egui::RawInput::default();
+        raw_s.screen_rect = Some(screen_rect);
+        raw_s.events.push(egui::Event::Key {
+            key: egui::Key::S,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers: egui::Modifiers::NONE,
+        });
+        let _ = ctx.run(raw_s, |ctx| {
+            app.render_frame_with_budget(ctx, &budget);
+        });
+        app.poll_audio();
+        assert!(app.tracks_gui[0].solo);
+        assert!(app.mock_processor.as_ref().unwrap().mixer.tracks[0].solo);
+        assert!(
+            app.active_synth_notes.is_empty(),
+            "S solo shortcut must not double-trigger a piano note"
+        );
+
+        // Num0 toggles Mute and dispatches Mute command to processor
+        let mut raw_0 = egui::RawInput::default();
+        raw_0.screen_rect = Some(screen_rect);
+        raw_0.events.push(egui::Event::Key {
+            key: egui::Key::Num0,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers: egui::Modifiers::NONE,
+        });
+        let _ = ctx.run(raw_0, |ctx| {
+            app.render_frame_with_budget(ctx, &budget);
+        });
+        app.poll_audio();
+        assert!(app.tracks_gui[0].mute);
+        assert!(app.mock_processor.as_ref().unwrap().mixer.tracks[0].mute);
+
+        // F12 toggles AI Copilot drawer
+        let init_copilot = app.copilot_open;
+        let mut raw_f12 = egui::RawInput::default();
+        raw_f12.screen_rect = Some(screen_rect);
+        raw_f12.events.push(egui::Event::Key {
+            key: egui::Key::F12,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers: egui::Modifiers::NONE,
+        });
+        let _ = ctx.run(raw_f12, |ctx| {
+            app.render_frame_with_budget(ctx, &budget);
+        });
+        assert_eq!(app.copilot_open, !init_copilot);
+    }
+
+    #[test]
+    fn test_browser_hot_swap_and_canonical_pad_alignment() {
+        use crate::panels::browser::{BrowserCategory, BrowserItem};
+
+        let mut app = OxideStudioApp::new_mock(44100.0);
+        let orig_len = app.device_chain.devices.len();
+        app.device_chain.hot_swap_activate(1); // Hot-swap slot 1 (AutoFilter)
+
+        let roar_item = BrowserItem::new("fx_roar", "Roar", BrowserCategory::AudioEffects, &["Warm"], "Sat", [0.5; 8]);
+        app.handle_browser_load(&roar_item);
+        assert_eq!(app.device_chain.devices.len(), orig_len, "Hot-swap must replace slot instead of appending");
+        assert_eq!(app.device_chain.devices[1].kind, DeviceKind::Roar);
+        assert!(!app.device_chain.hot_swap.active);
+
+        let hh_item = BrowserItem::new("drum_909_hihat", "909 Closed Hat", BrowserCategory::Drums, &["Hat"], "CH", [0.5; 8]);
+        app.handle_browser_load(&hh_item);
+        assert!(app.status_message.contains("(Pad 9)")); // index 8 -> Pad 9
     }
 }

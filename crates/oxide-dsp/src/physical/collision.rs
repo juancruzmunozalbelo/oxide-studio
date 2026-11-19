@@ -55,11 +55,11 @@ impl ModalFilter {
 
         let a1 = 2.0 * r * w.cos();
         let a2 = r * r;
-        let b0 = 1.0;
+        let b0 = (1.0 - r) * (sample_rate * 0.03).max(1.0);
 
-        let out = a1 * self.y1 - a2 * self.y2 + b0 * input;
+        let out = (a1 * self.y1 - a2 * self.y2 + b0 * input).clamp(-3.0, 3.0);
         self.y2 = self.y1;
-        self.y1 = out.clamp(-3.0, 3.0);
+        self.y1 = out;
         out
     }
 }
@@ -265,7 +265,7 @@ impl CollisionDevice {
                 let frac = voice.mallet_samples_left as f32 / 20.0;
                 let hertz_force = (frac.clamp(0.0, 1.0)).powf(1.5);
                 voice.mallet_samples_left -= 1;
-                let noise = (self.noise_gen.next_f32() * 2.0 - 1.0) * self.mallet_noise;
+                let noise = (self.noise_gen.next_f32_unit() * 2.0 - 1.0) * self.mallet_noise;
                 (hertz_force * (1.0 - self.mallet_noise * 0.5) + noise) * voice.mallet_vel * 2.0
             } else {
                 0.0

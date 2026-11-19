@@ -4247,6 +4247,105 @@ fn test_e2e_chapter30_clip_envelopes_and_modulation() {
     );
 }
 
+#[test]
+fn test_real_live_rpc_server_with_mcp_server_r2() {
+    use oxide_gui::live_rpc::OxideGuiRpcServer;
+    use oxide_mcp::McpServer;
+    use oxide_mcp::bridge::serde_json::{self, json, Value};
+
+    let mut app = OxideStudioApp::new_mock(44100.0);
+    let mut rpc = OxideGuiRpcServer::new_on_port(0);
+    assert_ne!(rpc.port, 0);
+    let port = rpc.port;
+
+    let mut mcp = McpServer::with_lom_port(port);
+
+    // Run MCP live12_* calls on a background thread while main thread polls real OxideGuiRpcServer
+    let handle = std::thread::spawn(move || {
+        use std::io::{BufRead, BufReader, Write};
+        use std::net::TcpStream;
+
+        let mut call_raw = |id: u64, name: &str, args: Value| -> (bool, String) {
+            let req = json!({
+                "jsonrpc": "2.0",
+                "id": id,
+                "method": "tools/call",
+                "params": { "name": name, "arguments": args }
+            });
+            let resp_str = mcp.handle_line(&req.to_string()).unwrap();
+            let resp: Value = serde_json::from_str(&resp_str).unwrap();
+            let is_err = resp["result"]["isError"].as_bool().unwrap_or(false);
+            let text = resp["result"]["content"][0]["text"]
+                .as_str()
+                .unwrap_or("")
+                .to_string();
+            (is_err, text)
+        };
+
+        // 1. live12_set_device_param sends string "param_index": "1" (resonance)
+        let (err1, txt1) = call_raw(
+            1,
+            "live12_set_device_param",
+            json!({ "track_index": 0, "device_index": 0, "param_index": "1", "value": 0.82 }),
+        );
+        assert!(!err1, "live12_set_device_param failed: {}", txt1);
+        let d_param: Value = serde_json::from_str(&txt1).unwrap();
+
+        // 2. live12_set_scale with space-separated "Harmonic Minor"
+        let (err2, txt2) = call_raw(
+            2,
+            "live12_set_scale",
+            json!({ "root_note": 9, "scale_name": "Harmonic Minor", "scale_lock": true }),
+        );
+        assert!(!err2, "live12_set_scale failed: {}", txt2);
+        let d_scale: Value = serde_json::from_str(&txt2).unwrap();
+
+        // 3. live12_create_clip with huge track_index is rejected cleanly at MCP layer
+        let (err3, txt3) = call_raw(
+            3,
+            "live12_create_clip",
+            json!({ "track_index": 999999999u64, "slot_index": 0 }),
+        );
+
+        // 4. Direct TCP RPC create_clip with huge track_index is ALSO rejected by OxideGuiRpcServer (-32602)
+        let mut stream = TcpStream::connect(("127.0.0.1", port)).unwrap();
+        let rpc_req = json!({
+            "jsonrpc": "2.0",
+            "id": 99,
+            "method": "create_clip",
+            "params": { "track_index": 999999999u64, "slot_index": 0 }
+        });
+        writeln!(stream, "{}", rpc_req).unwrap();
+        stream.flush().unwrap();
+        let mut line = String::new();
+        BufReader::new(stream).read_line(&mut line).unwrap();
+        let rpc_resp: Value = serde_json::from_str(&line).unwrap();
+
+        (d_param, d_scale, err3, txt3, rpc_resp)
+    });
+
+    let start = std::time::Instant::now();
+    while !handle.is_finished() && start.elapsed() < std::time::Duration::from_secs(3) {
+        let _ = rpc.poll_and_apply(&mut app);
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+    let _ = rpc.poll_and_apply(&mut app);
+
+    let (d_param, d_scale, err3, txt3, rpc_resp) = handle.join().unwrap();
+    assert_eq!(d_param["connected"], true);
+    assert!((app.device_chain.devices[0].wavetable.filter1_res - 0.82).abs() < 1e-4);
+    assert!((app.synth_state.resonance - 0.82).abs() < 1e-4);
+
+    assert_eq!(d_scale["connected"], true);
+    assert_eq!(app.global_scale.mode, oxide_core::ScaleMode::HarmonicMinor);
+
+    // Out-of-bounds track_index is rejected cleanly by both MCP and RPC server without OOM
+    assert!(err3, "Expected MCP error for huge track_index, got: {}", txt3);
+    assert!(rpc_resp.get("error").is_some(), "Expected RPC error, got: {:?}", rpc_resp);
+    assert!(app.matrix.tracks.len() < 16);
+}
+
+
 
 
 

@@ -195,38 +195,38 @@ fn test_adv_drum_rack_choke_group_exponential_decay_and_clickless() {
     let mut rack = DrumRack::new(sample_rate);
     let time = MusicalTime::default();
 
-    // Step 1: Set pad 10 (Open HH, choke group 1) to a steady test tone sample
+    // Step 1: Set pad 9 (Open HH, choke group 1) to a steady test tone sample
     // to measure exact choke decay kinetics and smoothness
     let tone_len = 88200; // 2 seconds
     let tone_data: Vec<f32> = (0..tone_len)
         .map(|i| (2.0 * std::f32::consts::PI * 440.0 * i as f32 / sample_rate).sin())
         .collect();
-    rack.pads[10].source = DrumPadSource::Sample {
+    rack.pads[9].source = DrumPadSource::Sample {
         sample_data: Arc::from(tone_data.into_boxed_slice()),
         channels: 1,
         sample_rate: 44100,
     };
-    rack.pads[10].decay_seconds = 2.0;
+    rack.pads[9].decay_seconds = 2.0;
     rack.sync_visible_to_all();
 
     // Trigger Open HH
-    rack.trigger_pad(10, 127);
+    rack.trigger_pad(9, 127);
 
     // Warm up 256 samples
     let mut warmup_buf = AudioBuffer::silence(256);
     rack.process(&[], &mut warmup_buf, &time);
 
-    // Find the voice playing pad 10
+    // Find the voice playing pad 9 (Open HH)
     let v_idx = rack.voices.iter().position(|v| v.active && v.choke_group == Some(1))
-        .expect("Voice for pad 10 must be active");
+        .expect("Voice for pad 9 must be active");
     let initial_env = rack.voices[v_idx].envelope_val;
     assert!(initial_env > 0.9, "Voice envelope should be active");
 
-    // Step 2: Choke it by triggering Closed HH (pad 6, choke group 1) with volume = 0
+    // Step 2: Choke it by triggering Closed HH (pad 8, choke group 1) with volume = 0
     // so we can isolate the fading out voice
-    rack.pads[6].volume = 0.0;
+    rack.pads[8].volume = 0.0;
     rack.sync_visible_to_all();
-    rack.trigger_pad(6, 127);
+    rack.trigger_pad(8, 127);
 
     // Verify voice entered fading out state
     assert!(

@@ -56,9 +56,26 @@ impl ChorusEnsemble {
     }
 
     pub fn set_sample_rate(&mut self, sample_rate: f32) {
-        if sample_rate > 0.0 {
-            *self = Self::new(sample_rate);
+        if sample_rate.is_finite() && sample_rate > 0.0 {
+            let max_samples = ((sample_rate * 0.05) as usize).max(256);
+            self.sample_rate = sample_rate;
+            self.buf_l = vec![0.0; max_samples];
+            self.buf_r = vec![0.0; max_samples];
+            self.write_pos = 0;
+            self.warm_filter_l = 0.0;
+            self.warm_filter_r = 0.0;
         }
+    }
+
+    #[inline(always)]
+    fn read_linear(buf: &[f32], write_pos: usize, delay_samples: f32) -> f32 {
+        let len = buf.len();
+        let d = delay_samples.clamp(1.0, (len - 2) as f32);
+        let idx_int = d.floor() as usize;
+        let frac = d - idx_int as f32;
+        let i0 = (write_pos + len - idx_int) % len;
+        let i1 = (write_pos + len - idx_int - 1) % len;
+        buf[i0] + frac * (buf[i1] - buf[i0])
     }
 }
 
@@ -129,32 +146,32 @@ impl AudioEffectDevice for ChorusEnsemble {
 
             let (wet_l, wet_r) = match self.mode {
                 ChorusMode::Classic => {
-                    let d1 = (base_delay_samples + mod1 * mod_range_samples).clamp(1.0, (buf_len - 2) as f32);
-                    let d2 = (base_delay_samples - mod2 * mod_range_samples).clamp(1.0, (buf_len - 2) as f32);
-
-                    let idx1 = ((self.write_pos as f32 - d1 + buf_len as f32) as usize) % buf_len;
-                    let idx2 = ((self.write_pos as f32 - d2 + buf_len as f32) as usize) % buf_len;
-
-                    (self.buf_l[idx1], self.buf_r[idx2])
-                }
-                ChorusMode::Ensemble => {
-                    let d1 = (base_delay_samples + mod1 * mod_range_samples).clamp(1.0, (buf_len - 2) as f32);
-                    let d2 = (base_delay_samples + mod2 * mod_range_samples).clamp(1.0, (buf_len - 2) as f32);
-                    let d3 = (base_delay_samples + mod3 * mod_range_samples).clamp(1.0, (buf_len - 2) as f32);
-
-                    let idx1 = ((self.write_pos as f32 - d1 + buf_len as f32) as usize) % buf_len;
-                    let idx2 = ((self.write_pos as f32 - d2 + buf_len as f32) as usize) % buf_len;
-                    let idx3 = ((self.write_pos as f32 - d3 + buf_len as f32) as usize) % buf_len;
+                    let d1 = base_delay_samples + mod1 * mod_range_samples;
+                    let d2 = base_delay_samples - mod2 * mod_range_samples;
 
                     (
-                        (self.buf_l[idx1] + self.buf_l[idx2] * 0.5) * 0.67,
-                        (self.buf_r[idx3] + self.buf_r[idx2] * 0.5) * 0.67,
+                        Self::read_linear(&self.buf_l, self.write_pos, d1),
+                        Self::read_linear(&self.buf_r, self.write_pos, d2),
                     )
                 }
+                ChorusMode::Ensemble => {
+                    let d1 = base_delay_samples + mod1 * mod_range_samples;
+                    let d2 = base_delay_samples + mod2 * mod_range_samples;
+                    let d3 = base_delay_samples + mod3 * mod_range_samples;
+
+                    let l1 = Self::read_linear(&self.buf_l, self.write_pos, d1);
+                    let l2 = Self::read_linear(&self.buf_l, self.write_pos, d2);
+                    let r2 = Self::read_linear(&self.buf_r, self.write_pos, d2);
+                    let r3 = Self::read_linear(&self.buf_r, self.write_pos, d3);
+
+                    ((l1 + l2 * 0.5) * 0.67, (r3 + r2 * 0.5) * 0.67)
+                }
                 ChorusMode::Vibrato => {
-                    let d = (base_delay_samples + mod1 * mod_range_samples * 1.5).clamp(1.0, (buf_len - 2) as f32);
-                    let idx = ((self.write_pos as f32 - d + buf_len as f32) as usize) % buf_len;
-                    (self.buf_l[idx], self.buf_r[idx])
+                    let d = base_delay_samples + mod1 * mod_range_samples * 1.5;
+                    (
+                        Self::read_linear(&self.buf_l, self.write_pos, d),
+                        Self::read_linear(&self.buf_r, self.write_pos, d),
+                    )
                 }
             };
 

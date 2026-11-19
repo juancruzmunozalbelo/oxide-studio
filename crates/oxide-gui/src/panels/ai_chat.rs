@@ -17,7 +17,7 @@ use egui::{
     vec2, Align, Button, Color32, Frame, Key, Layout, Margin, RichText, ScrollArea, Stroke,
     TextEdit, Ui,
 };
-use oxide_audio::{PARAM_ID_SYNTH_CUTOFF, PARAM_ID_SYNTH_RESONANCE};
+use oxide_audio::{PARAM_ID_SYNTH_CUTOFF, PARAM_ID_SYNTH_ENV_MOD, PARAM_ID_SYNTH_RESONANCE};
 use oxide_core::AudioCommand;
 use crate::app::OxideStudioApp;
 use crate::theme::{
@@ -192,12 +192,16 @@ impl AiCopilotState {
 
     /// Load custom AI configuration (key, model, base url) from local file or env.
     pub fn load_local_config() -> (String, String, String) {
+        Self::load_local_config_from_path(&Self::local_key_file_path())
+    }
+
+    /// Load custom AI configuration (key, model, base url) from a specific file path (falling back to env vars).
+    pub fn load_local_config_from_path(path: &std::path::Path) -> (String, String, String) {
         let mut key = String::new();
         let mut model = String::new();
         let mut url = String::new();
 
-        let path = Self::local_key_file_path();
-        if let Ok(contents) = std::fs::read_to_string(&path) {
+        if let Ok(contents) = std::fs::read_to_string(path) {
             for line in contents.lines() {
                 let line = line.trim();
                 if let Some(rest) = line.strip_prefix("MODEL=") {
@@ -285,14 +289,20 @@ impl AiCopilotState {
         None
     }
 
-    /// Save the current provider's API key, custom model, and base URL to `~/.config/oxide-studio/copilot_keys.env` (chmod 600 on Unix).
+    /// Save the current provider's API key, custom model, and base URL to `~/.config/oxide-studio/copilot_keys.env` (atomic 0o600 on Unix).
     pub fn save_local_api_key(&mut self) -> std::io::Result<()> {
         let path = Self::local_key_file_path();
+        self.save_local_config_to_path(&path)
+    }
+
+    /// Atomically write provider configuration (key, model, base URL) to `path` with `0o600` permissions on Unix.
+    pub fn save_local_config_to_path(&mut self, path: &std::path::Path) -> std::io::Result<()> {
+        use std::io::Write;
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
         }
         let mut lines: Vec<String> = if path.exists() {
-            std::fs::read_to_string(&path)
+            std::fs::read_to_string(path)
                 .unwrap_or_default()
                 .lines()
                 .map(|s| s.to_string())
@@ -327,12 +337,21 @@ impl AiCopilotState {
         }
 
         let body = lines.join("\n") + "\n";
-        std::fs::write(&path, body)?;
+        let mut opts = std::fs::OpenOptions::new();
+        opts.write(true).create(true).truncate(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            opts.mode(0o600);
+        }
+        let mut file = opts.open(path)?;
+        file.write_all(body.as_bytes())?;
+        file.sync_all()?;
 
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
-            let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600));
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;
         }
 
         let is_es = self.locale == StudioLocale::Es;
@@ -456,12 +475,12 @@ pub fn execute_studio_intent(prompt: &str, app: &mut OxideStudioApp) -> (String,
             value: 48.0,
         });
 
-        // - Boosts saturator/drive (+6.5 dB clamped to 24.0 dB)
+        // - Boosts saturator/drive (+6.5 dB clamped to 24.0 dB), scaled to processor drive_norm (db / 12.0)
         app.ai_copilot.kick_drive_db = (app.ai_copilot.kick_drive_db + 6.5).clamp(0.0, 24.0);
         app.send_command(AudioCommand::SetParameter {
             track_id: 1,
-            param_id: 6, // PARAM_FX_DRIVE
-            value: app.ai_copilot.kick_drive_db,
+            param_id: 6, // PARAM_FX_DRIVE (0.0..=2.0 -> 0..24 dB)
+            value: (app.ai_copilot.kick_drive_db / 12.0).clamp(0.0, 2.0),
         });
 
         // - Extends decay (480 ms)
@@ -553,8 +572,13 @@ pub fn execute_studio_intent(prompt: &str, app: &mut OxideStudioApp) -> (String,
         });
         app.send_command(AudioCommand::SetParameter {
             track_id: 0,
+            param_id: PARAM_ID_SYNTH_ENV_MOD,
+            value: app.ai_copilot.synth_env_mod,
+        });
+        app.send_command(AudioCommand::SetParameter {
+            track_id: 0,
             param_id: 6,
-            value: 0.72,
+            value: app.ai_copilot.synth_drive,
         });
 
         let badges = vec![
@@ -588,9 +612,9 @@ pub fn execute_studio_intent(prompt: &str, app: &mut OxideStudioApp) -> (String,
             handle.params.set(oxide_audio::PARAM_BPM, parsed_bpm as f32);
         }
 
-        // Populates driving 16th hats and clap on 4 & 12 in drum_pattern
-        // Pad 3: Clap
-        if let Some(clap_track) = app.drum_pattern.tracks.get_mut(3) {
+        // Populates driving 16th hats and clap on 4 & 12 in drum_pattern using canonical DrumRack indices
+        // Pad 6: Clap
+        if let Some(clap_track) = app.drum_pattern.tracks.get_mut(6) {
             for &s in &[4, 12] {
                 if let Some(step) = clap_track.steps.get_mut(s) {
                     step.active = true;
@@ -599,8 +623,8 @@ pub fn execute_studio_intent(prompt: &str, app: &mut OxideStudioApp) -> (String,
                 }
             }
         }
-        // Pad 6: Closed HH (driving 16th hats)
-        if let Some(hh_track) = app.drum_pattern.tracks.get_mut(6) {
+        // Pad 8: Closed HH (driving 16th hats)
+        if let Some(hh_track) = app.drum_pattern.tracks.get_mut(8) {
             for s in 0..hh_track.steps.len() {
                 hh_track.steps[s].active = true;
                 hh_track.steps[s].velocity = if s % 4 == 2 { 115 } else { 96 };
@@ -665,8 +689,8 @@ pub fn execute_studio_intent(prompt: &str, app: &mut OxideStudioApp) -> (String,
             }
         }
 
-        // Snare/Clap on 3, 6, 11, 14
-        if let Some(snare_track) = app.drum_pattern.tracks.get_mut(2) {
+        // Snare on 3, 6, 11, 14 (canonical DrumRack Pad 1 = Snare)
+        if let Some(snare_track) = app.drum_pattern.tracks.get_mut(1) {
             for (idx, step) in snare_track.steps.iter_mut().enumerate() {
                 let is_tresillo = idx == 3 || idx == 6 || idx == 11 || idx == 14;
                 step.active = is_tresillo;
@@ -996,14 +1020,14 @@ pub fn render_ai_copilot_panel(ui: &mut Ui, app: &mut OxideStudioApp) {
         let sub_db = if sub_mag > 1e-4 {
             (20.0 * sub_mag.log10()).clamp(-60.0, 0.0)
         } else {
-            -6.2
+            -60.0
         };
 
         let rms_raw = app.telemetry.master_rms_l.max(app.telemetry.master_rms_r);
         let rms_db = if rms_raw > 1e-4 {
             (20.0 * rms_raw.log10()).clamp(-60.0, 0.0)
         } else {
-            -11.4
+            -60.0
         };
 
         Frame::none()
@@ -1300,13 +1324,13 @@ mod tests {
         assert_eq!(app.bpm, 138.0);
         assert!(app.is_playing);
 
-        // Claps on 4 and 12
-        let clap_track = &app.drum_pattern.tracks[3];
+        // Claps on 4 and 12 (canonical DrumRack Pad 6)
+        let clap_track = &app.drum_pattern.tracks[6];
         assert!(clap_track.steps[4].active);
         assert!(clap_track.steps[12].active);
 
-        // Driving 16th hats
-        let hh_track = &app.drum_pattern.tracks[6];
+        // Driving 16th hats (canonical DrumRack Pad 8)
+        let hh_track = &app.drum_pattern.tracks[8];
         assert!(hh_track.steps[0].active);
         assert!(hh_track.steps[2].active);
 
@@ -1332,8 +1356,8 @@ mod tests {
         assert!(kick_track_active(kick, 8));
         assert!(kick_track_active(kick, 12));
 
-        // Snare tresillo: 3, 6, 11, 14
-        let snare = &app.drum_pattern.tracks[2];
+        // Snare tresillo: 3, 6, 11, 14 (canonical DrumRack Pad 1)
+        let snare = &app.drum_pattern.tracks[1];
         assert!(snare.steps[3].active);
         assert!(snare.steps[6].active);
         assert!(snare.steps[11].active);
@@ -1456,10 +1480,15 @@ mod tests {
         state.custom_base_url = "https://api.minimax.io/v1".to_string();
         state.api_key = "sk-minimax-test-key-5678".to_string();
 
-        let save_res = state.save_local_api_key();
-        assert!(save_res.is_ok(), "Saving local config must succeed");
+        // Isolated temp path so real ~/.config/oxide-studio/copilot_keys.env is never overwritten
+        let path = std::env::temp_dir().join(format!(
+            "oxide_copilot_keys_test_{}.env",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_file(&path);
 
-        let path = AiCopilotState::local_key_file_path();
+        let save_res = state.save_local_config_to_path(&path);
+        assert!(save_res.is_ok(), "Saving local config must succeed");
         assert!(path.exists(), "Config file must exist on disk");
 
         #[cfg(unix)]
@@ -1474,12 +1503,13 @@ mod tests {
             );
         }
 
-        let (loaded_key, loaded_model, loaded_url) = AiCopilotState::load_local_config();
+        let (loaded_key, loaded_model, loaded_url) = AiCopilotState::load_local_config_from_path(&path);
         assert_eq!(loaded_key, "sk-minimax-test-key-5678");
         assert_eq!(loaded_model, "minimax-m2.7");
         assert_eq!(loaded_url, "https://api.minimax.io/v1");
 
         assert_eq!(state.masked_key_preview(), "sk-m•••5678");
+        let _ = std::fs::remove_file(&path);
     }
 
     #[test]

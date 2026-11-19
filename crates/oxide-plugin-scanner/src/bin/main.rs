@@ -1,7 +1,7 @@
 use std::path::PathBuf;
 use std::time::Duration;
 use oxide_plugin_scanner::{
-    extract_bundle_info, PluginDescriptor, PluginFormat, PluginScannerSupervisor,
+    try_extract_bundle_info, PluginDescriptor, PluginFormat, PluginScannerSupervisor,
 };
 
 fn print_help() {
@@ -81,7 +81,13 @@ fn main() {
             PluginFormat::AudioUnit
         };
 
-        let bundle_info = extract_bundle_info(&path, format);
+        let bundle_info = match try_extract_bundle_info(&path, format) {
+            Ok(info) => info,
+            Err(err) => {
+                eprintln!("Bundle info error: {}", err);
+                std::process::exit(1);
+            }
+        };
         let mtime_secs = std::fs::metadata(&path)
             .and_then(|m| m.modified())
             .ok()

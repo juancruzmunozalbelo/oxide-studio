@@ -91,17 +91,22 @@ fn test_external_als_import_if_configured() {
         "Expected at least one audio clip to have populated AudioClipData.samples"
     );
 
-    // 5. Verify session clips auto-populated for Arrangement-only projects
-    let tracks_with_session_clips = project
+    // 5. Verify arrangement-only tracks do not fabricate synthetic session clips,
+    // and send counts remain bounded (sequential TrackSendHolder indexing <= 32).
+    for track in &project.tracks {
+        assert!(
+            track.mixer.sends_db.len() <= 32,
+            "Track '{}' sends_db len must be <= 32, got {}",
+            track.name,
+            track.mixer.sends_db.len()
+        );
+    }
+    let tracks_with_arrangement = project
         .tracks
         .iter()
-        .filter(|t| !t.session_clips.is_empty())
+        .filter(|t| !t.arrangement_clips.is_empty())
         .count();
-    println!("Tracks with auto-populated session clips: {}", tracks_with_session_clips);
-    assert!(
-        tracks_with_session_clips > 0,
-        "Expected tracks with arrangement clips to auto-populate up to 8 session clips"
-    );
+    assert!(tracks_with_arrangement > 0, "Expected arrangement clips in real-world project");
 }
 
 #[test]
@@ -135,27 +140,48 @@ fn test_synthetic_live12_arrangement_and_linear_volume_import() {
     let xml = r#"<?xml version="1.0" encoding="UTF-8"?>
 <Ableton MajorVersion="5" MinorVersion="12.0_12203" SchemaChangeCount="3" Creator="Ableton Live 12.2.1" Revision="c0d59beb0465cc1bcc75830dbff2b10a48082a7d">
   <LiveSet>
-    <Tempo>
-      <Manual Value="135.0000"/>
-    </Tempo>
-    <MasterTrack Id="0">
+    <MainTrack Id="0">
       <DeviceChain>
         <Mixer>
-          <Volume><Manual Value="0.85"/></Volume>
+          <Tempo><Manual Value="135.0000"/></Tempo>
+          <Volume><Manual Value="1.0"/></Volume>
           <Pan><Manual Value="0.0"/></Pan>
         </Mixer>
       </DeviceChain>
-    </MasterTrack>
+    </MainTrack>
     <Tracks>
       <GroupTrack Id="33">
         <Name><EffectiveName Value="1-Group"/></Name>
+        <TrackGroupId Value="-1"/>
       </GroupTrack>
       <MidiTrack Id="16">
         <Name><EffectiveName Value="7-ADRKT_WTTB4_Synth_10"/></Name>
+        <TrackGroupId Value="33"/>
+        <TakeLanes>
+          <TakeLanes>
+            <TakeLane Id="0">
+              <ClipAutomation>
+                <Events>
+                  <MidiClip Id="901" Time="0">
+                    <CurrentStart Value="0.0"/>
+                    <CurrentEnd Value="4.0"/>
+                    <Name Value="Unused Take Lane"/>
+                  </MidiClip>
+                </Events>
+              </ClipAutomation>
+            </TakeLane>
+          </TakeLanes>
+        </TakeLanes>
         <DeviceChain>
           <Mixer>
-            <Volume><Manual Value="0.85"/></Volume>
+            <Volume><Manual Value="1.0"/></Volume>
             <Pan><Manual Value="-0.2"/></Pan>
+            <On><Manual Value="true"/></On>
+            <Speaker><Manual Value="false"/></Speaker>
+            <Sends>
+              <TrackSendHolder Id="62"><Send><Manual Value="0.00031622776"/></Send></TrackSendHolder>
+              <TrackSendHolder Id="63"><Send><Manual Value="1.0"/></Send></TrackSendHolder>
+            </Sends>
           </Mixer>
           <MainSequencer>
             <ClipSlotList>
@@ -188,6 +214,7 @@ fn test_synthetic_live12_arrangement_and_linear_volume_import() {
       </MidiTrack>
       <AudioTrack Id="27">
         <Name><EffectiveName Value="16-Vocal Hook"/></Name>
+        <TrackGroupId Value="-1"/>
         <DeviceChain>
           <Mixer>
             <Volume><Manual Value="0.0000"/></Volume>
@@ -218,6 +245,13 @@ fn test_synthetic_live12_arrangement_and_linear_volume_import() {
         </DeviceChain>
       </AudioTrack>
     </Tracks>
+    <Scenes>
+      <Scene Id="0">
+        <Name Value="Drop"/>
+        <Tempo Value="180.0"/>
+        <IsTempoEnabled Value="false"/>
+      </Scene>
+    </Scenes>
   </LiveSet>
 </Ableton>
 "#;
@@ -225,13 +259,13 @@ fn test_synthetic_live12_arrangement_and_linear_volume_import() {
     let project = from_als_xml_with_base_dir(xml, Some(&tmp_dir))
         .expect("Synthetic XML with base_dir must parse successfully");
 
-    // 1. Verify tempo
+    // 1. Verify tempo from MainTrack Mixer (not Scene Tempo 180.0)
     assert!((project.transport.bpm - 135.0).abs() < 1e-3);
 
-    // 2. Verify volume conversion (Ableton 0.85 linear -> 0.0 dB)
+    // 2. Verify volume conversion (Ableton Live 12 1.0 linear -> 0.0 dB)
     assert!(
         project.master_track.volume_db.abs() < 0.05,
-        "Master volume 0.85 linear must convert to ~0.0 dB, got {}",
+        "MainTrack volume 1.0 linear must convert to 0.0 dB, got {}",
         project.master_track.volume_db
     );
 
@@ -239,13 +273,19 @@ fn test_synthetic_live12_arrangement_and_linear_volume_import() {
     assert_eq!(project.tracks.len(), 3, "Expected 3 tracks (GroupTrack + MidiTrack + AudioTrack)");
     assert_eq!(project.tracks[0].track_type, oxide_project::TrackType::Group);
     assert_eq!(project.tracks[0].name, "1-Group");
+    assert_eq!(project.tracks[0].group_id, None);
 
-    // 4. Verify MIDI track
+    // 4. Verify MIDI track: MainTrack volume, Speaker mute, sequential sends, group_id, TakeLanes excluded
     let midi_trk = &project.tracks[1];
     assert_eq!(midi_trk.id, 16);
     assert_eq!(midi_trk.name, "7-ADRKT_WTTB4_Synth_10");
+    assert_eq!(midi_trk.group_id, Some(33));
     assert!(midi_trk.mixer.volume_db.abs() < 0.05);
-    assert_eq!(midi_trk.arrangement_clips.len(), 1);
+    assert!(midi_trk.mixer.mute, "Track Speaker=false must mute even when On=true");
+    assert!((midi_trk.mixer.send_a_db - (-70.0)).abs() < 1e-3);
+    assert!(midi_trk.mixer.send_b_db.abs() < 1e-3);
+    assert_eq!(midi_trk.mixer.sends_db.len(), 2, "TrackSendHolder Id=62/63 must index sequentially");
+    assert_eq!(midi_trk.arrangement_clips.len(), 1, "TakeLanes clips must be excluded");
     let arr_mclip = &midi_trk.arrangement_clips[0];
     assert_eq!(arr_mclip.timeline_start_beat, 32.0);
     assert_eq!(arr_mclip.duration_beats, 8.0);
@@ -255,9 +295,8 @@ fn test_synthetic_live12_arrangement_and_linear_volume_import() {
     } else {
         panic!("Expected Midi pattern");
     }
-    // Auto-populated session clips
-    assert_eq!(midi_trk.session_clips.len(), 1);
-    assert!(midi_trk.session_clips[0].is_some());
+    // Arrangement-only track must NOT fabricate synthetic session_clips
+    assert!(midi_trk.session_clips.is_empty());
 
     // 5. Verify Audio track with relative sample resolution
     let audio_trk = &project.tracks[2];
@@ -284,9 +323,41 @@ fn test_synthetic_live12_arrangement_and_linear_volume_import() {
         panic!("Expected Audio pattern");
     }
 
-    // Auto-populated session clips
-    assert_eq!(audio_trk.session_clips.len(), 1);
-    assert!(audio_trk.session_clips[0].is_some());
+    // Arrangement-only track must NOT fabricate synthetic session_clips
+    assert!(audio_trk.session_clips.is_empty());
 
     let _ = fs::remove_dir_all(&tmp_dir);
+}
+
+#[test]
+fn test_master_track_fallback_and_max_gain_import() {
+    let xml = r#"<?xml version="1.0" encoding="UTF-8"?>
+<Ableton MajorVersion="5" MinorVersion="11.0_11000" Creator="Ableton Live 11">
+  <LiveSet>
+    <MasterTrack Id="0">
+      <DeviceChain>
+        <Mixer>
+          <Tempo><Manual Value="124.0"/></Tempo>
+          <Volume><Manual Value="1.99526238"/></Volume>
+        </Mixer>
+      </DeviceChain>
+    </MasterTrack>
+    <Tracks>
+      <AudioTrack Id="4">
+        <Name><EffectiveName Value="Legacy Audio"/></Name>
+        <DeviceChain>
+          <Mixer>
+            <Volume><Manual Value="1.0"/></Volume>
+          </Mixer>
+        </DeviceChain>
+      </AudioTrack>
+    </Tracks>
+  </LiveSet>
+</Ableton>"#;
+
+    let project = DAWProject::from_als_xml(xml).expect("MasterTrack fallback must succeed");
+    assert!((project.transport.bpm - 124.0).abs() < 1e-3);
+    assert!((project.master_track.volume_db - 6.0).abs() < 1e-3);
+    assert_eq!(project.tracks.len(), 1);
+    assert!(project.tracks[0].mixer.volume_db.abs() < 1e-3);
 }

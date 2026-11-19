@@ -237,11 +237,31 @@ impl GroovePool {
         };
 
         let g = template.base.step_duration_beats();
-        let glob = self.global_amount.clamp(0.0, 1.30);
-        let q = template.quantize_amount.clamp(0.0, 1.0);
-        let t_amount = template.timing_amount.clamp(0.0, 2.0);
-        let r_amount = template.random_amount.clamp(0.0, 1.0);
-        let v_amount = template.velocity_amount.clamp(0.0, 2.0);
+        let glob = if self.global_amount.is_finite() {
+            self.global_amount.clamp(0.0, 1.30)
+        } else {
+            1.0
+        };
+        let q = if template.quantize_amount.is_finite() {
+            template.quantize_amount.clamp(0.0, 1.0)
+        } else {
+            0.0
+        };
+        let t_amount = if template.timing_amount.is_finite() {
+            template.timing_amount.clamp(0.0, 2.0)
+        } else {
+            0.0
+        };
+        let r_amount = if template.random_amount.is_finite() {
+            template.random_amount.clamp(0.0, 1.0)
+        } else {
+            0.0
+        };
+        let v_amount = if template.velocity_amount.is_finite() {
+            template.velocity_amount.clamp(0.0, 2.0)
+        } else {
+            0.0
+        };
 
         let mut out = Vec::with_capacity(notes.len());
 
@@ -287,10 +307,26 @@ impl GroovePool {
         };
 
         let g = template.base.step_duration_beats();
-        let glob = self.global_amount.clamp(0.0, 1.30);
-        let q = template.quantize_amount.clamp(0.0, 1.0);
-        let t_amount = template.timing_amount.clamp(0.0, 2.0);
-        let r_amount = template.random_amount.clamp(0.0, 1.0);
+        let glob = if self.global_amount.is_finite() {
+            self.global_amount.clamp(0.0, 1.30)
+        } else {
+            1.0
+        };
+        let q = if template.quantize_amount.is_finite() {
+            template.quantize_amount.clamp(0.0, 1.0)
+        } else {
+            0.0
+        };
+        let t_amount = if template.timing_amount.is_finite() {
+            template.timing_amount.clamp(0.0, 2.0)
+        } else {
+            0.0
+        };
+        let r_amount = if template.random_amount.is_finite() {
+            template.random_amount.clamp(0.0, 1.0)
+        } else {
+            0.0
+        };
 
         let mut out = Vec::with_capacity(markers.len());
 
@@ -316,7 +352,7 @@ impl GroovePool {
         }
 
         // Ensure monotonic sorting by beat
-        out.sort_by(|a, b| a.beat.partial_cmp(&b.beat).unwrap_or(std::cmp::Ordering::Equal));
+        out.sort_by(|a, b| a.beat.total_cmp(&b.beat));
         out
     }
 

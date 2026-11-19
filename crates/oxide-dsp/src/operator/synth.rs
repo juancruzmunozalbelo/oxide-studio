@@ -331,19 +331,25 @@ impl OperatorDevice {
                 continue;
             }
 
-            // Check if carrier envelope is still audible
+            let is_carrier: [bool; NUM_OPERATORS] = match self.algorithm {
+                FmAlgorithm::Alg1
+                | FmAlgorithm::Alg2
+                | FmAlgorithm::Alg3
+                | FmAlgorithm::Alg4
+                | FmAlgorithm::Alg6 => [true, false, false, false],
+                FmAlgorithm::Alg5 => [true, false, true, false],
+                FmAlgorithm::Alg7 | FmAlgorithm::Alg10 => [true, true, true, false],
+                FmAlgorithm::Alg8 | FmAlgorithm::Alg9 => [true, true, false, false],
+                FmAlgorithm::Alg11 => [true, true, true, true],
+            };
+
+            // Advance all 4 operator envelopes and keep voice alive until all active carriers finish
             let env_a = voice.envs[0].next(
                 self.ops[0].adsr.0,
                 self.ops[0].adsr.1,
                 self.ops[0].adsr.2,
                 self.ops[0].adsr.3,
             );
-
-            if !voice.envs[0].is_active() && env_a < 0.0001 {
-                voice.active = false;
-                continue;
-            }
-
             let env_b = voice.envs[1].next(
                 self.ops[1].adsr.0,
                 self.ops[1].adsr.1,
@@ -362,6 +368,15 @@ impl OperatorDevice {
                 self.ops[3].adsr.2,
                 self.ops[3].adsr.3,
             );
+            let envs = [env_a, env_b, env_c, env_d];
+
+            let any_carrier_alive = (0..NUM_OPERATORS).any(|i| {
+                is_carrier[i] && self.ops[i].enabled && (voice.envs[i].is_active() || envs[i] >= 0.0001)
+            });
+            if !any_carrier_alive {
+                voice.active = false;
+                continue;
+            }
 
             // Pitch calculation + pitch envelope
             let mut pitch_mod_semi = 0.0f32;
@@ -399,11 +414,19 @@ impl OperatorDevice {
                 voice.phases[i] = (voice.phases[i] + dts[i]).fract();
             }
 
-            // Calculate operator amplitudes
-            let amp_a = env_a * self.ops[0].level * voice.velocity;
-            let amp_b = env_b * self.ops[1].level;
-            let amp_c = env_c * self.ops[2].level;
-            let amp_d = env_d * self.ops[3].level;
+            // Calculate operator amplitudes (honoring enabled state and velocity across carriers)
+            let op_amp = |idx: usize| -> f32 {
+                if !self.ops[idx].enabled {
+                    0.0
+                } else {
+                    let vel = if is_carrier[idx] { voice.velocity } else { 1.0 };
+                    envs[idx] * self.ops[idx].level * vel
+                }
+            };
+            let amp_a = op_amp(0);
+            let amp_b = op_amp(1);
+            let amp_c = op_amp(2);
+            let amp_d = op_amp(3);
 
             // Operator D Feedback
             let fb_amount = self.feedback_d.clamp(0.0, 1.0) * 2.5;

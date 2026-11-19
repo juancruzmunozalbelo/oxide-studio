@@ -90,8 +90,47 @@ pub struct DrumRackMacroMapping {
     pub range: oxide_core::MacroMappingRange,
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum PadSourceIdentity {
+    Sample {
+        ptr: usize,
+        len: usize,
+        channels: u8,
+        sample_rate: u32,
+    },
+    Synth(SynthDrumType),
+    Simpler {
+        ptr: usize,
+    },
+}
+
+impl PadSourceIdentity {
+    fn from_source(src: &DrumPadSource) -> Self {
+        match src {
+            DrumPadSource::Sample {
+                sample_data,
+                channels,
+                sample_rate,
+            } => Self::Sample {
+                ptr: Arc::as_ptr(sample_data) as *const () as usize,
+                len: sample_data.len(),
+                channels: *channels,
+                sample_rate: *sample_rate,
+            },
+            DrumPadSource::Synth(synth_type) => Self::Synth(*synth_type),
+            DrumPadSource::Simpler(simpler) => Self::Simpler {
+                ptr: simpler.as_ref() as *const crate::simpler::SimplerDevice as usize,
+            },
+        }
+    }
+}
+
 #[derive(Clone, Copy)]
 struct PadSyncState {
+    vis_source: PadSourceIdentity,
+    all_source: PadSourceIdentity,
+    midi_note: u8,
+    use_cubic_interpolation: bool,
     choke_group: Option<u8>,
     volume: f32,
     pan: f32,
@@ -105,16 +144,24 @@ struct PadSyncState {
 
 impl PadSyncState {
     fn from_pad(pad: &DrumPad) -> Self {
+        Self::from_pads(pad, pad)
+    }
+
+    fn from_pads(vis: &DrumPad, all: &DrumPad) -> Self {
         Self {
-            choke_group: pad.choke_group,
-            volume: pad.volume,
-            pan: pad.pan,
-            pitch_semitones: pad.pitch_semitones,
-            decay_seconds: pad.decay_seconds,
-            send_a: pad.send_a,
-            send_b: pad.send_b,
-            solo: pad.solo,
-            mute: pad.mute,
+            vis_source: PadSourceIdentity::from_source(&vis.source),
+            all_source: PadSourceIdentity::from_source(&all.source),
+            midi_note: vis.midi_note,
+            use_cubic_interpolation: vis.use_cubic_interpolation,
+            choke_group: vis.choke_group,
+            volume: vis.volume,
+            pan: vis.pan,
+            pitch_semitones: vis.pitch_semitones,
+            decay_seconds: vis.decay_seconds,
+            send_a: vis.send_a,
+            send_b: vis.send_b,
+            solo: vis.solo,
+            mute: vis.mute,
         }
     }
 }
@@ -180,7 +227,7 @@ impl DrumRack {
         // 1. Initialize Bank A (visible default 16 pads, MIDI notes 36..51)
         let default_bank_a: [DrumPad; NUM_DRUM_PADS] = std::array::from_fn(|i| {
             let choke = match i {
-                6 | 8 | 9 | 10 => Some(1), // Choke Group 1: Hi-Hats
+                8 | 9 => Some(1), // Choke Group 1: Hi-Hats (Closed HH & Open HH only)
                 _ => None,
             };
             let (synth_type, decay) = Self::default_pad_voice(i);
@@ -216,7 +263,7 @@ impl DrumRack {
                 i as u8        // Notes 52..127
             };
             let choke = match i % 16 {
-                6 | 8 | 10 => Some(1),
+                8 | 9 => Some(1),
                 _ => None,
             };
             let (synth_type, decay) = Self::default_pad_voice(i);
@@ -286,7 +333,8 @@ impl DrumRack {
         for i in 0..PADS_PER_BANK {
             if new_start + i < self.all_pads.len() {
                 self.pads[i] = self.all_pads[new_start + i].clone();
-                self.sync_state[i] = PadSyncState::from_pad(&self.pads[i]);
+                self.sync_state[i] =
+                    PadSyncState::from_pads(&self.pads[i], &self.all_pads[new_start + i]);
             }
         }
     }
@@ -297,7 +345,8 @@ impl DrumRack {
         for i in 0..PADS_PER_BANK {
             if start + i < self.all_pads.len() {
                 self.all_pads[start + i] = self.pads[i].clone();
-                self.sync_state[i] = PadSyncState::from_pad(&self.pads[i]);
+                self.sync_state[i] =
+                    PadSyncState::from_pads(&self.pads[i], &self.all_pads[start + i]);
             }
         }
     }
@@ -314,6 +363,30 @@ impl DrumRack {
             let vis = &mut self.pads[i];
             let all = &mut self.all_pads[global_idx];
             let snap = &mut self.sync_state[i];
+
+            let vis_src = PadSourceIdentity::from_source(&vis.source);
+            let all_src = PadSourceIdentity::from_source(&all.source);
+            if vis_src != snap.vis_source {
+                all.source = vis.source.clone();
+            } else if all_src != snap.all_source {
+                vis.source = all.source.clone();
+            }
+            snap.vis_source = PadSourceIdentity::from_source(&vis.source);
+            snap.all_source = PadSourceIdentity::from_source(&all.source);
+
+            if vis.midi_note != snap.midi_note {
+                all.midi_note = vis.midi_note;
+            } else if all.midi_note != snap.midi_note {
+                vis.midi_note = all.midi_note;
+            }
+            snap.midi_note = all.midi_note;
+
+            if vis.use_cubic_interpolation != snap.use_cubic_interpolation {
+                all.use_cubic_interpolation = vis.use_cubic_interpolation;
+            } else if all.use_cubic_interpolation != snap.use_cubic_interpolation {
+                vis.use_cubic_interpolation = all.use_cubic_interpolation;
+            }
+            snap.use_cubic_interpolation = all.use_cubic_interpolation;
 
             if vis.choke_group != snap.choke_group {
                 all.choke_group = vis.choke_group;
@@ -417,6 +490,8 @@ impl DrumRack {
                 channels: decoded.channels as u8,
                 sample_rate: decoded.sample_rate,
             };
+            self.sync_state[pad_idx] =
+                PadSyncState::from_pads(&self.pads[pad_idx], &self.all_pads[all_idx]);
         }
         Ok(())
     }
@@ -430,6 +505,8 @@ impl DrumRack {
         let all_idx = self.active_bank * PADS_PER_BANK + pad_idx;
         if all_idx < self.all_pads.len() {
             self.all_pads[all_idx].load_simpler(simpler);
+            self.sync_state[pad_idx] =
+                PadSyncState::from_pads(&self.pads[pad_idx], &self.all_pads[all_idx]);
         }
         Ok(())
     }
@@ -442,7 +519,10 @@ impl DrumRack {
         self.all_pads[global_idx].load_simpler(simpler.clone());
         let bank_start = self.active_bank * PADS_PER_BANK;
         if global_idx >= bank_start && global_idx < bank_start + PADS_PER_BANK {
-            self.pads[global_idx - bank_start].load_simpler(simpler);
+            let local = global_idx - bank_start;
+            self.pads[local].load_simpler(simpler);
+            self.sync_state[local] =
+                PadSyncState::from_pads(&self.pads[local], &self.all_pads[global_idx]);
         }
         Ok(())
     }
@@ -851,6 +931,9 @@ impl DrumRack {
 
     /// Set macro knob value [0.0..1.0] and immediately propagate to mapped targets.
     pub fn set_macro(&mut self, index: usize, value: f32) {
+        if !value.is_finite() {
+            return;
+        }
         if self.macro_system.set_macro_value(index, value) {
             self.apply_macro_mappings();
         }
@@ -981,8 +1064,12 @@ impl DrumRack {
                 }
             }
         }
+        let bank_start = self.active_bank * PADS_PER_BANK;
         for i in 0..NUM_DRUM_PADS {
-            self.sync_state[i] = PadSyncState::from_pad(&self.pads[i]);
+            let global_idx = bank_start + i;
+            if global_idx < self.all_pads.len() {
+                self.sync_state[i] = PadSyncState::from_pads(&self.pads[i], &self.all_pads[global_idx]);
+            }
         }
     }
 
@@ -1120,6 +1207,9 @@ impl InstrumentDevice for DrumRack {
     }
 
     fn set_parameter(&mut self, param_id: u32, value: f32) {
+        if !value.is_finite() {
+            return;
+        }
         if (param_id as usize) < 16 {
             self.set_macro(param_id as usize, value);
         } else if param_id == 100 {
@@ -1556,5 +1646,31 @@ mod tests {
         rack.pads[0].solo = false;
         rack.trigger_pad(1, 127);
         assert!(rack.voices.iter().any(|v| v.active && v.pad_idx == 1));
+    }
+
+    #[test]
+    fn test_drum_rack_set_parameter_nan_guard_and_source_sync() {
+        let mut rack = DrumRack::new(44100.0);
+        rack.set_parameter(100, 1.35);
+        rack.set_parameter(100, f32::NAN);
+        rack.set_parameter(101, f32::INFINITY);
+        assert!((rack.return_a_level - 1.35).abs() < 1e-6);
+        assert!((rack.return_b_level - 1.0).abs() < 1e-6);
+
+        // Verify Banks B..H choke groups are only Hi-Hat indices 8 and 9
+        assert_eq!(rack.all_pads[16 + 6].choke_group, None);
+        assert_eq!(rack.all_pads[16 + 8].choke_group, Some(1));
+        assert_eq!(rack.all_pads[16 + 9].choke_group, Some(1));
+        assert_eq!(rack.all_pads[16 + 10].choke_group, None);
+
+        // Edit pads[0].source directly -> must sync to all_pads[0]
+        let sample: Arc<[f32]> = Arc::from(vec![0.5f32; 128].into_boxed_slice());
+        rack.pads[0].source = DrumPadSource::Sample {
+            sample_data: sample.clone(),
+            channels: 1,
+            sample_rate: 44100,
+        };
+        rack.sync_visible_pads_to_bank();
+        assert!(matches!(rack.all_pads[0].source, DrumPadSource::Sample { .. }));
     }
 }

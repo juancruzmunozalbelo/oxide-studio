@@ -45,25 +45,31 @@ impl PerNoteExpression {
         Self::default()
     }
 
+    fn insert_sorted(points: &mut Vec<MpeExpressionPoint>, beat_offset: f64, value: f32) {
+        if !beat_offset.is_finite() || !value.is_finite() {
+            return;
+        }
+        let point = MpeExpressionPoint::new(beat_offset, value);
+        let idx = points.partition_point(|p| p.beat_offset <= beat_offset);
+        points.insert(idx, point);
+    }
+
     pub fn add_pressure(&mut self, beat_offset: f64, value: f32) {
-        self.pressure_points.push(MpeExpressionPoint::new(
-            beat_offset,
-            value.clamp(0.0, 1.0),
-        ));
+        if value.is_finite() {
+            Self::insert_sorted(&mut self.pressure_points, beat_offset, value.clamp(0.0, 1.0));
+        }
     }
 
     pub fn add_slide(&mut self, beat_offset: f64, value: f32) {
-        self.slide_points.push(MpeExpressionPoint::new(
-            beat_offset,
-            value.clamp(0.0, 1.0),
-        ));
+        if value.is_finite() {
+            Self::insert_sorted(&mut self.slide_points, beat_offset, value.clamp(0.0, 1.0));
+        }
     }
 
     pub fn add_pitch_bend(&mut self, beat_offset: f64, semitones: f32) {
-        self.pitch_bend_points.push(MpeExpressionPoint::new(
-            beat_offset,
-            semitones.clamp(-48.0, 48.0),
-        ));
+        if semitones.is_finite() {
+            Self::insert_sorted(&mut self.pitch_bend_points, beat_offset, semitones.clamp(-48.0, 48.0));
+        }
     }
 
     fn interpolate_points(points: &[MpeExpressionPoint], beat_offset: f64, default_val: f32) -> f32 {
@@ -362,5 +368,15 @@ mod tests {
         let slide64 = note64.expression.evaluate_slide_at(0.5);
         assert!(press60 > 0.7, "Note 60 must have pressure, got {}", press60);
         assert!(slide64 > 0.8, "Note 64 must have slide, got {}", slide64);
+    }
+
+    #[test]
+    fn test_per_note_expression_maintains_sorted_order_on_out_of_order_insert() {
+        let mut expr = PerNoteExpression::new();
+        expr.add_pressure(2.0, 1.0);
+        expr.add_pressure(0.0, 0.0);
+        expr.add_pressure(1.0, 0.5);
+        assert!((expr.evaluate_pressure_at(0.5) - 0.25).abs() < 1e-4);
+        assert!((expr.evaluate_pressure_at(1.5) - 0.75).abs() < 1e-4);
     }
 }

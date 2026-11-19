@@ -189,15 +189,13 @@ impl ComputerKeyboardController {
                         modifiers,
                         ..
                     } => {
-                        // Octave transposition hotkeys in Piano mode
-                        if self.mode == KeyboardMode::Piano && !modifiers.command {
-                            if *key == Key::Z {
-                                self.transpose_octave(-1);
-                                continue;
-                            } else if *key == Key::X {
-                                self.transpose_octave(1);
-                                continue;
-                            }
+                        // Z/X (Octave) and S (Solo) are owned by StudioShortcutManager to prevent double-binding.
+                        if !modifiers.command
+                            && !modifiers.alt
+                            && !modifiers.shift
+                            && matches!(key, Key::Z | Key::X | Key::S)
+                        {
+                            continue;
                         }
 
                         if let Some(note) = self.key_to_midi(*key) {

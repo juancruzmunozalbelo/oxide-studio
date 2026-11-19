@@ -212,12 +212,19 @@ impl RoarStage {
         let sat_l = Self::process_sample_adaa(self.curve, in_l, &mut self.last_x_l);
         let sat_r = Self::process_sample_adaa(self.curve, in_r, &mut self.last_x_r);
 
-        // Simple 1-pole tilt tone filter
-        let alpha = (self.tone * 0.4).clamp(-0.8, 0.8);
-        self.tone_state_l = (1.0 - alpha.abs()) * sat_l + alpha * self.tone_state_l;
-        self.tone_state_r = (1.0 - alpha.abs()) * sat_r + alpha * self.tone_state_r;
-
-        (self.tone_state_l, self.tone_state_r)
+        // 1-pole crossover tilt tone filter: -1.0 = dark lowpass, 0.0 = flat, +1.0 = bright high emphasis
+        self.tone_state_l = 0.25 * sat_l + 0.75 * self.tone_state_l;
+        self.tone_state_r = 0.25 * sat_r + 0.75 * self.tone_state_r;
+        let t = self.tone.clamp(-1.0, 1.0);
+        if t < 0.0 {
+            let dark_l = sat_l * (1.0 + t) + self.tone_state_l * (-t);
+            let dark_r = sat_r * (1.0 + t) + self.tone_state_r * (-t);
+            (dark_l, dark_r)
+        } else {
+            let bright_l = sat_l + (sat_l - self.tone_state_l) * t;
+            let bright_r = sat_r + (sat_r - self.tone_state_r) * t;
+            (bright_l, bright_r)
+        }
     }
 }
 

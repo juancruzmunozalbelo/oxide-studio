@@ -34,10 +34,22 @@ impl DemoArrangementRenderer {
     /// Renders a multi-track electronic arrangement combining Mystran ZDF synth sequence
     /// and 909 drums through master limiter into stereo interleaved f32 audio samples.
     pub fn render_demo_seconds(&self, duration_seconds: f64) -> Vec<f32> {
-        let total_frames = (duration_seconds * self.sample_rate as f64).ceil() as usize;
+        self.render_demo_window(0.0, duration_seconds)
+    }
+
+    /// Renders a windowed slice of the demo arrangement starting at `start_beat_offset`.
+    pub fn render_demo_window(&self, start_beat_offset: f64, duration_seconds: f64) -> Vec<f32> {
+        let window_frames = (duration_seconds.max(0.0) * self.sample_rate as f64).ceil() as usize;
+        let offset_beats = if start_beat_offset.is_finite() {
+            start_beat_offset.max(0.0)
+        } else {
+            0.0
+        };
+        let offset_frames = ((offset_beats * (60.0 / self.bpm)) * self.sample_rate as f64).round() as usize;
+        let total_render_frames = offset_frames.saturating_add(window_frames);
 
         let seconds_per_beat = 60.0 / self.bpm;
-        let frames_per_beat = (seconds_per_beat * self.sample_rate as f64) as usize;
+        let frames_per_beat = ((seconds_per_beat * self.sample_rate as f64) as usize).max(1);
         let frames_per_16th = (frames_per_beat / 4).max(1);
 
         // 1. Construct genuine SynthEngine
@@ -53,12 +65,12 @@ impl DemoArrangementRenderer {
             synth.set_parameter("amplitude_envelope_sustain", 0.1);
         }
 
-        // 2. Construct genuine DrumRack
+        // 2. Construct genuine DrumRack (falls back to built-in synthesized 909 pads if WAV assets aren't present)
         let mut drum_rack = DrumRack::new(self.sample_rate);
-        if Path::new("/Users/juancruz/ableton-rust/assets/kick.wav").exists() {
-            drum_rack.load_default_909_samples("/Users/juancruz/ableton-rust/assets");
-        } else if Path::new("/Users/juancruz/ableton-rea/public/sounds/kick.wav").exists() {
-            drum_rack.load_default_909_samples("/Users/juancruz/ableton-rea/public/sounds");
+        if let Some(assets_dir) = resolve_909_assets_dir() {
+            if let Some(dir_str) = assets_dir.to_str() {
+                drum_rack.load_default_909_samples(dir_str);
+            }
         }
 
         // 3. Construct genuine MasterLimiter
@@ -68,15 +80,16 @@ impl DemoArrangementRenderer {
 
         const BLOCK_SIZE: usize = 128;
         let mut frame = 0;
-        let mut interleaved = Vec::with_capacity(total_frames * 2);
+        let mut interleaved = Vec::with_capacity(window_frames * 2);
 
         let mut block_left = [0.0f32; BLOCK_SIZE];
         let mut block_right = [0.0f32; BLOCK_SIZE];
         let mut drum_l = [0.0f32; BLOCK_SIZE];
         let mut drum_r = [0.0f32; BLOCK_SIZE];
+        let sweep_denom = window_frames.max(1) as f32;
 
-        while frame < total_frames {
-            let current_block_len = (total_frames - frame).min(BLOCK_SIZE);
+        while frame < total_render_frames {
+            let current_block_len = (total_render_frames - frame).min(BLOCK_SIZE);
 
             drum_l[..current_block_len].fill(0.0);
             drum_r[..current_block_len].fill(0.0);
@@ -97,7 +110,7 @@ impl DemoArrangementRenderer {
                 }
 
                 // Dynamic filter modulation sweep across the arrangement
-                let progress = f as f32 / total_frames as f32;
+                let progress = (f as f32 / sweep_denom).fract();
                 let sweep_x = 0.15 + 0.70 * (progress * 2.0 * PI).sin().abs();
                 synth.set_macro_x(sweep_x);
                 synth.set_macro_y(0.25 + 0.50 * progress);
@@ -152,16 +165,53 @@ impl DemoArrangementRenderer {
                 &mut block_right[..current_block_len],
             );
 
-            // Interleave stereo f32 samples
+            // Interleave stereo f32 samples once past start_beat_offset
             for b in 0..current_block_len {
-                interleaved.push(block_left[b]);
-                interleaved.push(block_right[b]);
+                let f = frame + b;
+                if f >= offset_frames {
+                    interleaved.push(block_left[b]);
+                    interleaved.push(block_right[b]);
+                }
             }
 
             frame += current_block_len;
         }
 
         interleaved
+    }
+}
+
+fn resolve_909_assets_dir() -> Option<std::path::PathBuf> {
+    let manifest_assets = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../assets");
+    let candidates = [
+        std::path::PathBuf::from("assets"),
+        std::path::PathBuf::from("../assets"),
+        std::path::PathBuf::from("../../assets"),
+        manifest_assets,
+        std::path::PathBuf::from("public/sounds"),
+        std::path::PathBuf::from("../public/sounds"),
+    ];
+    candidates.into_iter().find(|dir| dir.join("kick.wav").exists())
+}
+
+fn compute_project_duration_seconds(project: &DAWProject, bpm: f64) -> f64 {
+    let mut max_beat = 0.0f64;
+    for track in &project.tracks {
+        for clip in &track.arrangement_clips {
+            let end = clip.timeline_end_beat();
+            if end > max_beat {
+                max_beat = end;
+            }
+        }
+    }
+
+    if max_beat > 0.0 {
+        (max_beat * 60.0 / bpm).clamp(4.0, 3600.0)
+    } else if project.transport.loop_enabled && project.transport.loop_end_beat > 0.0 {
+        ((project.transport.loop_end_beat - project.transport.loop_start_beat) * 60.0 / bpm)
+            .clamp(4.0, 3600.0)
+    } else {
+        4.0
     }
 }
 
@@ -177,24 +227,7 @@ pub fn render_project_to_wav(
         project.transport.bpm
     };
 
-    let mut max_beat = 0.0f64;
-    for track in &project.tracks {
-        for clip in &track.arrangement_clips {
-            let end = clip.timeline_end_beat();
-            if end > max_beat {
-                max_beat = end;
-            }
-        }
-    }
-
-    let duration_seconds = if max_beat > 0.0 {
-        (max_beat * 60.0 / bpm).clamp(4.0, 120.0)
-    } else if project.transport.loop_enabled && project.transport.loop_end_beat > 0.0 {
-        ((project.transport.loop_end_beat - project.transport.loop_start_beat) * 60.0 / bpm).clamp(4.0, 120.0)
-    } else {
-        4.0
-    };
-
+    let duration_seconds = compute_project_duration_seconds(project, bpm);
     render_project_window_to_wav(project, out_path, 0.0, duration_seconds, 16)
 }
 
@@ -212,14 +245,14 @@ pub fn render_project_window_to_wav(
     } else {
         project.transport.bpm
     };
-    let duration_seconds = duration_seconds.clamp(0.5, 300.0);
+    let duration_seconds = duration_seconds.clamp(0.5, 3600.0);
     let total_frames = (duration_seconds * sample_rate as f64).ceil() as usize;
 
     let (master_l, master_r) = if project.tracks.is_empty() {
         let mut ml = vec![0.0f32; total_frames];
         let mut mr = vec![0.0f32; total_frames];
         let renderer = DemoArrangementRenderer::new(sample_rate, bpm);
-        let interleaved = renderer.render_demo_seconds(duration_seconds);
+        let interleaved = renderer.render_demo_window(start_beat_offset, duration_seconds);
         let frames = interleaved.len() / 2;
         for i in 0..frames.min(total_frames) {
             ml[i] = interleaved[i * 2];
@@ -320,5 +353,29 @@ mod tests {
         assert!(rms > 0.05, "RMS must be > 0.05 from audio samples, got {}", rms);
 
         let _ = std::fs::remove_file(tmp_wav);
+    }
+
+    #[test]
+    fn test_demo_window_respects_start_beat_offset_and_long_duration_limit() {
+        let project = DAWProject::new("Empty Demo Window");
+        let w0 = render_project_window_to_wav(&project, "", 0.0, 0.5, 16).unwrap();
+        let w2 = render_project_window_to_wav(&project, "", 2.0, 0.5, 16).unwrap();
+        assert_eq!(w0.len(), w2.len());
+        let diff: f32 = w0.iter().zip(w2.iter()).map(|(a, b)| (a - b).abs()).sum();
+        assert!(diff > 1.0, "Empty-project demo render must differ at beat offset 2.0 vs 0.0");
+
+        let mut long_proj = DAWProject::new("Long Arrangement");
+        long_proj.transport.bpm = 120.0;
+        let mut trk = TrackDefinition::new_synth(1, "Long Synth");
+        trk.arrangement_clips.push(ArrangementClip::new(
+            1,
+            "10min",
+            0.0,
+            600.0, // 300s at 120 BPM (> 120s old truncation limit)
+            ClipPattern::Midi(oxide_timeline::MidiPattern::new(4.0)),
+        ));
+        long_proj.tracks.push(trk);
+        let dur = compute_project_duration_seconds(&long_proj, 120.0);
+        assert!((dur - 300.0).abs() < 1e-6, "Expected 300.0s, got {}", dur);
     }
 }

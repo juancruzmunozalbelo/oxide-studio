@@ -46,6 +46,7 @@ pub enum StudioShortcutAction {
     VelocityDown,               // C
     VelocityUp,                 // V
     ToggleShortcutsModal,       // ? or F1
+    ToggleAiCopilot,            // F12
     ToggleMidiMapMode,          // Cmd+M
     ToggleKeyMapMode,           // Cmd+K
 }
@@ -73,9 +74,12 @@ impl StudioShortcutManager {
             let shift = i.modifiers.shift;
             let alt = i.modifiers.alt;
 
-            // 1. Shortcuts modal overlay (? or F1)
+            // 1. Shortcuts modal overlay (? or F1) & AI Copilot drawer (F12)
             if i.key_pressed(Key::F1) || (shift && i.key_pressed(Key::Slash)) {
                 actions.push(StudioShortcutAction::ToggleShortcutsModal);
+            }
+            if i.key_pressed(Key::F12) {
+                actions.push(StudioShortcutAction::ToggleAiCopilot);
             }
 
             // 2. Tab key combinations
@@ -213,6 +217,7 @@ impl StudioShortcutManager {
                             ("Z / X", "Octave Down / Up (-3..+3)"),
                             ("C / V", "Velocity Down / Up (-/+ 10)"),
                             ("? / F1", "Toggle this Shortcuts Guide"),
+                            ("F12", "Toggle Oxide AI Copilot Drawer"),
                         ];
 
                         for (key, desc) in rows {
@@ -242,6 +247,9 @@ impl StudioShortcutManager {
 
         if key == Key::F1 || (shift && key == Key::Slash) {
             return Some(StudioShortcutAction::ToggleShortcutsModal);
+        }
+        if key == Key::F12 {
+            return Some(StudioShortcutAction::ToggleAiCopilot);
         }
 
         if key == Key::Tab {
@@ -426,6 +434,10 @@ mod tests {
         assert_eq!(
             StudioShortcutManager::evaluate_shortcut(Key::F1, none),
             Some(StudioShortcutAction::ToggleShortcutsModal)
+        );
+        assert_eq!(
+            StudioShortcutManager::evaluate_shortcut(Key::F12, none),
+            Some(StudioShortcutAction::ToggleAiCopilot)
         );
         assert_eq!(
             StudioShortcutManager::evaluate_shortcut(Key::Slash, Modifiers::SHIFT),

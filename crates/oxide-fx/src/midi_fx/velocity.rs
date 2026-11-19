@@ -48,7 +48,12 @@ impl Velocity {
         };
 
         let raw = (scaled * 127.0) as i16 + jitter;
-        raw.clamp(self.min_velocity as i16, self.max_velocity as i16) as u8
+        let (lo, hi) = if self.min_velocity <= self.max_velocity {
+            (self.min_velocity as i16, self.max_velocity as i16)
+        } else {
+            (self.max_velocity as i16, self.min_velocity as i16)
+        };
+        raw.clamp(lo, hi) as u8
     }
 }
 

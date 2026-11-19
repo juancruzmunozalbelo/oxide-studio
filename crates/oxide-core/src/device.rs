@@ -102,6 +102,8 @@ pub struct DeviceChain {
     pub midi_effects: Vec<Box<dyn MidiEffectDevice>>,
     pub instrument: Option<Box<dyn InstrumentDevice>>,
     pub audio_effects: Vec<Box<dyn AudioEffectDevice>>,
+    midi_scratch_a: Vec<MidiEvent>,
+    midi_scratch_b: Vec<MidiEvent>,
 }
 
 impl DeviceChain {
@@ -113,6 +115,8 @@ impl DeviceChain {
             midi_effects: Vec::new(),
             instrument: None,
             audio_effects: Vec::new(),
+            midi_scratch_a: Vec::with_capacity(64),
+            midi_scratch_b: Vec::with_capacity(64),
         }
     }
 
@@ -124,6 +128,8 @@ impl DeviceChain {
             midi_effects: Vec::new(),
             instrument: None,
             audio_effects: Vec::new(),
+            midi_scratch_a: Vec::with_capacity(64),
+            midi_scratch_b: Vec::with_capacity(64),
         }
     }
 
@@ -295,20 +301,34 @@ impl DeviceChain {
             return;
         }
 
-        // Stage 1: MIDI Effects
-        let mut current_midi: Vec<MidiEvent> = midi_in.to_vec();
+        // Stage 1: MIDI Effects (ping-pong between pre-allocated scratch buffers)
+        self.midi_scratch_a.clear();
+        self.midi_scratch_a.extend_from_slice(midi_in);
+
+        let mut use_a_as_input = true;
         for mfx in &mut self.midi_effects {
             if mfx.is_enabled() {
-                let mut next_midi = Vec::new();
-                mfx.process_midi(&current_midi, &mut next_midi, time);
-                current_midi = next_midi;
+                if use_a_as_input {
+                    self.midi_scratch_b.clear();
+                    mfx.process_midi(&self.midi_scratch_a, &mut self.midi_scratch_b, time);
+                } else {
+                    self.midi_scratch_a.clear();
+                    mfx.process_midi(&self.midi_scratch_b, &mut self.midi_scratch_a, time);
+                }
+                use_a_as_input = !use_a_as_input;
             }
         }
+
+        let current_midi = if use_a_as_input {
+            &self.midi_scratch_a
+        } else {
+            &self.midi_scratch_b
+        };
 
         // Stage 2: Instrument
         if let Some(ref mut inst) = self.instrument {
             if inst.is_enabled() {
-                inst.process(&current_midi, audio_buffer, time);
+                inst.process(current_midi, audio_buffer, time);
             }
         }
 

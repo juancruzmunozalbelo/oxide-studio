@@ -439,6 +439,9 @@ impl AutomationLane {
 
     /// Insert or update an automation point, maintaining chronological order.
     pub fn add_point(&mut self, point: AutomationPoint) {
+        if !point.beat.is_finite() || !point.value_norm.is_finite() {
+            return;
+        }
         let eps = 1e-5;
         // Check if an existing point matches beat within epsilon
         if let Some(existing) = self.points.iter_mut().find(|p| (p.beat - point.beat).abs() < eps) {
@@ -572,22 +575,30 @@ impl AutomationLane {
 
     /// Draw freehand automation points and simplify using Ramer-Douglas-Peucker algorithm.
     pub fn draw_freehand(&mut self, raw_points: &[(f64, f32)], tolerance: f32) {
-        if raw_points.is_empty() {
+        let mut pts: Vec<(f64, f32)> = raw_points
+            .iter()
+            .copied()
+            .filter(|(b, v)| b.is_finite() && v.is_finite())
+            .collect();
+        if pts.is_empty() {
             return;
         }
-        if raw_points.len() == 1 {
-            self.add_point(AutomationPoint::linear(raw_points[0].0, raw_points[0].1));
+        if pts.len() == 1 {
+            self.add_point(AutomationPoint::linear(pts[0].0, pts[0].1.clamp(0.0, 1.0)));
             return;
         }
 
-        let start_beat = raw_points.first().unwrap().0;
-        let end_beat = raw_points.last().unwrap().0;
+        // Handle right-to-left drawing strokes by sorting chronologically before range retention and RDP
+        pts.sort_by(|a, b| a.0.total_cmp(&b.0));
+        let min_beat = pts.first().unwrap().0;
+        let max_beat = pts.last().unwrap().0;
 
-        self.points.retain(|p| p.beat < start_beat - 1e-5 || p.beat > end_beat + 1e-5);
+        self.points.retain(|p| p.beat < min_beat - 1e-5 || p.beat > max_beat + 1e-5);
 
-        let thinned = simplify_points_rdp(raw_points, tolerance);
+        let tol = if tolerance.is_finite() { tolerance.max(0.0) } else { 0.0 };
+        let thinned = simplify_points_rdp(&pts, tol);
         for (beat, val) in thinned {
-            self.add_point(AutomationPoint::linear(beat, val));
+            self.add_point(AutomationPoint::linear(beat, val.clamp(0.0, 1.0)));
         }
     }
 
@@ -1081,5 +1092,14 @@ mod tests {
         let removed = lane.remove_point_at(0);
         assert_eq!(removed.unwrap().beat, 0.0);
         assert_eq!(lane.len(), 5);
+    }
+
+    #[test]
+    fn test_draw_freehand_right_to_left_handles_reversed_stroke() {
+        let mut lane = AutomationLane::new(1, "vol");
+        lane.add_point(AutomationPoint::linear(4.0, 0.1));
+        lane.draw_freehand(&[(8.0, 1.0), (5.0, 0.5), (2.0, 0.0)], 0.0);
+        assert!(lane.points.windows(2).all(|w| w[0].beat <= w[1].beat));
+        assert!((lane.interpolate_at(5.0, 0.0) - 0.5).abs() < 1e-4);
     }
 }

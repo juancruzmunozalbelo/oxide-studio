@@ -70,11 +70,13 @@ pub struct ClipViewState {
     pub selected_note_idx: Option<usize>,
 
     // Live 12 dynamic bar span and pitch navigation
+    pub bpm: f64,
     pub loop_length_bars: usize, // 1, 2, 4, 8 Bars
     pub pitch_scroll_offset: i32,
     pub note_drag_state: Option<NoteDragState>,
     pub audition_pitch: Option<u8>,
     pub last_audition_note: Option<(u8, u8)>, // (pitch, velocity)
+    pub last_audition_note_off: Option<u8>,
 
     // Transform parameters
     pub quantize_grid: f64, // 1.0 (1/4), 0.5 (1/8), 0.25 (1/16), 0.125 (1/32)
@@ -116,11 +118,13 @@ impl Default for ClipViewState {
             sub_tab: ClipViewSubTab::Notes,
             scale_folded: true,
             selected_note_idx: None,
+            bpm: 120.0,
             loop_length_bars: 4,
             pitch_scroll_offset: 0,
             note_drag_state: None,
             audition_pitch: None,
             last_audition_note: None,
+            last_audition_note_off: None,
             quantize_grid: 0.25,
             quantize_amount: 1.0,
             strum_spread_ms: 25.0,
@@ -164,8 +168,40 @@ pub struct ClipViewAction {
     pub transpose_changed: Option<i8>,
     pub warp_marker_moved: bool,
     pub audition_note: Option<(u8, u8)>, // (pitch, velocity)
+    pub audition_note_off: Option<u8>,
     pub loop_length_changed: Option<f64>,
     pub envelope_mutated: bool,
+}
+
+fn scale_lock_from_global(global_scale: &GlobalScale) -> oxide_timeline::generate::ScaleLock {
+    oxide_timeline::generate::ScaleLock {
+        root: global_scale.root % 12,
+        degree_mask: global_scale.mode.degree_mask(),
+    }
+}
+
+fn generate_stacks_for_mode(
+    roots: &[u8],
+    stacks_chord_type: usize,
+) -> MidiPattern {
+    let chord_type = match stacks_chord_type {
+        0 => StacksChordType::MajorTriad,
+        1 => StacksChordType::Min7,
+        _ => StacksChordType::Dom7,
+    };
+    let mut pattern = generate_stacks(roots, chord_type, StacksVoicing::Closed, 0, 1.0, 105);
+    if stacks_chord_type == 2 {
+        for (idx, &root) in roots.iter().enumerate() {
+            let ninth_pitch = (root as u16 + 14).min(127) as u8;
+            pattern.notes.push(MidiNote::new(
+                ninth_pitch,
+                105,
+                idx as f64,
+                1.0,
+            ));
+        }
+    }
+    pattern
 }
 
 /// Ableton Live 12 Side-by-Side Clip View: Left Inspector (~220px) + Right Canvas.
@@ -182,6 +218,7 @@ pub fn render_clip_view(
         transpose_changed: None,
         warp_marker_moved: false,
         audition_note: None,
+        audition_note_off: None,
         loop_length_changed: None,
         envelope_mutated: false,
     };
@@ -230,6 +267,9 @@ pub fn render_clip_view(
                                 current_beat,
                             ) {
                                 action.pattern_mutated = true;
+                            }
+                            if let Some(audition_off) = state.last_audition_note_off.take() {
+                                action.audition_note_off = Some(audition_off);
                             }
                             if let Some(audition) = state.last_audition_note.take() {
                                 action.audition_note = Some(audition);
@@ -403,7 +443,7 @@ pub fn render_clip_inspector(
                     state.strum_direction_up = !state.strum_direction_up;
                 }
                 if ui.add(Button::new(RichText::new("Apply").size(row_font_size).color(COLOR_CYAN))).clicked() {
-                    let spread_beats = (state.strum_spread_ms / 1000.0) * (124.0 / 60.0);
+                    let spread_beats = (state.strum_spread_ms / 1000.0) * (state.bpm.max(20.0) as f32 / 60.0);
                     let dir = if state.strum_direction_up {
                         StrumDirection::Up
                     } else {
@@ -417,7 +457,7 @@ pub fn render_clip_inspector(
             // 3. Connect & Ornament & Recombine
             ui.horizontal(|ui| {
                 if ui.add(Button::new(RichText::new("Connect").size(row_font_size).color(COLOR_CYAN))).clicked() {
-                    let sl = oxide_timeline::generate::ScaleLock::dorian(global_scale.root);
+                    let sl = scale_lock_from_global(global_scale);
                     transform_connect(midi_pattern, sl, 0.5);
                     action.pattern_mutated = true;
                 }
@@ -471,7 +511,7 @@ pub fn render_clip_inspector(
                 ui.label(RichText::new("Density:").size(row_font_size).color(COLOR_TEXT_MUTED));
                 ui.add(Slider::new(&mut state.seed_density, 0.1..=1.0).show_value(false));
                 if ui.add(Button::new(RichText::new("Seed").size(row_font_size).color(COLOR_GREEN))).clicked() {
-                    let sl = oxide_timeline::generate::ScaleLock::dorian(global_scale.root);
+                    let sl = scale_lock_from_global(global_scale);
                     let span_beats = (state.loop_length_bars * 4) as f64;
                     *midi_pattern = generate_seed(span_beats, 0.25, state.seed_density, state.seed_min_pitch, state.seed_max_pitch, 80, 115, 0.2, 0.2, Some(sl), 42);
                     action.pattern_mutated = true;
@@ -492,13 +532,8 @@ pub fn render_clip_inspector(
                     }
                 }
                 if ui.add(Button::new(RichText::new("Apply").size(row_font_size).color(COLOR_GREEN))).clicked() {
-                    let chord_type = match state.stacks_chord_type {
-                        0 => StacksChordType::MajorTriad,
-                        1 => StacksChordType::Min7,
-                        _ => StacksChordType::Dom7,
-                    };
                     let roots = [41, 44, 46, 48];
-                    *midi_pattern = generate_stacks(&roots, chord_type, StacksVoicing::Closed, 0, 1.0, 105);
+                    *midi_pattern = generate_stacks_for_mode(&roots, state.stacks_chord_type);
                     action.pattern_mutated = true;
                 }
             });
@@ -1072,13 +1107,22 @@ pub fn render_interactive_piano_roll(
                 let r = ((pos.y - grid_top) / row_h).floor().clamp(0.0, (pitches.len() - 1) as f32) as usize;
                 if r < pitches.len() {
                     let pitch = pitches[r];
+                    if let Some(prev) = state.audition_pitch {
+                        if prev != pitch {
+                            state.last_audition_note_off = Some(prev);
+                            state.last_audition_note = Some((pitch, 100));
+                        }
+                    } else {
+                        state.last_audition_note = Some((pitch, 100));
+                    }
                     state.audition_pitch = Some(pitch);
-                    state.last_audition_note = Some((pitch, 100));
                 }
             }
         }
         if !response.is_pointer_button_down_on() && !response.dragged() {
-            state.audition_pitch = None;
+            if let Some(prev) = state.audition_pitch.take() {
+                state.last_audition_note_off = Some(prev);
+            }
         }
 
         // --- 6. Direct Note Manipulation (Move & Resize) Engine ---
@@ -1656,6 +1700,7 @@ mod tests {
             transpose_changed: None,
             warp_marker_moved: false,
             audition_note: state.last_audition_note.take(),
+            audition_note_off: None,
             loop_length_changed: None,
             envelope_mutated: false,
         };
@@ -1857,5 +1902,18 @@ mod tests {
                 assert!(!action.pattern_mutated);
             });
         });
+    }
+
+    #[test]
+    fn test_clip_view_global_scale_and_9th_chords() {
+        let harmonic = GlobalScale::new(9, oxide_core::ScaleMode::HarmonicMinor).with_lock(true);
+        let sl = scale_lock_from_global(&harmonic);
+        assert_eq!(sl.root, 9);
+        assert_eq!(sl.degree_mask, harmonic.mode.degree_mask());
+
+        let roots = [41, 44, 46, 48];
+        let pat = generate_stacks_for_mode(&roots, 2);
+        assert_eq!(pat.notes.len(), 20, "9th chords should emit 5 voices per chord (4 * 5 = 20)");
+        assert!(pat.notes.iter().any(|n| n.pitch == 55)); // 41 + 14
     }
 }

@@ -158,6 +158,9 @@ impl ArrangementTrack {
     /// The second clip starts at `split_beat` with the remaining duration and adjusted pattern offset.
     /// Returns `true` if an active clip was split.
     pub fn split_clip_at(&mut self, split_beat: f64, new_clip_id: u32) -> bool {
+        if !split_beat.is_finite() {
+            return false;
+        }
         let mut split_clip = None;
         for clip in self.clips.iter_mut() {
             if clip.timeline_start_beat < split_beat && clip.timeline_end_beat() > split_beat {
@@ -197,7 +200,7 @@ impl ArrangementTrack {
         consolidated_id: u32,
         new_name: impl Into<String>,
     ) -> Option<ArrangementClip> {
-        if end_beat <= start_beat {
+        if !start_beat.is_finite() || !end_beat.is_finite() || end_beat <= start_beat {
             return None;
         }
         let duration = end_beat - start_beat;

@@ -28,7 +28,7 @@ pub fn transform_arpeggiate(
     }
 
     // Group notes by approximate start_beat
-    pattern.notes.sort_by(|a, b| a.start_beat.partial_cmp(&b.start_beat).unwrap());
+    pattern.notes.sort_by(|a, b| a.start_beat.total_cmp(&b.start_beat));
 
     let mut new_notes = Vec::new();
     let mut i = 0;
@@ -69,7 +69,7 @@ pub fn transform_connect(
         return;
     }
 
-    pattern.notes.sort_by(|a, b| a.start_beat.partial_cmp(&b.start_beat).unwrap());
+    pattern.notes.sort_by(|a, b| a.start_beat.total_cmp(&b.start_beat));
     let mut passing_notes = Vec::new();
 
     for i in 0..pattern.notes.len() - 1 {
@@ -95,7 +95,7 @@ pub fn transform_connect(
     }
 
     pattern.notes.extend(passing_notes);
-    pattern.notes.sort_by(|a, b| a.start_beat.partial_cmp(&b.start_beat).unwrap());
+    pattern.notes.sort_by(|a, b| a.start_beat.total_cmp(&b.start_beat));
 }
 
 /// 3. Ornament: Adds flams or grace notes preceding note onsets.
@@ -122,7 +122,7 @@ pub fn transform_ornament(
     }
 
     pattern.notes.extend(ornaments);
-    pattern.notes.sort_by(|a, b| a.start_beat.partial_cmp(&b.start_beat).unwrap());
+    pattern.notes.sort_by(|a, b| a.start_beat.total_cmp(&b.start_beat));
 }
 
 /// 4. Quantize: Snaps note start_beat and duration to a metric grid with strength & swing.
@@ -194,7 +194,7 @@ pub fn transform_span(pattern: &mut MidiPattern, mode: SpanMode, grid_beats: f64
         return;
     }
 
-    pattern.notes.sort_by(|a, b| a.start_beat.partial_cmp(&b.start_beat).unwrap());
+    pattern.notes.sort_by(|a, b| a.start_beat.total_cmp(&b.start_beat));
     let len = pattern.notes.len();
 
     match mode {
@@ -236,7 +236,7 @@ pub fn transform_strum(
         return;
     }
 
-    pattern.notes.sort_by(|a, b| a.start_beat.partial_cmp(&b.start_beat).unwrap());
+    pattern.notes.sort_by(|a, b| a.start_beat.total_cmp(&b.start_beat));
 
     let mut i = 0;
     while i < pattern.notes.len() {
@@ -270,7 +270,7 @@ pub fn transform_time_warp(pattern: &mut MidiPattern, exponent: f64) {
         return;
     }
 
-    pattern.notes.sort_by(|a, b| a.start_beat.partial_cmp(&b.start_beat).unwrap());
+    pattern.notes.sort_by(|a, b| a.start_beat.total_cmp(&b.start_beat));
     let t_start = pattern.notes.first().unwrap().start_beat;
     let t_end = pattern.notes.last().unwrap().start_beat;
     let span = t_end - t_start;
@@ -323,7 +323,7 @@ pub fn transform_reverse(pattern: &mut MidiPattern) {
         let new_start = (total_len - (note.start_beat + note.duration_beats)).max(0.0);
         note.start_beat = new_start;
     }
-    pattern.notes.sort_by(|a, b| a.start_beat.partial_cmp(&b.start_beat).unwrap());
+    pattern.notes.sort_by(|a, b| a.start_beat.total_cmp(&b.start_beat));
 }
 
 /// 11. Legato: Extends note durations so that each note rings until the next note onset (or pattern end).
@@ -331,7 +331,7 @@ pub fn transform_legato(pattern: &mut MidiPattern) {
     if pattern.notes.is_empty() {
         return;
     }
-    pattern.notes.sort_by(|a, b| a.start_beat.partial_cmp(&b.start_beat).unwrap());
+    pattern.notes.sort_by(|a, b| a.start_beat.total_cmp(&b.start_beat));
     let len = pattern.notes.len();
     for i in 0..len - 1 {
         let next_start = pattern.notes[i + 1].start_beat;
@@ -366,7 +366,7 @@ pub fn transform_humanize(
         let new_vel = (note.velocity as i16 + r_vel).clamp(1, 127) as u8;
         note.velocity = new_vel;
     }
-    pattern.notes.sort_by(|a, b| a.start_beat.partial_cmp(&b.start_beat).unwrap());
+    pattern.notes.sort_by(|a, b| a.start_beat.total_cmp(&b.start_beat));
 }
 
 /// Unified Live 12 MIDI Transform & Generative Engine facade.

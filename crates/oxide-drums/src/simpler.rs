@@ -470,7 +470,18 @@ impl SimplerDevice {
 
             voice.played_samples += 1;
 
-            let curr_pos = voice.position;
+            let mut curr_pos = voice.position;
+
+            // Interpolated sample reading & loop boundary check
+            if curr_pos >= voice.slice_end as f64 {
+                if self.mode == SimplerMode::Classic && self.loop_enabled {
+                    voice.position = voice.slice_start as f64;
+                    curr_pos = voice.position;
+                } else {
+                    voice.active = false;
+                    continue;
+                }
+            }
 
             // OneShot fade envelope (fade-in and fade-out)
             let fade_factor = if self.mode == SimplerMode::OneShot {
@@ -489,16 +500,6 @@ impl SimplerDevice {
             } else {
                 1.0
             };
-
-            // Interpolated sample reading
-            if curr_pos >= voice.slice_end as f64 {
-                if self.mode == SimplerMode::Classic && self.loop_enabled {
-                    voice.position = voice.slice_start as f64;
-                } else {
-                    voice.active = false;
-                    continue;
-                }
-            }
 
             let idx0 = (curr_pos.floor() as usize).min(total_frames.saturating_sub(1));
             let idx1 = (idx0 + 1).min(total_frames.saturating_sub(1));

@@ -1,6 +1,6 @@
 //! MCP Server JSON-RPC 2.0 stdio dispatch loop and message processor.
 
-use std::io::{self, BufRead, Read, Write};
+use std::io;
 use serde_json::{json, Value};
 
 use crate::protocol::*;
@@ -69,6 +69,17 @@ impl McpServer {
             }
         };
 
+        if let Some(ref p) = req.params {
+            if !p.is_object() {
+                return Some(JsonRpcResponse::error(
+                    req_id,
+                    INVALID_PARAMS,
+                    "Invalid params: 'params' must be a JSON object",
+                    None,
+                ));
+            }
+        }
+
         let response = match req.method.as_str() {
             "initialize" => {
                 self.is_initialized = true;
@@ -91,7 +102,17 @@ impl McpServer {
                 JsonRpcResponse::success(req_id, json!({ "tools": tools }))
             }
             "tools/call" => {
-                let params = req.params.unwrap_or(json!({}));
+                let params = match req.params {
+                    Some(Value::Object(map)) => map,
+                    _ => {
+                        return Some(JsonRpcResponse::error(
+                            req_id,
+                            INVALID_PARAMS,
+                            "Invalid params: tools/call requires a JSON object",
+                            None,
+                        ))
+                    }
+                };
                 let name = match params.get("name").and_then(|v| v.as_str()) {
                     Some(n) => n,
                     None => {
@@ -103,7 +124,18 @@ impl McpServer {
                         ))
                     }
                 };
-                let args = params.get("arguments").cloned().unwrap_or(json!({}));
+                let args = match params.get("arguments") {
+                    None => Value::Object(serde_json::Map::new()),
+                    Some(v) if v.is_object() => v.clone(),
+                    Some(_) => {
+                        return Some(JsonRpcResponse::error(
+                            req_id,
+                            INVALID_PARAMS,
+                            "Invalid params: 'arguments' must be a JSON object",
+                            None,
+                        ))
+                    }
+                };
                 let result = call_tool(&mut self.state, name, &args);
                 JsonRpcResponse::success(req_id, serde_json::to_value(&result).unwrap_or(json!({})))
             }
@@ -112,7 +144,17 @@ impl McpServer {
                 JsonRpcResponse::success(req_id, json!({ "resources": resources }))
             }
             "resources/read" => {
-                let params = req.params.unwrap_or(json!({}));
+                let params = match req.params {
+                    Some(Value::Object(map)) => map,
+                    _ => {
+                        return Some(JsonRpcResponse::error(
+                            req_id,
+                            INVALID_PARAMS,
+                            "Invalid params: resources/read requires a JSON object",
+                            None,
+                        ))
+                    }
+                };
                 let uri = match params.get("uri").and_then(|v| v.as_str()) {
                     Some(u) => u,
                     None => {
@@ -235,7 +277,10 @@ impl McpServer {
         let stdout = io::stdout();
         let mut reader = io::BufReader::new(stdin.lock());
         let mut writer = stdout.lock();
+        self.process_stdio(&mut reader, &mut writer);
+    }
 
+    pub fn process_stdio<R: io::BufRead, W: io::Write>(&mut self, reader: &mut R, writer: &mut W) {
         loop {
             let mut line = String::new();
             match reader.read_line(&mut line) {
@@ -248,11 +293,23 @@ impl McpServer {
                 continue;
             }
 
-            if trimmed.to_ascii_lowercase().starts_with("content-length:") {
-                let mut content_length: Option<usize> = trimmed["content-length:".len()..]
-                    .trim()
-                    .parse::<usize>()
-                    .ok();
+            let is_header_line =
+                !trimmed.starts_with('{') && !trimmed.starts_with('[') && trimmed.contains(':');
+            if is_header_line {
+                let mut content_length: Option<usize> = None;
+                let mut malformed_content_length = false;
+
+                let mut inspect_header = |hdr_line: &str| {
+                    if let Some((name, val)) = hdr_line.split_once(':') {
+                        if name.trim().eq_ignore_ascii_case("content-length") {
+                            match val.trim().parse::<usize>() {
+                                Ok(n) => content_length = Some(n),
+                                Err(_) => malformed_content_length = true,
+                            }
+                        }
+                    }
+                };
+                inspect_header(trimmed);
 
                 loop {
                     let mut hdr = String::new();
@@ -264,17 +321,38 @@ impl McpServer {
                     if hdr_trimmed.is_empty() {
                         break;
                     }
-                    if hdr_trimmed.to_ascii_lowercase().starts_with("content-length:") {
-                        content_length = hdr_trimmed["content-length:".len()..]
-                            .trim()
-                            .parse::<usize>()
-                            .ok();
+                    inspect_header(hdr_trimmed);
+                }
+
+                if malformed_content_length {
+                    let err_resp = JsonRpcResponse::error(
+                        Value::Null,
+                        INVALID_REQUEST,
+                        "Malformed Content-Length header",
+                        None,
+                    );
+                    if let Ok(body) = serde_json::to_string(&err_resp) {
+                        let _ = write!(writer, "Content-Length: {}\r\n\r\n{}", body.len(), body);
+                        let _ = writer.flush();
                     }
+                    continue;
                 }
 
                 let len = match content_length {
                     Some(n) => n,
-                    None => continue,
+                    None => {
+                        let err_resp = JsonRpcResponse::error(
+                            Value::Null,
+                            INVALID_REQUEST,
+                            "Missing Content-Length header",
+                            None,
+                        );
+                        if let Ok(body) = serde_json::to_string(&err_resp) {
+                            let _ = write!(writer, "Content-Length: {}\r\n\r\n{}", body.len(), body);
+                            let _ = writer.flush();
+                        }
+                        continue;
+                    }
                 };
                 if len > 16 * 1024 * 1024 {
                     let err_resp = JsonRpcResponse::error(
@@ -314,5 +392,40 @@ impl McpServer {
 impl Default for McpServer {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_stdio_content_type_before_content_length_and_malformed_length_and_invalid_params() {
+        let mut server = McpServer::new();
+        let req_json = r#"{"jsonrpc":"2.0","id":1,"method":"ping"}"#;
+        let frame = format!(
+            "Content-Type: application/vscode-jsonrpc; charset=utf-8\r\nContent-Length: {}\r\n\r\n{}",
+            req_json.len(),
+            req_json
+        );
+        let mut reader = io::Cursor::new(frame.into_bytes());
+        let mut out = Vec::new();
+        server.process_stdio(&mut reader, &mut out);
+        let out_str = String::from_utf8(out).unwrap();
+        assert!(out_str.contains("\"id\":1") && out_str.contains("\"result\":{}"));
+
+        // Malformed Content-Length emits INVALID_REQUEST error cleanly
+        let bad_frame = "Content-Type: application/json\r\nContent-Length: notanint\r\n\r\n";
+        let mut bad_reader = io::Cursor::new(bad_frame.as_bytes());
+        let mut bad_out = Vec::new();
+        server.process_stdio(&mut bad_reader, &mut bad_out);
+        let bad_str = String::from_utf8(bad_out).unwrap();
+        assert!(bad_str.contains("-32600"), "Expected INVALID_REQUEST, got {}", bad_str);
+
+        // Non-object params / arguments return -32602
+        let r1 = server.handle_line(r#"{"jsonrpc":"2.0","id":2,"method":"ping","params":[1,2]}"#).unwrap();
+        assert!(r1.contains("-32602"));
+        let r2 = server.handle_line(r#"{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"project_get_overview","arguments":[1]}}"#).unwrap();
+        assert!(r2.contains("-32602"));
     }
 }

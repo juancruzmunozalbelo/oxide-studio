@@ -219,7 +219,7 @@ impl ElectricDevice {
             // Electromagnetic Pickup:
             // Non-linear reluctance saturation as tine swings close to pole piece
             let dist_inv = 1.0 / self.pickup_distance.max(0.1);
-            let raw_pickup = mechanical_disp * dist_inv + self.pickup_symmetry * 0.1;
+            let raw_pickup = mechanical_disp * dist_inv;
             let pickup_out = (raw_pickup * 1.5).tanh() * 0.7;
 
             let voice_mono = pickup_out * amp_val * base_vol;

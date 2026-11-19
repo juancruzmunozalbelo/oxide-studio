@@ -374,11 +374,14 @@ impl SessionMatrix {
     /// Launch an entire scene row across all tracks.
     ///
     /// For every track that has a clip at `scene_idx`, that clip is queued or launched.
+    /// Tracks with an empty slot at `scene_idx` stop active/queued playback cleanly.
     pub fn trigger_scene(&mut self, scene_idx: usize, current_beat: f64, mode: QuantizeMode) -> f64 {
         let target_beat = calculate_launch_beat(current_beat, mode);
         for track in &mut self.tracks {
             if scene_idx < track.slots.len() && track.slots[scene_idx].clip.is_some() {
                 track.trigger_slot(scene_idx, current_beat, mode);
+            } else {
+                track.stop(current_beat, mode);
             }
         }
         target_beat
@@ -530,5 +533,27 @@ mod tests {
         for (mode, cur, expected) in modes {
             assert_eq!(calculate_launch_beat(cur, mode), expected);
         }
+    }
+
+    #[test]
+    fn test_trigger_scene_stops_active_tracks_on_empty_slots() {
+        let mut matrix = SessionMatrix::new(2, 2);
+        let m0 = MidiPattern::new(4.0);
+        let m1 = MidiPattern::new(4.0);
+        matrix.tracks[0].slots[0].set_clip(Some(SessionClip::new(1, "A", ClipPattern::Midi(m0))));
+        matrix.tracks[1].slots[0].set_clip(Some(SessionClip::new(2, "B", ClipPattern::Midi(m1))));
+
+        // Scene 1 only has a clip on Track 0 (Track 1 slot 1 is empty)
+        let m2 = MidiPattern::new(4.0);
+        matrix.tracks[0].slots[1].set_clip(Some(SessionClip::new(3, "A2", ClipPattern::Midi(m2))));
+
+        matrix.trigger_scene(0, 0.0, QuantizeMode::Immediate);
+        matrix.tick(0.0);
+        assert!(matrix.tracks[0].slots[0].state.is_playing());
+        assert!(matrix.tracks[1].slots[0].state.is_playing());
+
+        // Trigger Scene 1 -> Track 1 (empty slot) must stop!
+        matrix.trigger_scene(1, 1.0, QuantizeMode::Immediate);
+        assert!(matrix.tracks[1].slots[0].state.is_stopped());
     }
 }

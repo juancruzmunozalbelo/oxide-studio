@@ -840,23 +840,55 @@ impl TransportController {
         let bpm = self.effective_bpm();
 
         // 3. Advance musical beat position if playing
+        let mut loop_wrapped_info: Option<(f64, usize)> = None;
         if self.time.is_playing && bpm > 0.0 {
             let beats_per_second = bpm / 60.0;
-            let mut next_beat = prev_beat + (delta_seconds * beats_per_second);
+            let raw_next_beat = prev_beat + (delta_seconds * beats_per_second);
+            let mut next_beat = raw_next_beat;
 
             // Handle loop wrapping
             if self.loop_enabled && self.loop_length_beats > 0.0 {
                 let loop_end = self.loop_start_beat + self.loop_length_beats;
-                if next_beat >= loop_end {
-                    let overshoot = next_beat - loop_end;
+                if raw_next_beat >= loop_end {
+                    let overshoot = raw_next_beat - loop_end;
                     next_beat = self.loop_start_beat + (overshoot % self.loop_length_beats);
+                    let full_loops = if loop_end > prev_beat {
+                        (overshoot / self.loop_length_beats).floor() as usize
+                    } else {
+                        0
+                    };
                     loop_wrapped = true;
+                    loop_wrapped_info = Some((loop_end, full_loops));
                 }
             }
 
             // 4. Generate outgoing MIDI Clock ticks if operating as MIDI Master
             if self.midi_clock.mode == MidiSyncMode::Master {
-                midi_ticks_emitted = self.midi_clock.process_master_advance(prev_beat, next_beat);
+                if let Some((loop_end, full_loops)) = loop_wrapped_info {
+                    if loop_end > prev_beat {
+                        midi_ticks_emitted +=
+                            self.midi_clock.process_master_advance(prev_beat, loop_end);
+                    }
+                    if full_loops > 0 {
+                        let ticks_start =
+                            (self.loop_start_beat * (MIDI_PPQN as f64)).floor() as u64;
+                        let ticks_end = (loop_end * (MIDI_PPQN as f64)).floor() as u64;
+                        let ticks_per_loop = (ticks_end.saturating_sub(ticks_start)) as usize;
+                        let extra_ticks = ticks_per_loop.saturating_mul(full_loops);
+                        for _ in 0..extra_ticks {
+                            self.midi_clock
+                                .queued_outgoing_messages
+                                .push(MidiClockMessage::TimingClock);
+                        }
+                        self.midi_clock.master_accumulated_ticks += extra_ticks as u64;
+                        midi_ticks_emitted += extra_ticks;
+                    }
+                    midi_ticks_emitted += self
+                        .midi_clock
+                        .process_master_advance(self.loop_start_beat, next_beat);
+                } else {
+                    midi_ticks_emitted = self.midi_clock.process_master_advance(prev_beat, next_beat);
+                }
             }
 
             self.time.beat = next_beat;
@@ -864,7 +896,31 @@ impl TransportController {
 
         // 5. Evaluate metronome click crossings
         let metronome_click = if self.time.is_playing && self.metronome_enabled {
-            self.detect_metronome_crossing(prev_beat, self.time.beat)
+            if let Some((loop_end, full_loops)) = loop_wrapped_info {
+                let tail_click = if loop_end > prev_beat {
+                    self.detect_metronome_crossing(prev_beat, loop_end)
+                } else {
+                    None
+                };
+                let full_loop_click = if full_loops > 0 {
+                    self.detect_metronome_crossing(self.loop_start_beat, loop_end)
+                } else {
+                    None
+                };
+                let head_click = self.detect_metronome_crossing(self.loop_start_beat, self.time.beat);
+                [tail_click, full_loop_click, head_click]
+                    .into_iter()
+                    .flatten()
+                    .fold(None, |acc, click| match (acc, click) {
+                        (_, MetronomeClick::Downbeat) | (Some(MetronomeClick::Downbeat), _) => {
+                            Some(MetronomeClick::Downbeat)
+                        }
+                        (None, c) => Some(c),
+                        (Some(c), _) => Some(c),
+                    })
+            } else {
+                self.detect_metronome_crossing(prev_beat, self.time.beat)
+            }
         } else {
             None
         };
@@ -1124,5 +1180,32 @@ mod tests {
         transport.time.beat = 3.95;
         let report_click = transport.advance(4410, 44100.0, None);
         assert_eq!(report_click.metronome_click, Some(MetronomeClick::Downbeat));
+    }
+
+    #[test]
+    fn test_transport_controller_loop_wrap_preserves_midi_clock_and_metronome() {
+        let mut transport = TransportController::new(120.0);
+        transport.set_loop(true, 4.0, 4.0); // [4.0, 8.0)
+        transport.metronome_enabled = true;
+        transport.midi_clock.mode = MidiSyncMode::Master;
+        transport.time.beat = 7.9;
+        transport.play();
+
+        // Advance 0.1s at 120 BPM = 0.2 beats: 7.9 -> 8.0 (loop end) -> wraps to 4.1 (< 7.9).
+        // Continuous 0.2 beats at 24 PPQN crosses 5 ticks: 7.9..8.0 (3) + 4.0..4.1 (2).
+        // And crossing 8.0 (downbeat in 4/4) must still emit a Downbeat metronome click.
+        let report = transport.advance(4410, 44100.0, None);
+        assert!(report.loop_wrapped);
+        assert!((report.current_beat - 4.1).abs() < 1e-4);
+        assert_eq!(
+            report.midi_ticks_emitted, 5,
+            "MIDI clock ticks across backward loop wrap must not be dropped"
+        );
+        assert_eq!(transport.midi_clock.master_accumulated_ticks, 5);
+        assert_eq!(
+            report.metronome_click,
+            Some(MetronomeClick::Downbeat),
+            "Metronome downbeat at loop wrap boundary must not be dropped"
+        );
     }
 }

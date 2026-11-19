@@ -521,20 +521,25 @@ impl SpectralWarpProcessor {
         }
 
         // Default 16th-note slice length @ 120 BPM = 5512 samples
-        let slice_len = (self.sample_rate * 0.125) as usize;
-        let decay_frames = ((self.beats_params.transient_decay_ms * 0.001) * self.sample_rate) as usize;
+        let slice_len = ((self.sample_rate * 0.125) as usize).max(1);
+        let decay_frames = ((self.beats_params.transient_decay_ms * 0.001) * self.sample_rate).max(1.0) as usize;
         let transient_hold = slice_len / 8; // Preserve attack transient unattenuated
 
         let in_len = input.len();
-        let stretch = self.stretch_ratio as f64;
+        let stretch = (self.stretch_ratio as f64).max(0.01);
+        let out_slice_len = ((slice_len as f64) * stretch).round().max(1.0) as usize;
 
         for (i, sample) in output.iter_mut().enumerate() {
-            let slice_idx = ((i as f64 / stretch) as usize) / slice_len;
-            let mut local_pos = ((i as f64 / stretch) as usize) % slice_len;
+            let slice_idx = i / out_slice_len;
+            let mut local_pos = i % out_slice_len;
 
-            // Handle slice loop mode when stretched beyond 1.0
-            if local_pos >= slice_len && self.beats_params.loop_mode != BeatsLoopMode::Off {
+            // Handle slice loop mode when stretched beyond slice_len
+            if local_pos >= slice_len {
                 match self.beats_params.loop_mode {
+                    BeatsLoopMode::Off => {
+                        *sample = 0.0;
+                        continue;
+                    }
                     BeatsLoopMode::Forward => {
                         local_pos %= slice_len;
                     }
@@ -545,7 +550,6 @@ impl SpectralWarpProcessor {
                             local_pos = slice_len - 1 - local_pos;
                         }
                     }
-                    BeatsLoopMode::Off => {}
                 }
             }
 
@@ -726,27 +730,34 @@ impl SpectralWarpProcessor {
 
             // Phase-vocoder phase unwrapping & Laroche-Dolson peak locking
             let omega_hop = 2.0 * PI * (hop_a as f32) / (FFT_SIZE as f32);
+            let two_pi = 2.0 * PI;
             for k in 1..(half - 1) {
-                // Peak detection
                 let is_peak = self.mag[k] > self.mag[k - 1] && self.mag[k] > self.mag[k + 1];
                 if is_peak {
                     let expected_advance = (k as f32) * omega_hop;
                     let mut delta_phase = self.phase[k] - self.prev_anal_phase[k] - expected_advance;
 
                     // Wrap into [-PI, PI]
-                    delta_phase -= 2.0 * PI * (delta_phase / (2.0 * PI)).round();
-                    let true_freq = (k as f32) * (2.0 * PI / (FFT_SIZE as f32)) + delta_phase / (hop_a as f32);
+                    delta_phase -= two_pi * (delta_phase / two_pi).round();
+                    let true_freq = (k as f32) * (two_pi / (FFT_SIZE as f32)) + delta_phase / (hop_a as f32);
 
                     // Update synthesis phase
-                    self.synth_phase[k] += true_freq * (hop_s as f32);
-
-                    // Lock adjacent bins
-                    self.synth_phase[k - 1] = self.synth_phase[k] + (self.phase[k - 1] - self.phase[k]);
-                    self.synth_phase[k + 1] = self.synth_phase[k] + (self.phase[k + 1] - self.phase[k]);
-                } else if self.synth_phase[k].abs() < 1e-4 {
-                    self.synth_phase[k] += (k as f32) * (2.0 * PI * (hop_s as f32) / (FFT_SIZE as f32));
+                    self.synth_phase[k] =
+                        (self.synth_phase[k] + true_freq * (hop_s as f32)).rem_euclid(two_pi);
+                } else {
+                    let bin_advance = (k as f32) * (two_pi * (hop_s as f32) / (FFT_SIZE as f32));
+                    self.synth_phase[k] = (self.synth_phase[k] + bin_advance).rem_euclid(two_pi);
                 }
                 self.prev_anal_phase[k] = self.phase[k];
+            }
+            for k in 1..(half - 1) {
+                let is_peak = self.mag[k] > self.mag[k - 1] && self.mag[k] > self.mag[k + 1];
+                if is_peak {
+                    self.synth_phase[k - 1] =
+                        self.synth_phase[k] + (self.phase[k - 1] - self.phase[k]);
+                    self.synth_phase[k + 1] =
+                        self.synth_phase[k] + (self.phase[k + 1] - self.phase[k]);
+                }
             }
 
             // Formant envelope correction for ComplexPro

@@ -87,9 +87,21 @@ impl CytomicSvfStage {
         drive: f32,
     ) -> (f32, f32, f32, f32) {
         let driven_in = match model {
-            CircuitModel::Clean => input * drive,
+            CircuitModel::Clean => {
+                if drive > 1.0001 {
+                    (input * drive).tanh()
+                } else {
+                    input * drive
+                }
+            }
             CircuitModel::OSR => Self::soft_clip(input * drive * 1.2),
-            CircuitModel::MS2 => input * drive,
+            CircuitModel::MS2 => {
+                if drive > 1.0001 {
+                    Self::soft_clip(input * drive)
+                } else {
+                    input * drive
+                }
+            }
             CircuitModel::SMP => {
                 let x = (input * drive).clamp(-1.5, 1.5);
                 x - 0.333333 * x * x * x
@@ -242,6 +254,8 @@ impl CytomicZdfFilter {
 pub struct DualCytomicFilter {
     pub filter1: CytomicZdfFilter,
     pub filter2: CytomicZdfFilter,
+    pub filter1_drive: f32,
+    pub filter2_drive: f32,
     pub routing: FilterRouting,
 }
 
@@ -250,6 +264,8 @@ impl DualCytomicFilter {
         Self {
             filter1: CytomicZdfFilter::new(sample_rate),
             filter2: CytomicZdfFilter::new(sample_rate),
+            filter1_drive: 0.0,
+            filter2_drive: 0.0,
             routing: FilterRouting::Series,
         }
     }
@@ -280,21 +296,23 @@ impl DualCytomicFilter {
         res2: f32,
         morph2: f32,
     ) -> f32 {
+        let drive1 = self.filter1_drive;
+        let drive2 = self.filter2_drive;
         match self.routing {
             FilterRouting::Series => {
                 let mixed_in = osc1_sample + osc2_sample;
-                let stage1_out = self.filter1.process_sample(mixed_in, cutoff1, res1, morph1, 0.0);
-                self.filter2.process_sample(stage1_out, cutoff2, res2, morph2, 0.0)
+                let stage1_out = self.filter1.process_sample(mixed_in, cutoff1, res1, morph1, drive1);
+                self.filter2.process_sample(stage1_out, cutoff2, res2, morph2, drive2)
             }
             FilterRouting::Parallel => {
                 let mixed_in = osc1_sample + osc2_sample;
-                let out1 = self.filter1.process_sample(mixed_in, cutoff1, res1, morph1, 0.0);
-                let out2 = self.filter2.process_sample(mixed_in, cutoff2, res2, morph2, 0.0);
+                let out1 = self.filter1.process_sample(mixed_in, cutoff1, res1, morph1, drive1);
+                let out2 = self.filter2.process_sample(mixed_in, cutoff2, res2, morph2, drive2);
                 0.5 * (out1 + out2)
             }
             FilterRouting::Split => {
-                let out1 = self.filter1.process_sample(osc1_sample, cutoff1, res1, morph1, 0.0);
-                let out2 = self.filter2.process_sample(osc2_sample, cutoff2, res2, morph2, 0.0);
+                let out1 = self.filter1.process_sample(osc1_sample, cutoff1, res1, morph1, drive1);
+                let out2 = self.filter2.process_sample(osc2_sample, cutoff2, res2, morph2, drive2);
                 0.5 * (out1 + out2)
             }
         }

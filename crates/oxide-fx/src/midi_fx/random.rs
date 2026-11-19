@@ -15,7 +15,7 @@ pub struct Random {
     pub choices: u8,   // 1 .. 24
     pub chance: f32,   // 0.0 .. 1.0
     pub mode: RandomMode,
-    active_shifts: Vec<(u8, i16)>, // (original_note, applied_shift)
+    active_shifts: Vec<(u8, u8, i16)>, // (channel, original_note, applied_shift)
 }
 
 impl Random {
@@ -26,7 +26,7 @@ impl Random {
             choices: 12,
             chance: 0.5,
             mode: RandomMode::Bipolar,
-            active_shifts: Vec::new(),
+            active_shifts: Vec::with_capacity(16),
         }
     }
 }
@@ -87,7 +87,7 @@ impl MidiEffectDevice for Random {
                         0
                     };
 
-                    self.active_shifts.push((*note, shift));
+                    self.active_shifts.push((*channel, *note, shift));
                     let new_note = (*note as i16 + shift).clamp(0, 127) as u8;
                     events_out.push(MidiEvent::NoteOn {
                         channel: *channel,
@@ -96,8 +96,12 @@ impl MidiEffectDevice for Random {
                     });
                 }
                 MidiEvent::NoteOff { channel, note } => {
-                    let shift = if let Some(idx) = self.active_shifts.iter().position(|(p, _)| p == note) {
-                        self.active_shifts.remove(idx).1
+                    let shift = if let Some(idx) = self
+                        .active_shifts
+                        .iter()
+                        .position(|(ch, p, _)| ch == channel && p == note)
+                    {
+                        self.active_shifts.swap_remove(idx).2
                     } else {
                         0
                     };

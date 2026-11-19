@@ -124,19 +124,19 @@ fn test_mcp_build_peak_time_techno_135_gmin_project() {
     );
     assert!(!place_t0.is_error);
 
-    // 3. Configure Track 1 ("909 Peak Techno Drums")
+    // 3. Configure Track 1 ("909 Peak Techno Drums": 0=Kick, 1=Snare, 8=Closed HH, 9=Open HH)
     let mut drum_steps = Vec::new();
     for &s in &[0, 4, 8, 12] {
         drum_steps.push(json!({ "pad_index": 0, "step_index": s, "velocity": 127, "accent": true }));
     }
     for &s in &[4, 12] {
-        drum_steps.push(json!({ "pad_index": 2, "step_index": s, "velocity": 115, "accent": true }));
+        drum_steps.push(json!({ "pad_index": 1, "step_index": s, "velocity": 115, "accent": true }));
     }
     for s in 0..16 {
-        drum_steps.push(json!({ "pad_index": 6, "step_index": s, "velocity": 90, "accent": s % 2 == 0 }));
+        drum_steps.push(json!({ "pad_index": 8, "step_index": s, "velocity": 90, "accent": s % 2 == 0 }));
     }
     for &s in &[2, 6, 10, 14] {
-        drum_steps.push(json!({ "pad_index": 10, "step_index": s, "velocity": 105, "accent": true }));
+        drum_steps.push(json!({ "pad_index": 9, "step_index": s, "velocity": 105, "accent": true }));
     }
 
     let drums_clip_res = dispatch_tool_call(
@@ -494,23 +494,27 @@ fn test_mcp_build_melodic_techno_126_fsharp_min_project() {
     );
     assert!(!swing_res.is_error);
 
-    let _ = dispatch_tool_call(&mut state, "drums_configure_pad", &json!({ "pad_index": 7, "pitch_semitones": -1.0 }));
+    // Pad map (DrumRack default): 0=Kick, 1=Snare, 3=Mid Tom, 6=Clap, 8=Closed HH, 9=Open HH
+    assert!(
+        !dispatch_tool_call(&mut state, "drums_configure_pad", &json!({ "pad_index": 3, "pitch_semitones": -1.0 })).is_error,
+        "drums_configure_pad failed"
+    );
 
     let mut holo_steps = Vec::new();
     for &s in &[0, 4, 8, 12, 16, 20, 24, 28] {
         holo_steps.push(json!({ "pad_index": 0, "step_index": s, "velocity": 127, "accent": true }));
     }
     for &s in &[4, 12, 20, 28] {
-        holo_steps.push(json!({ "pad_index": 2, "step_index": s, "velocity": 115, "accent": true }));
+        holo_steps.push(json!({ "pad_index": 1, "step_index": s, "velocity": 115, "accent": true }));
     }
     for s in 0..32 {
-        holo_steps.push(json!({ "pad_index": 6, "step_index": s, "velocity": 85, "accent": s % 4 == 2 }));
+        holo_steps.push(json!({ "pad_index": 8, "step_index": s, "velocity": 85, "accent": s % 4 == 2 }));
     }
     for &s in &[2, 6, 10, 14, 18, 22, 26, 30] {
-        holo_steps.push(json!({ "pad_index": 10, "step_index": s, "velocity": 105, "accent": true }));
+        holo_steps.push(json!({ "pad_index": 9, "step_index": s, "velocity": 105, "accent": true }));
     }
     for &s in &[3, 6, 11, 14, 19, 22, 27, 30] {
-        holo_steps.push(json!({ "pad_index": 7, "step_index": s, "velocity": 100, "accent": true }));
+        holo_steps.push(json!({ "pad_index": 3, "step_index": s, "velocity": 100, "accent": true }));
     }
 
     let drums_res = dispatch_tool_call(
@@ -526,7 +530,7 @@ fn test_mcp_build_melodic_techno_126_fsharp_min_project() {
     );
     assert!(!drums_res.is_error);
 
-    let _ = dispatch_tool_call(
+    let groove_res = dispatch_tool_call(
         &mut state,
         "groove_pool_apply_to_clip",
         &json!({
@@ -536,10 +540,12 @@ fn test_mcp_build_melodic_techno_126_fsharp_min_project() {
             "amount": 1.0
         }),
     );
+    assert!(!groove_res.is_error, "groove_pool_apply_to_clip failed: {:?}", groove_res);
 
-    let _ = dispatch_tool_call(&mut state, "device_add_to_track", &json!({ "track_id": 1, "device_type": "eq_eight" }));
-    let _ = dispatch_tool_call(&mut state, "device_add_to_track", &json!({ "track_id": 1, "device_type": "glue_compressor" }));
-    let _ = dispatch_tool_call(&mut state, "device_add_to_track", &json!({ "track_id": 1, "device_type": "roar" }));
+    for dev_type in ["eq_eight", "glue_compressor", "roar"] {
+        let dev_res = dispatch_tool_call(&mut state, "device_add_to_track", &json!({ "track_id": 1, "device_type": dev_type }));
+        assert!(!dev_res.is_error, "device_add_to_track '{}' failed: {:?}", dev_type, dev_res);
+    }
 
     let place_drums = dispatch_tool_call(
         &mut state,
@@ -555,11 +561,12 @@ fn test_mcp_build_melodic_techno_126_fsharp_min_project() {
     assert!(!place_drums.is_error);
 
     // 3. Sound Design: Melodic Lead Hook & Rolling 16th Bass
-    let _ = dispatch_tool_call(
+    let preset_res = dispatch_tool_call(
         &mut state,
         "synth_load_preset",
         &json!({ "track_id": 0, "preset_name": "analogsaw.preset" }),
     );
+    assert!(!preset_res.is_error, "synth_load_preset failed: {:?}", preset_res);
 
     let lead_notes = json!([
         { "pitch": 66, "velocity": 100, "start_beat": 0.00, "duration_beats": 0.75 }, // F#3
@@ -576,7 +583,7 @@ fn test_mcp_build_melodic_techno_126_fsharp_min_project() {
         { "pitch": 66, "velocity": 100, "start_beat": 7.50, "duration_beats": 0.50 }, // F#3
     ]);
 
-    let _ = dispatch_tool_call(
+    let lead_clip_res = dispatch_tool_call(
         &mut state,
         "clip_create_midi",
         &json!({
@@ -587,8 +594,9 @@ fn test_mcp_build_melodic_techno_126_fsharp_min_project() {
             "notes": lead_notes
         }),
     );
+    assert!(!lead_clip_res.is_error, "clip_create_midi track 0 failed: {:?}", lead_clip_res);
 
-    let _ = dispatch_tool_call(
+    let place_lead_res = dispatch_tool_call(
         &mut state,
         "timeline_place_clip",
         &json!({
@@ -599,13 +607,15 @@ fn test_mcp_build_melodic_techno_126_fsharp_min_project() {
             "name": "Melodic Lead F#m"
         }),
     );
+    assert!(!place_lead_res.is_error, "timeline_place_clip track 0 failed: {:?}", place_lead_res);
 
     // Track 2: Rolling Bass 16th
-    let _ = dispatch_tool_call(
+    let bass_trk_res = dispatch_tool_call(
         &mut state,
         "track_create_synth",
         &json!({ "name": "Rolling Bass 16th (F#m-D-A-E)", "preset": "wowbass.preset" }),
     );
+    assert!(!bass_trk_res.is_error, "track_create_synth track 2 failed: {:?}", bass_trk_res);
 
     let chord_roots = [(0..4, 42), (4..8, 38), (8..12, 45), (12..16, 40)];
     let mut rolling_bass = Vec::new();
@@ -622,7 +632,7 @@ fn test_mcp_build_melodic_techno_126_fsharp_min_project() {
         }
     }
 
-    let _ = dispatch_tool_call(
+    let bass_clip_res = dispatch_tool_call(
         &mut state,
         "clip_create_midi",
         &json!({
@@ -633,8 +643,9 @@ fn test_mcp_build_melodic_techno_126_fsharp_min_project() {
             "notes": rolling_bass
         }),
     );
+    assert!(!bass_clip_res.is_error, "clip_create_midi track 2 failed: {:?}", bass_clip_res);
 
-    let _ = dispatch_tool_call(
+    let place_bass_res = dispatch_tool_call(
         &mut state,
         "timeline_place_clip",
         &json!({
@@ -645,13 +656,15 @@ fn test_mcp_build_melodic_techno_126_fsharp_min_project() {
             "name": "Rolling 16th F#m-D-A-E"
         }),
     );
+    assert!(!place_bass_res.is_error, "timeline_place_clip track 2 failed: {:?}", place_bass_res);
 
     // 4. Harmonic Progression Pads + Filter Automation
-    let _ = dispatch_tool_call(
+    let pads_trk_res = dispatch_tool_call(
         &mut state,
         "track_create_synth",
         &json!({ "name": "Analog Poly Pads (F#m-Dmaj7-A-E)", "preset": "darkpad.preset" }),
     );
+    assert!(!pads_trk_res.is_error, "track_create_synth track 3 failed: {:?}", pads_trk_res);
 
     let pad_notes = json!([
         { "pitch": 54, "velocity": 95, "start_beat": 0.0, "duration_beats": 4.0 },
@@ -672,7 +685,7 @@ fn test_mcp_build_melodic_techno_126_fsharp_min_project() {
         { "pitch": 64, "velocity": 95, "start_beat": 12.0, "duration_beats": 4.0 },
     ]);
 
-    let _ = dispatch_tool_call(
+    let pads_clip_res = dispatch_tool_call(
         &mut state,
         "clip_create_midi",
         &json!({
@@ -683,8 +696,9 @@ fn test_mcp_build_melodic_techno_126_fsharp_min_project() {
             "notes": pad_notes
         }),
     );
+    assert!(!pads_clip_res.is_error, "clip_create_midi track 3 failed: {:?}", pads_clip_res);
 
-    let _ = dispatch_tool_call(
+    let place_pads_res = dispatch_tool_call(
         &mut state,
         "timeline_place_clip",
         &json!({
@@ -695,6 +709,7 @@ fn test_mcp_build_melodic_techno_126_fsharp_min_project() {
             "name": "F#m - Dmaj7 - A - E Progression"
         }),
     );
+    assert!(!place_pads_res.is_error, "timeline_place_clip track 3 failed: {:?}", place_pads_res);
 
     let auto_points = json!([
         { "beat": 0.0, "value": 0.20 },
@@ -702,16 +717,18 @@ fn test_mcp_build_melodic_techno_126_fsharp_min_project() {
         { "beat": 32.0, "value": 0.85 },
     ]);
 
-    let _ = dispatch_tool_call(
+    let auto_0_res = dispatch_tool_call(
         &mut state,
         "timeline_add_automation",
         &json!({ "track_id": 0, "parameter_name": "filter_frequency", "points": auto_points }),
     );
-    let _ = dispatch_tool_call(
+    assert!(!auto_0_res.is_error, "timeline_add_automation track 0 failed: {:?}", auto_0_res);
+    let auto_3_res = dispatch_tool_call(
         &mut state,
         "timeline_add_automation",
         &json!({ "track_id": 3, "parameter_name": "filter_frequency", "points": auto_points }),
     );
+    assert!(!auto_3_res.is_error, "timeline_add_automation track 3 failed: {:?}", auto_3_res);
 
     for (ret_name, dev) in &[
         ("A-Parallel Drum Bus", "gluecompressor"),
@@ -721,17 +738,18 @@ fn test_mcp_build_melodic_techno_126_fsharp_min_project() {
         ("E-Shimmer", "spectralresonator"),
         ("F-Granular Echo", "echo"),
     ] {
-        let _ = dispatch_tool_call(
+        let ret_res = dispatch_tool_call(
             &mut state,
             "return_track_create",
             &json!({ "name": ret_name, "initial_device": dev }),
         );
+        assert!(!ret_res.is_error, "return_track_create '{}' failed: {:?}", ret_name, ret_res);
     }
 
-    let _ = dispatch_tool_call(&mut state, "mixer_set_send", &json!({ "track_id": 0, "send_index": 1, "level_db": -12.0 }));
-    let _ = dispatch_tool_call(&mut state, "mixer_set_send", &json!({ "track_id": 1, "send_index": 0, "level_db": -6.0 }));
-    let _ = dispatch_tool_call(&mut state, "mixer_set_send", &json!({ "track_id": 2, "send_index": 0, "level_db": -18.0 }));
-    let _ = dispatch_tool_call(&mut state, "mixer_set_send", &json!({ "track_id": 3, "send_index": 3, "level_db": -9.0 }));
+    assert!(!dispatch_tool_call(&mut state, "mixer_set_send", &json!({ "track_id": 0, "send_index": 1, "level_db": -12.0 })).is_error);
+    assert!(!dispatch_tool_call(&mut state, "mixer_set_send", &json!({ "track_id": 1, "send_index": 0, "level_db": -6.0 })).is_error);
+    assert!(!dispatch_tool_call(&mut state, "mixer_set_send", &json!({ "track_id": 2, "send_index": 0, "level_db": -18.0 })).is_error);
+    assert!(!dispatch_tool_call(&mut state, "mixer_set_send", &json!({ "track_id": 3, "send_index": 3, "level_db": -9.0 })).is_error);
 
     for (tid, vol_db, pan) in [(0, -1.5, 0.0), (1, 0.0, 0.0), (2, -2.0, 0.0), (3, -3.5, 0.0)] {
         let mix_res = dispatch_tool_call(

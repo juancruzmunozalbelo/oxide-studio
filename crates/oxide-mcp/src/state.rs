@@ -272,6 +272,18 @@ impl DawState {
             return Err(format!("Track index {} out of range", track_idx));
         }
 
+        let is_return = self.project.tracks[track_idx].track_type == TrackType::Return;
+        let ret_ord = if is_return {
+            Some(
+                self.project.tracks[..track_idx]
+                    .iter()
+                    .filter(|t| t.track_type == TrackType::Return)
+                    .count(),
+            )
+        } else {
+            None
+        };
+
         let removed = self.project.tracks.remove(track_idx);
         for (i, trk) in self.project.tracks.iter_mut().enumerate() {
             trk.id = i as u32;
@@ -292,17 +304,35 @@ impl DawState {
         }
 
         if track_idx < self.mixer.tracks.len() {
-            for i in track_idx..(self.mixer.tracks.len() - 1) {
+            let last = self.mixer.tracks.len() - 1;
+            for i in track_idx..last {
                 self.mixer.tracks[i] = self.mixer.tracks[i + 1].clone();
             }
-            let last = self.mixer.tracks.len() - 1;
-            self.mixer.tracks[last] = oxide_fx::MixerTrack::new(&format!("Track {}", last + 1));
+            if let Some(p_last) = self.project.tracks.get(last) {
+                let mut shifted = oxide_fx::MixerTrack::new(&p_last.name);
+                shifted.set_volume_db(p_last.mixer.volume_db);
+                shifted.set_pan(p_last.mixer.pan);
+                shifted.mute = p_last.mixer.mute;
+                shifted.solo = p_last.mixer.solo;
+                self.mixer.tracks[last] = shifted;
+            } else {
+                self.mixer.tracks[last] = oxide_fx::MixerTrack::new(&format!("Track {}", last + 1));
+            }
         }
 
         if track_idx < self.track_manager.tracks.len() {
             self.track_manager.tracks.remove(track_idx);
             for (i, trk) in self.track_manager.tracks.iter_mut().enumerate() {
                 trk.id = i as u32;
+            }
+        }
+
+        if let Some(ord) = ret_ord {
+            if ord < self.custom_return_ids.len() {
+                let ret_id = self.custom_return_ids.remove(ord);
+                self.track_manager.return_tracks.retain(|r| r.id != ret_id);
+                self.return_device_chains.remove(&ret_id);
+                self.return_device_handles.remove(&ret_id);
             }
         }
 
@@ -339,25 +369,46 @@ impl DawState {
             }
         }
 
-        // Reconcile active synth/drum track cursors
+        // Reconcile active synth/drum track cursors and reload live engines from surviving track
         if self.active_synth_track_id == track_idx {
-            self.active_synth_track_id = self
+            let new_synth_idx = self
                 .project
                 .tracks
                 .iter()
-                .position(|t| matches!(t.instrument, InstrumentConfig::BuiltinSubtractiveSynth(_)))
-                .unwrap_or(0);
+                .position(|t| matches!(t.instrument, InstrumentConfig::BuiltinSubtractiveSynth(_)));
+            self.active_synth_track_id = new_synth_idx.unwrap_or(0);
+            self.synth = SynthEngine::new(self.sample_rate);
+            if let Some(idx) = new_synth_idx {
+                if let InstrumentConfig::BuiltinSubtractiveSynth(ref patch) =
+                    self.project.tracks[idx].instrument
+                {
+                    if let Some(ref pname) = patch.preset_name {
+                        let _ = self.synth.load_preset(pname);
+                    }
+                    for (pname, val) in patch.to_parameter_map() {
+                        self.synth.set_parameter(&pname, val);
+                    }
+                }
+            }
         } else if self.active_synth_track_id > track_idx {
             self.active_synth_track_id -= 1;
         }
 
         if self.active_drum_track_id == track_idx {
-            self.active_drum_track_id = self
+            let new_drum_idx = self
                 .project
                 .tracks
                 .iter()
-                .position(|t| matches!(t.instrument, InstrumentConfig::ElectronicDrumRack(_)))
-                .unwrap_or(0);
+                .position(|t| matches!(t.instrument, InstrumentConfig::ElectronicDrumRack(_)));
+            self.active_drum_track_id = new_drum_idx.unwrap_or(0);
+            self.drum_rack = Self::create_default_drum_rack(self.sample_rate);
+            if let Some(idx) = new_drum_idx {
+                if let InstrumentConfig::ElectronicDrumRack(ref dr_def) =
+                    self.project.tracks[idx].instrument
+                {
+                    Self::apply_drum_def_to_rack(&mut self.drum_rack, dr_def);
+                }
+            }
         } else if self.active_drum_track_id > track_idx {
             self.active_drum_track_id -= 1;
         }
@@ -475,7 +526,7 @@ impl DawState {
                 .push(TrackDefinition::new_synth(tid, format!("Track {}", tid)));
         }
 
-        // Unconditionally sync mixer channel states (including resetting back to 0.0 / unmuted)
+        // Unconditionally sync mixer channel states for 0..16 while preserving tracks >= 16
         for (i, trk) in self.project.tracks.iter_mut().enumerate() {
             if trk.track_type == TrackType::Return {
                 continue;
@@ -488,8 +539,33 @@ impl DawState {
             }
             if let Some(tm_trk) = self.track_manager.tracks.get(i) {
                 for send in &tm_trk.sends {
-                    trk.mixer
-                        .set_send_db(send.return_track_id as usize, send.level_db);
+                    let bus_idx = if let Some(pos) = self
+                        .custom_return_ids
+                        .iter()
+                        .position(|&id| id == send.return_track_id)
+                    {
+                        if send.level_db <= -69.9 && trk.mixer.get_send_db(pos) > -69.9 {
+                            continue;
+                        }
+                        pos
+                    } else if self
+                        .track_manager
+                        .return_tracks
+                        .iter()
+                        .any(|r| r.id == send.return_track_id)
+                    {
+                        if send.level_db <= -69.9 {
+                            continue;
+                        }
+                        self.track_manager
+                            .return_tracks
+                            .iter()
+                            .position(|r| r.id == send.return_track_id)
+                            .unwrap_or(send.return_track_id as usize)
+                    } else {
+                        send.return_track_id as usize
+                    };
+                    trk.mixer.set_send_db(bus_idx, send.level_db);
                 }
             }
         }
@@ -499,18 +575,28 @@ impl DawState {
         self.sync_drum_rack_to_project();
 
         // Sync per-track DeviceChain handles -> insert_fx
+        let bpm = self.bpm;
         for (&track_id, handles) in &self.device_handles {
             if let Some(p_trk) = self.project.tracks.get_mut(track_id as usize) {
                 p_trk.insert_fx = handles
                     .audio_effects
                     .iter()
-                    .filter_map(|h| h.to_insert_effect_config())
+                    .filter_map(|h| h.to_insert_effect_config(bpm))
                     .collect();
             }
         }
 
-        // Sync custom Return tracks & their FX into project.tracks
-        for &ret_id in &self.custom_return_ids {
+        // Sync custom Return tracks by Return ID / ordinal (preserving duplicate names & Return mixer edits)
+        let existing_return_positions: Vec<usize> = self
+            .project
+            .tracks
+            .iter()
+            .enumerate()
+            .filter(|(_, t)| t.track_type == TrackType::Return)
+            .map(|(idx, _)| idx)
+            .collect();
+
+        for (ord, &ret_id) in self.custom_return_ids.iter().enumerate() {
             if let Some(ret_trk) = self
                 .track_manager
                 .return_tracks
@@ -523,22 +609,21 @@ impl DawState {
                     .map(|hs| {
                         hs.audio_effects
                             .iter()
-                            .filter_map(|h| h.to_insert_effect_config())
+                            .filter_map(|h| h.to_insert_effect_config(bpm))
                             .collect()
                     })
                     .unwrap_or_default();
 
-                if let Some(existing) = self
-                    .project
-                    .tracks
-                    .iter_mut()
-                    .find(|t| t.track_type == TrackType::Return && t.name == ret_trk.name)
-                {
-                    existing.mixer.volume_db = ret_trk.volume_db;
-                    existing.mixer.pan = ret_trk.pan;
-                    existing.mixer.mute = ret_trk.mute;
-                    existing.mixer.solo = ret_trk.solo;
+                if let Some(&proj_idx) = existing_return_positions.get(ord) {
+                    let existing = &mut self.project.tracks[proj_idx];
+                    existing.name = ret_trk.name.clone();
                     existing.insert_fx = insert_fx;
+                    if let Some(m_trk) = self.mixer.tracks.get(proj_idx) {
+                        existing.mixer.volume_db = m_trk.volume_db;
+                        existing.mixer.pan = m_trk.pan;
+                        existing.mixer.mute = m_trk.mute;
+                        existing.mixer.solo = m_trk.solo;
+                    }
                 } else {
                     let tid = self.project.tracks.len() as u32;
                     let mut p_ret = TrackDefinition::new_return(tid, &ret_trk.name);
@@ -548,20 +633,48 @@ impl DawState {
                     p_ret.mixer.solo = ret_trk.solo;
                     p_ret.insert_fx = insert_fx;
                     self.project.tracks.push(p_ret);
+
+                    while self.matrix.tracks.len() < self.project.tracks.len() {
+                        let m_id = self.matrix.tracks.len() as u32;
+                        let slots = self.matrix.scenes.len().max(4);
+                        self.matrix.tracks.push(oxide_timeline::SessionTrack::new(
+                            m_id,
+                            &ret_trk.name,
+                            slots,
+                        ));
+                    }
+                    while self.timeline.tracks.len() < self.project.tracks.len() {
+                        let t_id = self.timeline.tracks.len() as u32;
+                        self.timeline.tracks.push(oxide_timeline::ArrangementTrack::new(
+                            t_id,
+                            &ret_trk.name,
+                            "Return",
+                        ));
+                    }
+                    while self.track_manager.tracks.len() < self.project.tracks.len() {
+                        let idx = self.track_manager.tracks.len();
+                        let t_ref = &self.project.tracks[idx];
+                        self.track_manager
+                            .tracks
+                            .push(timeline_track_from_project(idx, t_ref));
+                    }
+                    if let Some(m_trk) = self.mixer.tracks.get_mut(tid as usize) {
+                        m_trk.name = ret_trk.name.clone();
+                        m_trk.set_volume_db(ret_trk.volume_db);
+                        m_trk.set_pan(ret_trk.pan);
+                        m_trk.mute = ret_trk.mute;
+                        m_trk.solo = ret_trk.solo;
+                    }
                 }
             }
         }
 
-        // Sync session matrix clips into project tracks
+        // Sync session matrix clips into project tracks (including cleared/None slots)
         for (i, m_track) in self.matrix.tracks.iter().enumerate() {
             if let Some(p_track) = self.project.tracks.get_mut(i) {
+                p_track.session_clips.resize(m_track.slots.len(), None);
                 for (slot_idx, slot) in m_track.slots.iter().enumerate() {
-                    if let Some(clip) = &slot.clip {
-                        while p_track.session_clips.len() <= slot_idx {
-                            p_track.session_clips.push(None);
-                        }
-                        p_track.session_clips[slot_idx] = Some(clip.clone());
-                    }
+                    p_track.session_clips[slot_idx] = slot.clip.clone();
                 }
             }
         }
@@ -598,19 +711,25 @@ impl DawState {
             }
         }
 
-        // Sync arrangement timeline clips and automation lanes into project tracks
+        // Sync arrangement timeline clips, comped take lanes, and automation lanes unconditionally
         for (i, a_track) in self.timeline.tracks.iter().enumerate() {
             if let Some(p_track) = self.project.tracks.get_mut(i) {
-                if !a_track.clips.is_empty() {
+                let comped_clips = self
+                    .track_manager
+                    .tracks
+                    .get(i)
+                    .map(|t| t.effective_clips())
+                    .unwrap_or(&[]);
+                if a_track.clips.is_empty() && !comped_clips.is_empty() {
+                    p_track.arrangement_clips = comped_clips.to_vec();
+                } else {
                     p_track.arrangement_clips = a_track.clips.clone();
                 }
-                if !a_track.automation_lanes.is_empty() {
-                    p_track.automation_lanes = a_track.automation_lanes.clone();
-                }
+                p_track.automation_lanes = a_track.automation_lanes.clone();
             }
         }
 
-        // Sync Master FX -> MasterTrackDefinition
+        // Sync Master FX -> MasterTrackDefinition (always zero disabled delay/reverb mix, consistent RT60 ms)
         let m = &mut self.project.master_track;
         m.limiter_ceiling_db = 20.0 * self.limiter.ceiling.max(1e-5).log10();
         m.saturator_enabled = self.master_saturator_active;
@@ -623,10 +742,15 @@ impl DawState {
             m.delay_time_beats = self.delay.subdivision.beats() as f32;
             m.delay_feedback = self.delay.feedback;
             m.delay_mix = self.delay.wet;
+        } else {
+            m.delay_mix = 0.0;
         }
         if self.master_reverb_active {
-            m.reverb_decay_ms = self.reverb.decay * 1000.0;
+            let g = self.reverb.decay.clamp(0.1, 0.979);
+            m.reverb_decay_ms = (45.0 * 0.001_f32.ln() / g.ln()).clamp(50.0, 20000.0);
             m.reverb_mix = self.reverb.wet;
+        } else {
+            m.reverb_mix = 0.0;
         }
     }
 
@@ -675,7 +799,9 @@ impl DawState {
         if self.master_reverb_active {
             self.reverb.wet = m.reverb_mix.clamp(0.0, 1.0);
             if m.reverb_decay_ms > 0.0 {
-                self.reverb.decay = (m.reverb_decay_ms / 1000.0).clamp(0.1, 0.98);
+                self.reverb.decay = 0.001_f32
+                    .powf(0.045 / (m.reverb_decay_ms.max(50.0) / 1000.0))
+                    .clamp(0.1, 0.98);
             }
         }
 
@@ -691,13 +817,8 @@ impl DawState {
         self.synth = SynthEngine::new(self.sample_rate);
         self.drum_rack = Self::create_default_drum_rack(self.sample_rate);
 
-        let non_return_count = self
-            .project
-            .tracks
-            .iter()
-            .filter(|t| t.track_type != TrackType::Return)
-            .count()
-            .max(1);
+        // Keep matrix, timeline, track_manager, and project tracks aligned 1:1 by track index
+        let total_track_count = self.project.tracks.len().max(1);
         let max_slots = self
             .project
             .tracks
@@ -706,16 +827,53 @@ impl DawState {
             .max()
             .unwrap_or(4)
             .max(4);
-        self.matrix = SessionMatrix::new(non_return_count, max_slots);
+        self.matrix = SessionMatrix::new(total_track_count, max_slots);
         if !self.project.scenes.is_empty() {
             self.matrix.scenes = self.project.scenes.clone();
         }
 
         let mut loaded_first_synth = false;
         let mut loaded_first_drum = false;
+        let mut cleared_default_returns = false;
 
         for (i, trk) in self.project.tracks.iter().enumerate() {
+            // Mixer (0..16 cached in self.mixer.tracks)
+            if let Some(m_trk) = self.mixer.tracks.get_mut(i) {
+                m_trk.name = trk.name.clone();
+                m_trk.set_volume_db(trk.mixer.volume_db);
+                m_trk.set_pan(trk.mixer.pan);
+                m_trk.mute = trk.mixer.mute;
+                m_trk.solo = trk.mixer.solo;
+            }
+
+            // TrackManager & Timeline (1:1 alignment across ALL track types including Return)
+            self.track_manager
+                .tracks
+                .push(timeline_track_from_project(i, trk));
+
+            let type_label = match trk.track_type {
+                TrackType::MidiSynth => "MidiSynth",
+                TrackType::DrumRack => "DrumRack",
+                TrackType::Audio => "Audio",
+                TrackType::Group => "Group",
+                TrackType::Return => "Return",
+            };
+            let mut arr_trk = oxide_timeline::ArrangementTrack::new(i as u32, &trk.name, type_label);
+            arr_trk.clips = trk.arrangement_clips.clone();
+            arr_trk.automation_lanes = trk.automation_lanes.clone();
+            self.timeline.tracks.push(arr_trk);
+
+            // Session matrix metadata at index i
+            if let Some(m_track) = self.matrix.tracks.get_mut(i) {
+                m_track.id = i as u32;
+                m_track.name = trk.name.clone();
+            }
+
             if trk.track_type == TrackType::Return {
+                if !cleared_default_returns {
+                    self.track_manager.return_tracks.clear();
+                    cleared_default_returns = true;
+                }
                 let ret_id = self.track_manager.add_return_track(&trk.name);
                 self.custom_return_ids.push(ret_id);
                 if let Some(rt) = self
@@ -741,37 +899,8 @@ impl DawState {
                 continue;
             }
 
-            // Mixer
-            if let Some(m_trk) = self.mixer.tracks.get_mut(i) {
-                m_trk.name = trk.name.clone();
-                m_trk.set_volume_db(trk.mixer.volume_db);
-                m_trk.set_pan(trk.mixer.pan);
-                m_trk.mute = trk.mixer.mute;
-                m_trk.solo = trk.mixer.solo;
-            }
-
-            // TrackManager
-            self.track_manager
-                .tracks
-                .push(timeline_track_from_project(i, trk));
-
-            // Timeline
-            let type_label = match trk.track_type {
-                TrackType::MidiSynth => "MidiSynth",
-                TrackType::DrumRack => "DrumRack",
-                TrackType::Audio => "Audio",
-                TrackType::Group => "Group",
-                TrackType::Return => "Return",
-            };
-            let mut arr_trk = oxide_timeline::ArrangementTrack::new(i as u32, &trk.name, type_label);
-            arr_trk.clips = trk.arrangement_clips.clone();
-            arr_trk.automation_lanes = trk.automation_lanes.clone();
-            self.timeline.tracks.push(arr_trk);
-
             // Session matrix clips & warped audio clips
             if let Some(m_track) = self.matrix.tracks.get_mut(i) {
-                m_track.id = i as u32;
-                m_track.name = trk.name.clone();
                 for (slot_idx, maybe_clip) in trk.session_clips.iter().enumerate() {
                     if let Some(clip) = maybe_clip {
                         while m_track.slots.len() <= slot_idx {
@@ -827,6 +956,17 @@ impl DawState {
                 }
             }
         }
+
+        // Remap loaded track sends from 0-based send bus indices -> actual Return IDs
+        if !self.custom_return_ids.is_empty() {
+            for tm_trk in &mut self.track_manager.tracks {
+                for send in &mut tm_trk.sends {
+                    if let Some(&ret_id) = self.custom_return_ids.get(send.return_track_id as usize) {
+                        send.return_track_id = ret_id;
+                    }
+                }
+            }
+        }
     }
 
     fn apply_drum_def_to_rack(rack: &mut DrumRack, dr_def: &DrumRackDefinition) {
@@ -870,5 +1010,107 @@ impl DawState {
 impl Default for DawState {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use oxide_timeline::{ArrangementClip, MidiNote, MidiPattern};
+
+    #[test]
+    fn test_sync_state_and_project_alignment_with_interleaved_return_track() {
+        let mut state = DawState::new();
+        let mut ret = TrackDefinition::new_return(2, "Reverb Return");
+        ret.mixer.volume_db = -6.0;
+        let mut audio = TrackDefinition::new_audio(3, "Vox");
+        let mut sess_clip = SessionClip::new(1, "VoxClip", ClipPattern::Midi(MidiPattern::new(4.0)));
+        sess_clip.name = "VoxClip".to_string();
+        audio.session_clips.push(Some(sess_clip));
+
+        state.project.tracks = vec![
+            TrackDefinition::new_synth(0, "Synth 0"),
+            ret,
+            audio,
+        ];
+        state.sync_state_from_project();
+
+        assert_eq!(state.matrix.tracks.len(), 3);
+        assert_eq!(state.timeline.tracks.len(), 3);
+        assert_eq!(state.track_manager.tracks.len(), 3);
+        assert!(state.matrix.tracks[2].slots[0].clip.is_some());
+
+        // Clearing matrix slot must propagate to project.tracks on sync_project_from_state
+        state.matrix.tracks[2].slots[0].set_clip(None);
+        state.project.tracks[1].mixer.volume_db = -9.5;
+        state.mixer.tracks[1].set_volume_db(-9.5);
+        state.sync_project_from_state();
+        assert!(state.project.tracks[2].session_clips[0].is_none());
+        assert!((state.project.tracks[1].mixer.volume_db - (-9.5)).abs() < 0.05);
+        assert_eq!(state.project.tracks[1].track_type, TrackType::Return);
+    }
+
+    #[test]
+    fn test_delete_track_reloads_synth_cleans_return_and_preserves_track16_plus() {
+        let mut state = DawState::new();
+        // Set distinctive cutoff on track 0 (active synth)
+        state.synth.set_parameter("filter_frequency", 500.0);
+        state.sync_synth_params_to_project();
+
+        // Add track 2 with distinct cutoff 2500.0
+        let mut synth2 = TrackDefinition::new_synth(2, "Second Synth");
+        if let InstrumentConfig::BuiltinSubtractiveSynth(ref mut p) = synth2.instrument {
+            p.filter_frequency = 2500.0;
+        }
+        state.project.tracks.push(synth2);
+        // Add return at index 3 + pad tracks beyond 16
+        let ret_id = state.track_manager.add_return_track("DelReturn");
+        state.custom_return_ids.push(ret_id);
+        let ret_track = TrackDefinition::new_return(3, "DelReturn");
+        state.project.tracks.push(ret_track);
+        while state.project.tracks.len() < 18 {
+            let idx = state.project.tracks.len() as u32;
+            let mut t = TrackDefinition::new_synth(idx, format!("T{}", idx));
+            t.mixer.volume_db = -(idx as f32);
+            state.project.tracks.push(t);
+        }
+
+        // Delete active synth track 0 -> active synth reloads from track 1 (old track 2, cutoff=2500.0)
+        // and track 16 (old 17) keeps its mixer volume_db = -17.0
+        state.delete_track_at(0).unwrap();
+        assert!((state.synth.params.values[oxide_dsp::parameters::ParamId::FilterFrequency as usize] - 2500.0).abs() < 1.0);
+        assert!((state.project.tracks[16].mixer.volume_db - (-17.0)).abs() < 1e-4);
+
+        // Delete return track (now at index 2) -> removed from custom_return_ids & return_tracks
+        state.delete_track_at(2).unwrap();
+        assert!(state.custom_return_ids.is_empty());
+        assert!(!state.track_manager.return_tracks.iter().any(|r| r.id == ret_id));
+    }
+
+    #[test]
+    fn test_sync_project_comped_takes_inactive_fx_zeroing_and_reverb_ms_roundtrip() {
+        let mut state = DawState::new();
+        let mut mp = MidiPattern::new(4.0);
+        mp.notes.push(MidiNote { pitch: 60, velocity: 100, start_beat: 0.0, duration_beats: 1.0, probability: 1.0 });
+        state.track_manager.tracks[0].clips.push(ArrangementClip::new(1, "Comped", 0.0, 4.0, ClipPattern::Midi(mp)));
+
+        // Enable delay/reverb, sync, then disable and re-sync
+        state.master_delay_active = true;
+        state.delay.wet = 0.4;
+        state.master_reverb_active = true;
+        state.reverb.wet = 0.5;
+        state.reverb.decay = 0.77179;
+        state.sync_project_from_state();
+        assert_eq!(state.project.tracks[0].arrangement_clips.len(), 1);
+        assert!((state.project.master_track.reverb_decay_ms - 1200.0).abs() < 2.0);
+
+        state.sync_state_from_project();
+        assert!((state.reverb.decay - 0.77179).abs() < 1e-3);
+
+        state.master_delay_active = false;
+        state.master_reverb_active = false;
+        state.sync_project_from_state();
+        assert_eq!(state.project.master_track.delay_mix, 0.0);
+        assert_eq!(state.project.master_track.reverb_mix, 0.0);
     }
 }

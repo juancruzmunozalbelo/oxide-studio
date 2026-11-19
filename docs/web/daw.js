@@ -27,7 +27,7 @@
     isRecording: false,
     loopEnabled: true,
     metronome: false,
-    activeScene: 2, // Scene 2: Peak Drop active by default so all 4 tracks play immediately
+    activeScene: 0, // Scene 0: Intro active by default matching HTML matrix active-clip
     tempo: 136.0,
     swing: 56, // 50% = straight, 75% = max swing
     currentStep: 0,
@@ -250,13 +250,19 @@
     NODES.synthBusInput = synthBusInput;
 
     const roarShaper = ctx.createWaveShaper();
-    roarShaper.curve = getCachedDistortionCurve(STATE.fx.roar.drive, STATE.fx.roar.curve);
+    roarShaper.curve = getCachedDistortionCurve(
+      STATE.fx.roar.active ? STATE.fx.roar.drive : 0,
+      STATE.fx.roar.curve
+    );
     roarShaper.oversample = '2x';
     NODES.roarShaper = roarShaper;
 
     const roarTone = ctx.createBiquadFilter();
     roarTone.type = 'lowpass';
-    roarTone.frequency.setValueAtTime(STATE.fx.roar.tone || 4500, ctx.currentTime);
+    roarTone.frequency.setValueAtTime(
+      STATE.fx.roar.active ? (STATE.fx.roar.tone || 4500) : 20000,
+      ctx.currentTime
+    );
     roarTone.Q.setValueAtTime(0.707, ctx.currentTime);
     NODES.roarToneFilter = roarTone;
 
@@ -292,13 +298,16 @@
     const glue = ctx.createDynamicsCompressor();
     glue.threshold.setValueAtTime(STATE.fx.glue.threshold, ctx.currentTime);
     glue.knee.setValueAtTime(6.0, ctx.currentTime);
-    glue.ratio.setValueAtTime(STATE.fx.glue.ratio, ctx.currentTime);
+    glue.ratio.setValueAtTime(STATE.fx.glue.active ? STATE.fx.glue.ratio : 1.0, ctx.currentTime);
     glue.attack.setValueAtTime(0.015, ctx.currentTime);
     glue.release.setValueAtTime(0.12, ctx.currentTime);
     NODES.glueCompressor = glue;
 
     const glueMakeup = ctx.createGain();
-    glueMakeup.gain.setValueAtTime(Math.pow(10, (STATE.fx.glue.makeup || 0) / 40), ctx.currentTime);
+    glueMakeup.gain.setValueAtTime(
+      STATE.fx.glue.active ? Math.pow(10, (STATE.fx.glue.makeup || 0) / 40) : 1.0,
+      ctx.currentTime
+    );
     NODES.glueMakeupGain = glueMakeup;
 
     // Subtle OTT Punch, Mid & Air sheen shelves
@@ -347,9 +356,9 @@
     ottLow.connect(ottMid);
     ottMid.connect(ottAir);
     ottAir.connect(limiter);
-    limiter.connect(masterAnalyser);
-    masterAnalyser.connect(masterFader);
-    masterFader.connect(ctx.destination);
+    limiter.connect(masterFader);
+    masterFader.connect(masterAnalyser);
+    masterAnalyser.connect(ctx.destination);
 
     // Reverb Return Bus (Return A — high-passed at 260 Hz so sub-bass never muddies reverb)
     const returnAGain = ctx.createGain();
@@ -514,7 +523,7 @@
     triggerDrumVoiceOnCtx(STATE.audioCtx, dest, voiceId, time, velocity, isAccent);
   }
 
-  function triggerDrumVoiceOnCtx(ctx, dest, voiceId, time, velocity, isAccent) {
+  function triggerDrumVoiceOnCtx(ctx, dest, voiceId, time, velocity, isAccent, chokeState = null) {
     const vel = (isAccent ? 1.18 : 0.92) * (velocity || 0.85);
     const noiseBuf = getNoiseBuffer(ctx);
 
@@ -728,14 +737,16 @@
       }
 
       case 'ch': {
-        // Closed Hat chokes Open Hat
-        if (ctx === STATE.audioCtx && activeOpenHatGain) {
+        // Closed Hat chokes Open Hat (both live AudioContext and offline bounce context)
+        const currentOh = chokeState ? chokeState.openHatGain : (ctx === STATE.audioCtx ? activeOpenHatGain : null);
+        if (currentOh) {
           try {
-            activeOpenHatGain.gain.cancelScheduledValues(time);
-            activeOpenHatGain.gain.setValueAtTime(activeOpenHatGain.gain.value, time);
-            activeOpenHatGain.gain.linearRampToValueAtTime(0.0001, time + 0.006);
+            currentOh.gain.cancelScheduledValues(time);
+            currentOh.gain.setValueAtTime(Math.max(0.0001, currentOh.gain.value || 0.25), time);
+            currentOh.gain.linearRampToValueAtTime(0.0001, time + 0.006);
           } catch (_) {}
-          activeOpenHatGain = null;
+          if (chokeState) chokeState.openHatGain = null;
+          else if (ctx === STATE.audioCtx) activeOpenHatGain = null;
         }
 
         // Authentic 909 Closed Hat: Crisp bandpassed noise + attenuated metallic shimmer through 2-stage 8.8kHz HPF
@@ -794,7 +805,9 @@
         const hatGain = ctx.createGain();
         hatGain.gain.setValueAtTime(0.26 * vel, time);
         hatGain.gain.exponentialRampToValueAtTime(0.0001, time + 0.28);
-        if (ctx === STATE.audioCtx) {
+        if (chokeState) {
+          chokeState.openHatGain = hatGain;
+        } else if (ctx === STATE.audioCtx) {
           activeOpenHatGain = hatGain;
         }
 
@@ -1027,7 +1040,10 @@
     const t = time !== null ? time : ctx.currentTime;
     const dest = destTrack === 2 && NODES.synthBusInput ? NODES.synthBusInput : NODES.trackGains[destTrack];
     if (!dest) return;
+    renderSynthVoiceOnCtx(ctx, dest, midiNote, duration, t);
+  }
 
+  function renderSynthVoiceOnCtx(ctx, dest, midiNote, duration, t) {
     const freq = 440 * Math.pow(2, (midiNote - 69) / 12);
     const mode = STATE.synth.mode;
 
@@ -1039,7 +1055,7 @@
     filter.frequency.exponentialRampToValueAtTime(Math.max(240, startCut * 0.45), t + duration);
     filter.Q.setValueAtTime(Math.min(5.0, STATE.synth.resonance), t);
 
-    // Clean, headroom-balanced Amplitude ADSR (0.26 max per voice so polyphony never clips)
+    // Clean, headroom-balanced Amplitude ADSR with strictly monotonic timestamps
     const ampGain = ctx.createGain();
     const att = Math.max(0.004, STATE.synth.attack);
     const dec = Math.max(0.03, STATE.synth.decay);
@@ -1047,11 +1063,16 @@
     const rel = Math.max(0.03, Math.min(0.35, STATE.synth.release));
     const voicePeak = 0.24;
 
+    const effAtt = Math.min(att, duration * 0.45);
+    const tPeak = t + effAtt;
+    const tDecayEnd = Math.min(t + duration, tPeak + dec);
+    const tReleaseStart = Math.max(tDecayEnd, t + duration);
+
     ampGain.gain.setValueAtTime(0.0001, t);
-    ampGain.gain.linearRampToValueAtTime(voicePeak, t + att);
-    ampGain.gain.exponentialRampToValueAtTime(Math.max(0.001, sus * voicePeak), t + att + dec);
-    ampGain.gain.setValueAtTime(Math.max(0.001, sus * voicePeak), t + duration);
-    ampGain.gain.exponentialRampToValueAtTime(0.0001, t + duration + rel);
+    ampGain.gain.linearRampToValueAtTime(voicePeak, tPeak);
+    ampGain.gain.exponentialRampToValueAtTime(Math.max(0.001, sus * voicePeak), tDecayEnd);
+    ampGain.gain.setValueAtTime(Math.max(0.001, sus * voicePeak), tReleaseStart);
+    ampGain.gain.exponentialRampToValueAtTime(0.0001, tReleaseStart + rel);
 
     filter.connect(ampGain);
     ampGain.connect(dest);
@@ -1070,8 +1091,8 @@
 
       osc1.start(t);
       osc2.start(t);
-      osc1.stop(t + duration + rel + 0.05);
-      osc2.stop(t + duration + rel + 0.05);
+      osc1.stop(tReleaseStart + rel + 0.05);
+      osc2.stop(tReleaseStart + rel + 0.05);
 
     } else if (mode === 'meld') {
       // Meld: Bi-timbral FM Swarm
@@ -1084,7 +1105,7 @@
       carrier.frequency.setValueAtTime(freq, t);
       mod.frequency.setValueAtTime(freq * 2.0, t);
       modGain.gain.setValueAtTime(freq * (0.4 + STATE.synth.morph * 0.9), t);
-      modGain.gain.exponentialRampToValueAtTime(1.0, t + duration);
+      modGain.gain.exponentialRampToValueAtTime(1.0, tReleaseStart);
 
       mod.connect(modGain);
       modGain.connect(carrier.frequency);
@@ -1092,8 +1113,8 @@
 
       carrier.start(t);
       mod.start(t);
-      carrier.stop(t + duration + rel + 0.05);
-      mod.stop(t + duration + rel + 0.05);
+      carrier.stop(tReleaseStart + rel + 0.05);
+      mod.stop(tReleaseStart + rel + 0.05);
 
     } else if (mode === 'operator') {
       // Operator: Classic 2:1 FM Pluck
@@ -1114,8 +1135,8 @@
 
       opA.start(t);
       opB.start(t);
-      opA.stop(t + duration + rel + 0.05);
-      opB.stop(t + duration + rel + 0.05);
+      opA.stop(tReleaseStart + rel + 0.05);
+      opB.stop(tReleaseStart + rel + 0.05);
 
     } else {
       // Wavetable: Detuned pulse/saw chordal lead
@@ -1129,8 +1150,8 @@
       oscSub.connect(filter);
       osc.start(t);
       oscSub.start(t);
-      osc.stop(t + duration + rel + 0.05);
-      oscSub.stop(t + duration + rel + 0.05);
+      osc.stop(tReleaseStart + rel + 0.05);
+      oscSub.stop(tReleaseStart + rel + 0.05);
     }
   }
 
@@ -1166,8 +1187,13 @@
   }
 
   function isMixerTrackAudible(trackIdx) {
-    const allStrips = STATE.tracks.slice(0, 6);
-    const anyTrackSolo = allStrips.some(t => t.solo);
+    if (trackIdx >= 4 && trackIdx < 6) {
+      const anyReturnSolo = STATE.tracks.slice(4, 6).some(t => t.solo);
+      if (anyReturnSolo) return STATE.tracks[trackIdx].solo;
+      return !STATE.tracks[trackIdx].mute;
+    }
+    const mainStrips = STATE.tracks.slice(0, 4);
+    const anyTrackSolo = mainStrips.some(t => t.solo);
     if (anyTrackSolo) return STATE.tracks[trackIdx].solo;
     return !STATE.tracks[trackIdx].mute;
   }
@@ -1192,6 +1218,7 @@
     if (NODES.masterFader) {
       const dimMult = STATE.tracks[6].dim ? 0.15 : 1.0;
       NODES.masterFader.gain.setTargetAtTime(STATE.tracks[6].volume * dimMult, now, 0.01);
+      NODES.masterFader.channelCountMode = STATE.tracks[6].mono ? 'explicit' : 'max';
       NODES.masterFader.channelCount = STATE.tracks[6].mono ? 1 : 2;
     }
   }
@@ -1455,7 +1482,7 @@
     }
   }
 
-  const BASS_PATTERNS = [
+  const DEFAULT_BASS_PATTERNS = [
     // Clip 0: Sub Sine 55Hz (offbeat deep sub pulse)
     [-1, 0, 0, -1, -1, 0, 0, -1, -1, 0, 0, -1, -1, 0, 2, 0],
     // Clip 1: Acid 303 Sweep (driving 16th-note acid sequence)
@@ -1466,7 +1493,7 @@
     [0, -1, -1, -1, -1, -1, 0, -1, 3, -1, -1, -1, -1, -1, 2, -1]
   ];
 
-  const LEAD_PATTERNS = [
+  const DEFAULT_LEAD_PATTERNS = [
     // Clip 0: Melodic Pluck
     [0, -1, -1, 2, -1, -1, 4, -1, 2, -1, -1, 0, -1, -1, -1, -1],
     // Clip 1: FM Swarm Riser (building tension arpeggio)
@@ -1476,6 +1503,9 @@
     // Clip 3: Reverb Drone
     [0, -1, -1, -1, -1, -1, -1, -1, 4, -1, -1, -1, -1, -1, -1, -1]
   ];
+
+  const BASS_PATTERNS = DEFAULT_BASS_PATTERNS.map(p => [...p]);
+  const LEAD_PATTERNS = DEFAULT_LEAD_PATTERNS.map(p => [...p]);
 
   function scheduleStep(stepIndex, time) {
     // 0. Optional Metronome Click on quarter-note beats (0, 4, 8, 12)
@@ -1528,7 +1558,9 @@
     // 5. UI Cursor Updates scheduled for RAF
     const stepTimeMs = (time - STATE.audioCtx.currentTime) * 1000;
     setTimeout(() => {
-      updateUIPlayhead(stepIndex);
+      if (STATE.isPlaying) {
+        updateUIPlayhead(stepIndex);
+      }
     }, Math.max(0, stepTimeMs));
   }
 
@@ -1913,25 +1945,34 @@
     const el = document.getElementById(containerId);
     if (!el) return;
 
-    // Total 14 segments:
-    // - Segments 1–8: Green (-60 to -12 dB)
-    // - Segments 9–12: Yellow (-12 to -0.3 dB)
-    // - Segments 13–14: Red (> -0.3 dB)
+    // Pre-create 14 LED segments once (CSS column-reverse places idx 0 = bottom green, idx 13 = top red peak)
+    if (!el._segs || el._segs.length !== 14) {
+      el.innerHTML = '';
+      el._segs = [];
+      for (let s = 1; s <= 14; s++) {
+        const div = document.createElement('div');
+        div.className = 'meter-seg';
+        el.appendChild(div);
+        el._segs.push(div);
+      }
+    }
+
     const norm = Math.max(0, Math.min(1, (db + 48) / 48)); // -48dB to 0dB range
     const litCount = Math.round(norm * 14);
+    if (el._lastLit === litCount) return;
+    el._lastLit = litCount;
 
-    let html = '';
-    for (let s = 14; s >= 1; s--) {
-      const isLit = s <= litCount;
-      let segClass = 'meter-seg';
-      if (isLit) {
-        if (s <= 8) segClass += ' lit-green';
-        else if (s <= 12) segClass += ' lit-yellow';
-        else segClass += ' lit-red';
+    for (let i = 0; i < 14; i++) {
+      const s = i + 1;
+      const seg = el._segs[i];
+      if (s <= litCount) {
+        if (s <= 8) seg.className = 'meter-seg lit-green';
+        else if (s <= 12) seg.className = 'meter-seg lit-yellow';
+        else seg.className = 'meter-seg lit-red';
+      } else {
+        seg.className = 'meter-seg';
       }
-      html += `<div class="${segClass}"></div>`;
     }
-    el.innerHTML = html;
   }
 
   // =========================================================================
@@ -1988,16 +2029,16 @@
     let responseText = '';
     let toolBadge = '⚡ transport_get_telemetry()';
 
-    // 1. Kick Fatter / Kick Mas Gordo
+    // 1. Kick Fatter / Kick Mas Gordo (Track 0 Drum channel gain + #fader-ch0 sync; never touches Track 2 Lead Roar)
     if (raw.includes('kick') && (raw.includes('fat') || raw.includes('gordo') || raw.includes('peso') || raw.includes('bass'))) {
-      STATE.tracks[0].volume = 1.05;
-      STATE.fx.roar.active = true;
-      STATE.fx.roar.drive = 14;
-      if (NODES.roarShaper) NODES.roarShaper.curve = makeDistortionCurve(14, 'warm');
+      STATE.tracks[0].volume = 1.15;
+      const fader0 = document.getElementById('fader-ch0');
+      if (fader0) fader0.value = '1.15';
+      syncMixerTrackGains();
       responseText = STATE.language === 'en'
-        ? "Sub-weighted kick applied. Boosted Drum channel gain to +0.8 dB and configured Roar warm saturation drive to +14 dB."
-        : "Kick engordado. Aumenté la ganancia del canal Drums a +0.8 dB y configuré saturación cálida Roar a +14 dB.";
-      toolBadge = '⚡ drums_configure_pad(pad: "Kick909", drive: "+14dB")';
+        ? "Sub-weighted kick applied. Boosted Track 1 (Drums) channel fader gain to +1.2 dB."
+        : "Kick engordado. Aumenté la ganancia del fader del canal 1 (Drums) a +1.2 dB.";
+      toolBadge = '⚡ mixer_set_track_volume(track: 0, volume: 1.15)';
     }
     // 2. Acid 303 Bass / Mas Acido
     else if (raw.includes('acid') || raw.includes('303') || raw.includes('acido')) {
@@ -2032,15 +2073,13 @@
         : "Ritmo de RKT / Turreo activado a 105 BPM. Síncopa de tresillo cargada en Shaker, Woodblock y Bombo 909 con swing al 58%.";
       toolBadge = '⚡ clip_create_drums(groove: "rkt_tresillo_105")';
     }
-    // 5. Explain OKF Chapter
+    // 5. Explain OKF Chapter (exact word-boundary match so "OKF-10" doesn't match "1")
     else if (raw.includes('okf') || raw.includes('explain') || raw.includes('explicar')) {
       let chKey = 'OKF-01';
-      for (let i = 1; i <= 10; i++) {
-        const id = `okf-${i < 10 ? '0' + i : i}`;
-        if (raw.includes(id) || raw.includes(String(i))) {
-          chKey = `OKF-${i < 10 ? '0' + i : i}`;
-          break;
-        }
+      const okfMatch = raw.match(/\bokf-?(\d{1,2})\b/) || raw.match(/\b(10|0?[1-9])\b/);
+      if (okfMatch) {
+        const num = Math.max(1, Math.min(10, parseInt(okfMatch[1], 10)));
+        chKey = `OKF-${num < 10 ? '0' + num : num}`;
       }
       const data = COPILOT_KNOWLEDGE[chKey] || COPILOT_KNOWLEDGE['OKF-01'];
       responseText = data[STATE.language] || data.en;
@@ -2087,7 +2126,9 @@
 
     const bubble = document.createElement('div');
     bubble.className = 'msg-bubble';
-    bubble.innerHTML = `<p>${text}</p>`;
+    const p = document.createElement('p');
+    p.textContent = text;
+    bubble.appendChild(p);
 
     if (toolBadge) {
       const badge = document.createElement('div');
@@ -2140,7 +2181,7 @@
   // 9. IN-BROWSER AUDIO & PROJECT EXPORTERS (.wav & .als)
   // =========================================================================
 
-  // Offline Stereo WAV 16-Bit 44.1kHz PCM Exporter (Full 4-Track Session Bounce)
+  // Offline Stereo WAV 16-Bit 44.1kHz PCM Exporter (Full 4-Track Session Bounce + FX + Mixer)
   async function exportWav() {
     const sampleRate = 44100;
     const durationBars = 4;
@@ -2148,18 +2189,150 @@
     const totalSamples = Math.ceil(sampleRate * totalSeconds);
 
     const OfflineCtxClass = window.OfflineAudioContext || window.webkitOfflineAudioContext;
+    if (!OfflineCtxClass) {
+      appendChatMessage('bot', 'WAV export failed: OfflineAudioContext is not supported in this browser.');
+      return;
+    }
     const offlineCtx = new OfflineCtxClass(2, totalSamples, sampleRate);
 
+    // Master Chain: PreGain -> Glue -> GlueMakeup -> TruePeakLimiter -> MasterFader -> Destination
+    const masterPre = offlineCtx.createGain();
+    masterPre.gain.setValueAtTime(0.72, 0);
+
+    const glueComp = offlineCtx.createDynamicsCompressor();
+    glueComp.threshold.setValueAtTime(STATE.fx.glue.threshold, 0);
+    glueComp.knee.setValueAtTime(6.0, 0);
+    glueComp.ratio.setValueAtTime(STATE.fx.glue.active ? STATE.fx.glue.ratio : 1.0, 0);
+    glueComp.attack.setValueAtTime(0.015, 0);
+    glueComp.release.setValueAtTime(0.12, 0);
+
+    const glueMakeup = offlineCtx.createGain();
+    glueMakeup.gain.setValueAtTime(
+      STATE.fx.glue.active ? Math.pow(10, (STATE.fx.glue.makeup || 0) / 40) : 1.0,
+      0
+    );
+
     const masterOut = offlineCtx.createDynamicsCompressor();
-    masterOut.threshold.setValueAtTime(-1.0, 0);
-    masterOut.ratio.setValueAtTime(12.0, 0);
-    masterOut.connect(offlineCtx.destination);
+    masterOut.threshold.setValueAtTime(STATE.limiterCeiling, 0);
+    masterOut.knee.setValueAtTime(0.0, 0);
+    masterOut.ratio.setValueAtTime(20.0, 0);
+    masterOut.attack.setValueAtTime(0.002, 0);
+    masterOut.release.setValueAtTime(STATE.fx.limiter.release || 0.08, 0);
+
+    const masterFader = offlineCtx.createGain();
+    const dimMult = STATE.tracks[6].dim ? 0.15 : 1.0;
+    masterFader.gain.setValueAtTime(
+      STATE.tracks[6].mute ? 0.0 : STATE.tracks[6].volume * dimMult,
+      0
+    );
+    masterFader.channelCountMode = STATE.tracks[6].mono ? 'explicit' : 'max';
+    masterFader.channelCount = STATE.tracks[6].mono ? 1 : 2;
+
+    masterPre.connect(glueComp);
+    glueComp.connect(glueMakeup);
+    glueMakeup.connect(masterOut);
+    masterOut.connect(masterFader);
+    masterFader.connect(offlineCtx.destination);
+
+    // Offline Returns A (Reverb) & B (Delay)
+    const offReturnA = offlineCtx.createGain();
+    offReturnA.gain.setValueAtTime(
+      isMixerTrackAudible(4) && STATE.fx.reverb.active
+        ? STATE.tracks[4].volume * 0.55 * (STATE.fx.reverb.mix / 0.28)
+        : 0.0,
+      0
+    );
+    const revHpf = offlineCtx.createBiquadFilter();
+    revHpf.type = 'highpass';
+    revHpf.frequency.setValueAtTime(260, 0);
+    const offConvolver = offlineCtx.createConvolver();
+    offConvolver.buffer = buildReverbImpulse(offlineCtx, STATE.fx.reverb.decay);
+    const revPan = offlineCtx.createStereoPanner();
+    revPan.pan.setValueAtTime(STATE.tracks[4].pan || 0, 0);
+    offReturnA.connect(revHpf);
+    revHpf.connect(offConvolver);
+    offConvolver.connect(revPan);
+    revPan.connect(masterPre);
+
+    const offReturnB = offlineCtx.createGain();
+    offReturnB.gain.setValueAtTime(
+      isMixerTrackAudible(5) ? STATE.tracks[5].volume * 0.50 : 0.0,
+      0
+    );
+    const offDelay = offlineCtx.createDelay(1.0);
+    offDelay.delayTime.setValueAtTime((60 / STATE.tempo) * 0.75, 0);
+    const offDlyFlt = offlineCtx.createBiquadFilter();
+    offDlyFlt.type = 'bandpass';
+    offDlyFlt.frequency.setValueAtTime(1600, 0);
+    offDlyFlt.Q.setValueAtTime(0.9, 0);
+    const offDlyFb = offlineCtx.createGain();
+    offDlyFb.gain.setValueAtTime(0.32, 0);
+    offDelay.connect(offDlyFlt);
+    offDlyFlt.connect(offDlyFb);
+    offDlyFb.connect(offDelay);
+    const dlyPan = offlineCtx.createStereoPanner();
+    dlyPan.pan.setValueAtTime(STATE.tracks[5].pan || 0, 0);
+    offReturnB.connect(offDelay);
+    offDlyFlt.connect(dlyPan);
+    dlyPan.connect(masterPre);
+
+    // Offline Track Channel Strips (volume, pan, mute/solo, sends A/B)
+    const offTrackGains = [];
+    for (let i = 0; i < 4; i++) {
+      const g = offlineCtx.createGain();
+      const aud = isMixerTrackAudible(i);
+      g.gain.setValueAtTime(aud ? STATE.tracks[i].volume : 0.0, 0);
+
+      const pan = offlineCtx.createStereoPanner();
+      pan.pan.setValueAtTime(STATE.tracks[i].pan || 0, 0);
+      g.connect(pan);
+      pan.connect(masterPre);
+
+      const sA = offlineCtx.createGain();
+      sA.gain.setValueAtTime(STATE.tracks[i].sendA || 0, 0);
+      g.connect(sA);
+      sA.connect(offReturnA);
+
+      const sB = offlineCtx.createGain();
+      sB.gain.setValueAtTime(STATE.tracks[i].sendB || 0, 0);
+      g.connect(sB);
+      sB.connect(offReturnB);
+
+      offTrackGains.push(g);
+    }
+
+    // Track 2 Synth Bus (Roar Saturation + Tone + ZDF Filter)
+    const offSynthInput = offlineCtx.createGain();
+    offSynthInput.gain.setValueAtTime(0.85, 0);
+    const offRoar = offlineCtx.createWaveShaper();
+    offRoar.curve = getCachedDistortionCurve(
+      STATE.fx.roar.active ? STATE.fx.roar.drive : 0,
+      STATE.fx.roar.curve
+    );
+    const offRoarTone = offlineCtx.createBiquadFilter();
+    offRoarTone.type = 'lowpass';
+    offRoarTone.frequency.setValueAtTime(STATE.fx.roar.tone || 4500, 0);
+    const offFlt1 = offlineCtx.createBiquadFilter();
+    offFlt1.type = 'lowpass';
+    offFlt1.frequency.setValueAtTime(STATE.synth.cutoff, 0);
+    offFlt1.Q.setValueAtTime(Math.min(4.0, Math.sqrt(STATE.synth.resonance)), 0);
+    const offFlt2 = offlineCtx.createBiquadFilter();
+    offFlt2.type = 'lowpass';
+    offFlt2.frequency.setValueAtTime(STATE.synth.cutoff, 0);
+    offFlt2.Q.setValueAtTime(Math.min(4.0, Math.sqrt(STATE.synth.resonance)), 0);
+    offSynthInput.connect(offRoar);
+    offRoar.connect(offRoarTone);
+    offRoarTone.connect(offFlt1);
+    offFlt1.connect(offFlt2);
+    offFlt2.connect(offTrackGains[2]);
 
     const secondsPer16th = (60 / STATE.tempo) / 4;
     const totalSteps = 16 * durationBars;
-    const activeBassClip = Math.max(0, getActiveClipIndex(1));
-    const activeLeadClip = Math.max(0, getActiveClipIndex(2));
-    const activeKeysClip = Math.max(0, getActiveClipIndex(3));
+    const activeDrumClip = getActiveClipIndex(0);
+    const activeBassClip = getActiveClipIndex(1);
+    const activeLeadClip = getActiveClipIndex(2);
+    const activeKeysClip = getActiveClipIndex(3);
+    const offlineChokeState = { openHatGain: null };
 
     for (let s = 0; s < totalSteps; s++) {
       const stepIdx = s % 16;
@@ -2167,68 +2340,71 @@
       const swingSec = (isOdd && STATE.swing > 50) ? secondsPer16th * ((STATE.swing - 50) / 50) * 0.66 : 0;
       const t = s * secondsPer16th + swingSec;
 
-      // 1. Drums
-      if (isMixerTrackAudible(0)) {
+      // 1. Drums (honors stopped clip state + offline Open-Hat choke)
+      if (activeDrumClip >= 0 && isMixerTrackAudible(0)) {
         STATE.drumVoices.forEach(voice => {
           if (isDrumVoiceAudible(voice) && voice.steps[stepIdx] > 0) {
-            triggerDrumVoiceOnCtx(offlineCtx, masterOut, voice.id, t, 0.85 * STATE.tracks[0].volume, voice.steps[stepIdx] === 2);
+            triggerDrumVoiceOnCtx(
+              offlineCtx,
+              offTrackGains[0],
+              voice.id,
+              t,
+              0.85,
+              voice.steps[stepIdx] === 2,
+              offlineChokeState
+            );
           }
         });
       }
 
-      // 2. Sub/Acid Bass
-      if (isMixerTrackAudible(1)) {
+      // 2. Sub/Acid Bass (honors stopped clip state + track 1 gain/pan/sends)
+      if (activeBassClip >= 0 && isMixerTrackAudible(1)) {
         const bassDeg = (BASS_PATTERNS[activeBassClip] || BASS_PATTERNS[2])[stepIdx];
         if (bassDeg >= 0) {
           const midi = getScalePitch(bassDeg, activeBassClip === 1 ? 2 : 1);
           const freq = 440 * Math.pow(2, (midi - 69) / 12);
           const osc = offlineCtx.createOscillator();
+          const subOsc = offlineCtx.createOscillator();
           const flt = offlineCtx.createBiquadFilter();
           const g = offlineCtx.createGain();
+          subOsc.type = 'sine';
           osc.type = 'sawtooth';
+          subOsc.frequency.setValueAtTime(freq, t);
           osc.frequency.setValueAtTime(freq, t);
+          const sawScale = offlineCtx.createGain();
+          sawScale.gain.setValueAtTime(0.28, t);
           flt.type = 'lowpass';
-          flt.frequency.setValueAtTime(900, t);
+          flt.frequency.setValueAtTime(Math.min(2400, Math.max(260, STATE.synth.cutoff * 0.35)), t);
           flt.frequency.exponentialRampToValueAtTime(140, t + 0.12);
+          flt.Q.setValueAtTime(Math.min(6.0, Math.max(1.2, STATE.synth.resonance * 0.8)), t);
           g.gain.setValueAtTime(0.0001, t);
-          g.gain.linearRampToValueAtTime(0.32 * STATE.tracks[1].volume, t + 0.004);
-          g.gain.exponentialRampToValueAtTime(0.0001, t + 0.15);
-          osc.connect(flt);
+          g.gain.linearRampToValueAtTime(0.46, t + 0.004);
+          g.gain.exponentialRampToValueAtTime(0.0001, t + (activeBassClip === 3 ? 0.32 : 0.15));
+          subOsc.connect(flt);
+          osc.connect(sawScale);
+          sawScale.connect(flt);
           flt.connect(g);
-          g.connect(masterOut);
+          g.connect(offTrackGains[1]);
+          subOsc.start(t);
           osc.start(t);
-          osc.stop(t + 0.16);
+          subOsc.stop(t + 0.36);
+          osc.stop(t + 0.36);
         }
       }
 
-      // 3. Lead Synth
-      if (isMixerTrackAudible(2)) {
+      // 3. Lead Synth (honors stopped clip state, STATE.synth.mode, ADSR, resonance, Roar FX)
+      if (activeLeadClip >= 0 && isMixerTrackAudible(2)) {
         const leadDeg = (LEAD_PATTERNS[activeLeadClip] || LEAD_PATTERNS[2])[stepIdx];
         if (leadDeg >= 0) {
           const midi = getScalePitch(leadDeg, 3);
-          const freq = 440 * Math.pow(2, (midi - 69) / 12);
-          const osc = offlineCtx.createOscillator();
-          const flt = offlineCtx.createBiquadFilter();
-          const g = offlineCtx.createGain();
-          osc.type = 'sawtooth';
-          osc.frequency.setValueAtTime(freq, t);
-          flt.type = 'lowpass';
-          flt.frequency.setValueAtTime(Math.min(12000, STATE.synth.cutoff), t);
-          flt.frequency.exponentialRampToValueAtTime(400, t + 0.16);
-          g.gain.setValueAtTime(0.0001, t);
-          g.gain.linearRampToValueAtTime(0.20 * STATE.tracks[2].volume, t + 0.006);
-          g.gain.exponentialRampToValueAtTime(0.0001, t + 0.18);
-          osc.connect(flt);
-          flt.connect(g);
-          g.connect(masterOut);
-          osc.start(t);
-          osc.stop(t + 0.19);
+          const dur = activeLeadClip === 3 ? 0.48 : 0.16;
+          renderSynthVoiceOnCtx(offlineCtx, offSynthInput, midi, dur, t);
         }
       }
 
-      // 4. Keys / Stems
-      if (isMixerTrackAudible(3)) {
-        playKeysStemStep(activeKeysClip, stepIdx, t, offlineCtx, masterOut);
+      // 4. Keys / Stems (honors stopped clip state + Track 3 volume/pan/sends)
+      if (activeKeysClip >= 0 && isMixerTrackAudible(3)) {
+        playKeysStemStep(activeKeysClip, stepIdx, t, offlineCtx, offTrackGains[3]);
       }
     }
 
@@ -2238,6 +2414,7 @@
       downloadBlob(wavBlob, `oxide-studio-v1.0.0-bounce-${STATE.tempo}bpm.wav`);
     } catch (err) {
       console.error('WAV export error:', err);
+      appendChatMessage('bot', `WAV export failed: ${err?.message || err}`);
     }
   }
 
@@ -2306,20 +2483,24 @@
   async function exportAls() {
     const xml = buildAlsXml();
 
-    let compressedBlob = null;
-    if (typeof CompressionStream !== 'undefined') {
-      try {
-        const stream = new Blob([xml], { type: 'application/xml' }).stream();
-        const compressedStream = stream.pipeThrough(new CompressionStream('gzip'));
-        const response = await new Response(compressedStream);
-        compressedBlob = await response.blob();
-      } catch (err) {
-        console.warn('Native CompressionStream failed, falling back:', err);
-      }
+    if (typeof CompressionStream === 'undefined') {
+      const msg = 'ALS export failed: gzip CompressionStream is not available in this browser.';
+      console.error(msg);
+      appendChatMessage('bot', msg);
+      throw new Error(msg);
     }
 
-    if (!compressedBlob) {
-      compressedBlob = new Blob([xml], { type: 'application/x-gzip' });
+    let compressedBlob;
+    try {
+      const stream = new Blob([xml], { type: 'application/xml' }).stream();
+      const compressedStream = stream.pipeThrough(new CompressionStream('gzip'));
+      const response = await new Response(compressedStream);
+      compressedBlob = await response.blob();
+    } catch (err) {
+      const msg = `ALS gzip compression failed: ${err?.message || err}`;
+      console.error(msg, err);
+      appendChatMessage('bot', msg);
+      throw new Error(msg);
     }
 
     downloadBlob(compressedBlob, 'oxide-session.als');
@@ -2344,24 +2525,27 @@
     };
 
     const toAlsLinear = (gain) => {
-      if (!Number.isFinite(gain) || gain <= 0.00031622776) return 0.00031622776;
-      if (gain <= 1.0) return Math.max(0.00031622776, gain * 0.85);
-      return Math.min(1.0, 0.85 + (gain - 1.0) * 0.15);
+      if (!Number.isFinite(gain) || gain <= 0) return 0.00031622776;
+      return Math.max(0.00031622776, Math.min(1.99526238, gain));
     };
 
-    const renderMixerXml = (track) => `
+    const renderMixerXml = (track) => {
+      const onStr = track.mute ? 'false' : 'true';
+      return `
         <Mixer>
-          <Volume><Manual Value="${toAlsLinear(track.volume).toFixed(6)}"/></Volume>
+          <Volume><Manual Value="${toAlsLinear(track.volume).toFixed(8)}"/></Volume>
           <Pan><Manual Value="${track.pan.toFixed(4)}"/></Pan>
-          <Speaker><Manual Value="${track.mute ? 'false' : 'true'}"/></Speaker>
+          <On><Manual Value="${onStr}"/></On>
+          <Speaker><Manual Value="${onStr}"/></Speaker>
           <SoloSink Value="${track.solo ? 'true' : 'false'}"/>
           <Sends>
-            <TrackSendHolder Id="0"><Send><Manual Value="${toAlsLinear(track.sendA || 0).toFixed(6)}"/></Send></TrackSendHolder>
-            <TrackSendHolder Id="1"><Send><Manual Value="${toAlsLinear(track.sendB || 0).toFixed(6)}"/></Send></TrackSendHolder>
+            <TrackSendHolder Id="0"><Send><Manual Value="${toAlsLinear(track.sendA || 0).toFixed(8)}"/></Send></TrackSendHolder>
+            <TrackSendHolder Id="1"><Send><Manual Value="${toAlsLinear(track.sendB || 0).toFixed(8)}"/></Send></TrackSendHolder>
           </Sends>
         </Mixer>`;
+    };
 
-    let noteId = 1;
+    let nextPointeeId = 1;
     let keyTrackId = 1;
     const renderKeyTracksXml = (notesByPitch) => {
       const entries = Object.keys(notesByPitch)
@@ -2369,7 +2553,7 @@
         .sort((a, b) => a - b)
         .map(pitch => {
           const evs = notesByPitch[pitch]
-            .map(ev => `                  <MidiNoteEvent Time="${ev.time.toFixed(4)}" Duration="${ev.dur.toFixed(4)}" Velocity="${ev.vel}" NoteId="${noteId++}"/>`)
+            .map(ev => `                  <MidiNoteEvent Time="${ev.time.toFixed(4)}" Duration="${ev.dur.toFixed(4)}" Velocity="${ev.vel}" NoteId="${nextPointeeId++}"/>`)
             .join('\n');
           return `                <KeyTrack Id="${keyTrackId++}">
                   <Notes>
@@ -2421,28 +2605,7 @@ ${evs}
     const leadClipName = (STATE.sessionClips[2][activeLeadIdx] || {}).name || '3 LEAD Clip';
     const keysClipName = (STATE.sessionClips[3][activeKeysIdx] || {}).name || '4 STEMS Clip';
 
-    return `<?xml version="1.0" encoding="UTF-8"?>
-<Ableton MajorVersion="5" MinorVersion="12.0_12049" SchemaChangeCount="3" Creator="Oxide Studio" Revision="oxide-12.0">
-  <LiveSet>
-    <Annotation Value="Oxide Studio Web Session v1.0.0"/>
-    <!-- oxide-metadata: {"name":"Oxide Studio Web Export","author":"Oxide Web Station","version":"1.0.0","modified_at_utc":"${now}"} -->
-    <Tempo>
-      <Manual Value="${STATE.tempo.toFixed(4)}"/>
-    </Tempo>
-    <TimeSignature>
-      <TimeSignatures>
-        <RemoteableTimeSignature>
-          <Numerator Value="4"/>
-          <Denominator Value="4"/>
-        </RemoteableTimeSignature>
-      </TimeSignatures>
-    </TimeSignature>
-    <Transport>
-      <LoopOn Value="${STATE.loopEnabled ? 'true' : 'false'}"/>
-      <LoopStart Value="0.0000"/>
-      <LoopLength Value="4.0000"/>
-    </Transport>
-    <Tracks>
+    const tracksXml = `    <Tracks>
       <MidiTrack Id="1">
         <Name><EffectiveName Value="${escXml(STATE.tracks[0].name || '1 DRUMS (909)')}"/></Name>
         <DeviceChain>${renderMixerXml(STATE.tracks[0])}
@@ -2537,21 +2700,47 @@ ${renderKeyTracksXml(leadNotesByPitch)}
         <DeviceChain>${renderMixerXml(STATE.tracks[5])}
         </DeviceChain>
       </ReturnTrack>
-    </Tracks>
-    <MasterTrack>
-      <Name><EffectiveName Value="MASTER"/></Name>
+    </Tracks>`;
+
+    const fxMetaComment = JSON.stringify(STATE.fx).replace(/--/g, '- -');
+    const masterOn = STATE.tracks[6].mute ? 'false' : 'true';
+    const nextPointeeAfterBuild = nextPointeeId + keyTrackId + 50;
+
+    return `<?xml version="1.0" encoding="UTF-8"?>
+<Ableton MajorVersion="5" MinorVersion="12.0_12049" SchemaChangeCount="3" Creator="Oxide Studio" Revision="oxide-12.0">
+  <LiveSet>
+    <NextPointeeId Value="${nextPointeeAfterBuild}"/>
+    <Annotation Value="Oxide Studio Web Session v1.0.0"/>
+    <!-- oxide-metadata: {"name":"Oxide Studio Web Export","author":"Oxide Web Station","version":"1.0.0","modified_at_utc":"${now}"} -->
+    <Tempo>
+      <Manual Value="${STATE.tempo.toFixed(4)}"/>
+    </Tempo>
+    <TimeSignature>
+      <TimeSignatures>
+        <RemoteableTimeSignature>
+          <Numerator Value="4"/>
+          <Denominator Value="4"/>
+        </RemoteableTimeSignature>
+      </TimeSignatures>
+    </TimeSignature>
+    <Transport>
+      <LoopOn Value="${STATE.loopEnabled ? 'true' : 'false'}"/>
+      <LoopStart Value="0.0000"/>
+      <LoopLength Value="4.0000"/>
+    </Transport>
+    <MainTrack Id="0">
+      <Name><EffectiveName Value="Main"/></Name>
+      <!-- oxide-fx: ${fxMetaComment} -->
       <DeviceChain>
         <Mixer>
-          <Volume><Manual Value="${toAlsLinear(STATE.tracks[6].volume).toFixed(6)}"/></Volume>
+          <Volume><Manual Value="${toAlsLinear(STATE.tracks[6].volume).toFixed(8)}"/></Volume>
           <Pan><Manual Value="${STATE.tracks[6].pan.toFixed(4)}"/></Pan>
-          <Speaker><Manual Value="${STATE.tracks[6].mute ? 'false' : 'true'}"/></Speaker>
+          <On><Manual Value="${masterOn}"/></On>
+          <Speaker><Manual Value="${masterOn}"/></Speaker>
         </Mixer>
-        <GlueCompressor Threshold="${STATE.fx.glue.threshold}" Ratio="${STATE.fx.glue.ratio}" Makeup="${STATE.fx.glue.makeup}"/>
-        <Roar Drive="${STATE.fx.roar.drive}" Tone="${STATE.fx.roar.tone}"/>
-        <Reverb Decay="${STATE.fx.reverb.decay}" Mix="${STATE.fx.reverb.mix}"/>
-        <TruePeakLimiter Ceiling="${STATE.fx.limiter.ceiling}"/>
       </DeviceChain>
-    </MasterTrack>
+    </MainTrack>
+${tracksXml}
   </LiveSet>
 </Ableton>`;
   }
@@ -2785,6 +2974,8 @@ ${renderKeyTracksXml(leadNotesByPitch)}
       STATE.activeScene = 2;
 
     } else if (presetName === 'techno') {
+      BASS_PATTERNS[2] = [...DEFAULT_BASS_PATTERNS[2]];
+      LEAD_PATTERNS[2] = [...DEFAULT_LEAD_PATTERNS[2]];
       currentGenre = 'techno';
       STATE.currentGenre = 'techno';
       STATE.tempo = 136.0;
@@ -2795,6 +2986,8 @@ ${renderKeyTracksXml(leadNotesByPitch)}
       findVoice('oh').steps = [0, 0, 2, 0, 0, 0, 2, 0, 0, 0, 2, 0, 0, 0, 2, 0];
       findVoice('ride').steps = [1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0];
     } else if (presetName === 'house') {
+      BASS_PATTERNS[2] = [...DEFAULT_BASS_PATTERNS[2]];
+      LEAD_PATTERNS[2] = [...DEFAULT_LEAD_PATTERNS[2]];
       currentGenre = 'house';
       STATE.currentGenre = 'house';
       STATE.tempo = 128.0;
@@ -2805,6 +2998,8 @@ ${renderKeyTracksXml(leadNotesByPitch)}
       findVoice('rim').steps = [0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 1, 0, 0, 0, 0, 0];
       findVoice('shaker').steps = [1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0];
     } else if (presetName === 'rkt') {
+      BASS_PATTERNS[2] = [...DEFAULT_BASS_PATTERNS[2]];
+      LEAD_PATTERNS[2] = [...DEFAULT_LEAD_PATTERNS[2]];
       currentGenre = 'rkt';
       STATE.currentGenre = 'rkt';
       STATE.tempo = 105.0;
@@ -2814,6 +3009,8 @@ ${renderKeyTracksXml(leadNotesByPitch)}
       findVoice('percLow').steps = [0, 0, 1, 0, 0, 1, 0, 0, 1, 0, 0, 1, 0, 0, 1, 0];
       findVoice('shaker').steps = [1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1];
     } else if (presetName === 'dnb') {
+      BASS_PATTERNS[2] = [...DEFAULT_BASS_PATTERNS[2]];
+      LEAD_PATTERNS[2] = [...DEFAULT_LEAD_PATTERNS[2]];
       currentGenre = 'dnb';
       STATE.currentGenre = 'dnb';
       STATE.tempo = 174.0;
@@ -2821,6 +3018,13 @@ ${renderKeyTracksXml(leadNotesByPitch)}
       findVoice('kick').steps = [2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 2, 0, 0, 0, 0, 0];
       findVoice('snare').steps = [0, 0, 0, 0, 2, 0, 0, 0, 0, 0, 0, 0, 2, 0, 0, 0];
       findVoice('ch').steps = [1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1];
+    } else if (presetName === 'clear') {
+      BASS_PATTERNS[2] = [...DEFAULT_BASS_PATTERNS[2]];
+      LEAD_PATTERNS[2] = [...DEFAULT_LEAD_PATTERNS[2]];
+      drumGrid = Array.from({ length: 6 }, () => new Array(16).fill(0));
+      STATE.drumGrid = drumGrid;
+      pianoNotes = buildPianoNotes([]);
+      STATE.pianoNotes = pianoNotes;
     }
 
     renderDrumGrid();
@@ -3284,14 +3488,10 @@ ${renderKeyTracksXml(leadNotesByPitch)}
       }
     });
     document.getElementById('bpm-inc')?.addEventListener('click', () => {
-      STATE.tempo = Math.min(240, STATE.tempo + 1);
-      if (tempoInput) tempoInput.value = STATE.tempo.toFixed(2);
-      updateTelemetryCard();
+      setBpm(Math.min(240, STATE.tempo + 1));
     });
     document.getElementById('bpm-dec')?.addEventListener('click', () => {
-      STATE.tempo = Math.max(40, STATE.tempo - 1);
-      if (tempoInput) tempoInput.value = STATE.tempo.toFixed(2);
-      updateTelemetryCard();
+      setBpm(Math.max(40, STATE.tempo - 1));
     });
 
     // Groove Pool Swing
@@ -3340,19 +3540,12 @@ ${renderKeyTracksXml(leadNotesByPitch)}
       renderDrumGrid();
     });
 
-    // Sequencer Presets
+    // Sequencer Presets (single unified handler covering both .btn-preset and .preset-pill)
     document.querySelectorAll('.btn-preset, .preset-pill').forEach(btn => {
       btn.addEventListener('click', () => {
         const p = btn.dataset.preset || (btn.id === 'btn-preset-peak' ? 'peak' : btn.id === 'btn-preset-holo' ? 'holo' : '');
         if (p) loadPreset(p);
       });
-    });
-
-    document.getElementById('btn-preset-peak')?.addEventListener('click', () => {
-      loadPreset('peak');
-    });
-    document.getElementById('btn-preset-holo')?.addEventListener('click', () => {
-      loadPreset('holo');
     });
 
     // Accent Toggle
@@ -3415,9 +3608,12 @@ ${renderKeyTracksXml(leadNotesByPitch)}
     });
     setupRangeListener('synth-drive', (v) => {
       STATE.synth.drive = v;
+      STATE.fx.roar.drive = v;
       const el = document.getElementById('synth-drive-val');
       if (el) el.textContent = `+${v} dB`;
-      if (NODES.roarShaper) NODES.roarShaper.curve = getCachedDistortionCurve(v, STATE.fx.roar.curve);
+      if (NODES.roarShaper && STATE.fx.roar.active) {
+        NODES.roarShaper.curve = getCachedDistortionCurve(v, STATE.fx.roar.curve);
+      }
     });
 
     // FX Rack Controls (Glue, OTT, Roar, Reverb, Limiter)
@@ -3425,6 +3621,10 @@ ${renderKeyTracksXml(leadNotesByPitch)}
       STATE.fx.glue.active = e.target.checked;
       if (NODES.glueCompressor && STATE.audioCtx) {
         NODES.glueCompressor.ratio.setTargetAtTime(STATE.fx.glue.active ? STATE.fx.glue.ratio : 1.0, STATE.audioCtx.currentTime, 0.015);
+      }
+      if (NODES.glueMakeupGain && STATE.audioCtx) {
+        const makeupLin = STATE.fx.glue.active ? Math.pow(10, (STATE.fx.glue.makeup || 0) / 40) : 1.0;
+        NODES.glueMakeupGain.gain.setTargetAtTime(makeupLin, STATE.audioCtx.currentTime, 0.015);
       }
     });
     setupRangeListener('glue-thresh', (v) => {
@@ -3445,7 +3645,8 @@ ${renderKeyTracksXml(leadNotesByPitch)}
       const el = document.getElementById('glue-makeup-val');
       if (el) el.textContent = `+${v} dB`;
       if (NODES.glueMakeupGain && STATE.audioCtx) {
-        NODES.glueMakeupGain.gain.setTargetAtTime(Math.pow(10, v / 40), STATE.audioCtx.currentTime, 0.015);
+        const makeupLin = STATE.fx.glue.active ? Math.pow(10, v / 40) : 1.0;
+        NODES.glueMakeupGain.gain.setTargetAtTime(makeupLin, STATE.audioCtx.currentTime, 0.015);
       }
     });
 
@@ -3480,6 +3681,13 @@ ${renderKeyTracksXml(leadNotesByPitch)}
       if (NODES.roarShaper) {
         NODES.roarShaper.curve = getCachedDistortionCurve(STATE.fx.roar.active ? STATE.fx.roar.drive : 0, STATE.fx.roar.curve);
       }
+      if (NODES.roarToneFilter && STATE.audioCtx) {
+        NODES.roarToneFilter.frequency.setTargetAtTime(
+          STATE.fx.roar.active ? STATE.fx.roar.tone : 20000,
+          STATE.audioCtx.currentTime,
+          0.015
+        );
+      }
     });
     setupRangeListener('roar-drive', (v) => {
       STATE.fx.roar.drive = v;
@@ -3493,7 +3701,7 @@ ${renderKeyTracksXml(leadNotesByPitch)}
       STATE.fx.roar.tone = v;
       const el = document.getElementById('roar-tone-val');
       if (el) el.textContent = v >= 1000 ? `${(v / 1000).toFixed(1)} kHz` : `${Math.round(v)} Hz`;
-      if (NODES.roarToneFilter && STATE.audioCtx) {
+      if (NODES.roarToneFilter && STATE.audioCtx && STATE.fx.roar.active) {
         NODES.roarToneFilter.frequency.setTargetAtTime(v, STATE.audioCtx.currentTime, 0.015);
       }
     });

@@ -16,14 +16,14 @@ use std::fs::{self, File};
 use std::io::Read;
 use std::path::{Path, PathBuf};
 
-use oxide_core::{AudioBuffer, AudioEffectDevice, MusicalTime};
+use oxide_core::{AudioBuffer, AudioEffectDevice, MusicalTime, MAX_BUFFER_SIZE};
 use oxide_drums::DrumRack;
 use oxide_dsp::{ParameterBank, SynthEngine};
 use oxide_fx::{
     AutoFilter, BeatRepeat, ChorusEnsemble, Compressor, ConvolutionReverb, Corpus, EQEight, Echo,
     Erosion, FdnReverb, GlueCompressor, HybridReverb, MasterLimiter, MultibandDynamics,
-    PhaserFlanger, Redux, Roar, Saturator, SpectralResonator, TempoDelay, Utility,
-    MAX_DELAY_SAMPLES,
+    PhaserFlanger, Redux, Roar, RoarTopology, Saturator, SpectralResonator, TempoDelay, Utility,
+    LOOKAHEAD_SAMPLES, MAX_DELAY_SAMPLES,
 };
 use oxide_project::{
     DAWProject, DrumRackDefinition, InsertEffectConfig, InstrumentConfig, MasterTrackDefinition,
@@ -167,14 +167,19 @@ impl BiquadCoeffs {
 
 /// Compute envelope-based transient ratio weights for each frame.
 /// Fast attack energy vs slower moving average energy detects percussive strikes.
+fn finite_or_zero(x: f32) -> f32 {
+    if x.is_finite() { x } else { 0.0 }
+}
+
 fn compute_transient_weights(
     left: &[f32],
     right: &[f32],
     sample_rate: f32,
     weights: &mut [f32],
 ) {
-    let n = left.len();
-    if n == 0 {
+    let n = left.len().min(right.len()).min(weights.len());
+    if n == 0 || !sample_rate.is_finite() || sample_rate <= 0.0 {
+        weights.fill(0.0);
         return;
     }
 
@@ -191,16 +196,22 @@ fn compute_transient_weights(
     let mut current_transient = 0.0f32;
 
     for i in 0..n {
-        let e = 0.5 * (left[i] * left[i] + right[i] * right[i]);
+        let li = finite_or_zero(left[i]);
+        let ri = finite_or_zero(right[i]);
+        let e = 0.5 * (li * li + ri * ri);
         short_sum += e;
         if i >= w {
-            let prev_e = 0.5 * (left[i - w] * left[i - w] + right[i - w] * right[i - w]);
+            let lw = finite_or_zero(left[i - w]);
+            let rw = finite_or_zero(right[i - w]);
+            let prev_e = 0.5 * (lw * lw + rw * rw);
             short_sum = (short_sum - prev_e).max(0.0);
         }
 
         med_sum += e;
         if i >= m {
-            let prev_e = 0.5 * (left[i - m] * left[i - m] + right[i - m] * right[i - m]);
+            let lm = finite_or_zero(left[i - m]);
+            let rm = finite_or_zero(right[i - m]);
+            let prev_e = 0.5 * (lm * lm + rm * rm);
             med_sum = (med_sum - prev_e).max(0.0);
         }
 
@@ -219,7 +230,8 @@ fn compute_transient_weights(
             current_transient *= decay;
         }
 
-        weights[i] = (current_transient * 1.25).clamp(0.0, 0.95);
+        let out_w = (current_transient * 1.25).clamp(0.0, 0.95);
+        weights[i] = if out_w.is_finite() { out_w } else { 0.0 };
     }
 }
 
@@ -247,10 +259,17 @@ pub fn separate_audio_streams(
             (Vec::new(), Vec::new()),
         );
     }
+    let sr = if sample_rate.is_finite() && sample_rate > 0.0 {
+        sample_rate
+    } else {
+        44100.0
+    };
+    let clean_l: Vec<f32> = left[..n].iter().map(|&x| finite_or_zero(x)).collect();
+    let clean_r: Vec<f32> = right[..n].iter().map(|&x| finite_or_zero(x)).collect();
 
-    let lp140 = BiquadCoeffs::butterworth_lowpass(140.0, sample_rate);
-    let lp220 = BiquadCoeffs::butterworth_lowpass(220.0, sample_rate);
-    let lp4500 = BiquadCoeffs::butterworth_lowpass(4500.0, sample_rate);
+    let lp140 = BiquadCoeffs::butterworth_lowpass(140.0, sr);
+    let lp220 = BiquadCoeffs::butterworth_lowpass(220.0, sr);
+    let lp4500 = BiquadCoeffs::butterworth_lowpass(4500.0, sr);
 
     let mut l_140 = vec![0.0f32; n];
     let mut r_140 = vec![0.0f32; n];
@@ -259,17 +278,17 @@ pub fn separate_audio_streams(
     let mut l_4500 = vec![0.0f32; n];
     let mut r_4500 = vec![0.0f32; n];
 
-    lp140.filtfilt(&left[..n], &mut l_140);
-    lp140.filtfilt(&right[..n], &mut r_140);
+    lp140.filtfilt(&clean_l, &mut l_140);
+    lp140.filtfilt(&clean_r, &mut r_140);
 
-    lp220.filtfilt(&left[..n], &mut l_220);
-    lp220.filtfilt(&right[..n], &mut r_220);
+    lp220.filtfilt(&clean_l, &mut l_220);
+    lp220.filtfilt(&clean_r, &mut r_220);
 
-    lp4500.filtfilt(&left[..n], &mut l_4500);
-    lp4500.filtfilt(&right[..n], &mut r_4500);
+    lp4500.filtfilt(&clean_l, &mut l_4500);
+    lp4500.filtfilt(&clean_r, &mut r_4500);
 
     let mut trans_weights = vec![0.0f32; n];
-    compute_transient_weights(&left[..n], &right[..n], sample_rate, &mut trans_weights);
+    compute_transient_weights(&clean_l, &clean_r, sr, &mut trans_weights);
 
     let mut d_l = vec![0.0f32; n];
     let mut d_r = vec![0.0f32; n];
@@ -293,12 +312,12 @@ pub fn separate_audio_streams(
         let b_vocal_l = l_4500[i] - l_220[i];
         let b_vocal_r = r_4500[i] - r_220[i];
 
-        let b_high_l = left[i] - l_4500[i];
-        let b_high_r = right[i] - r_4500[i];
+        let b_high_l = clean_l[i] - l_4500[i];
+        let b_high_r = clean_r[i] - r_4500[i];
 
         // 1. Drums: transient/percussive component
-        let drum_sample_l = w_drum * left[i];
-        let drum_sample_r = w_drum * right[i];
+        let drum_sample_l = w_drum * clean_l[i];
+        let drum_sample_r = w_drum * clean_r[i];
         d_l[i] = drum_sample_l;
         d_r[i] = drum_sample_r;
 
@@ -334,11 +353,11 @@ pub fn separate_audio_streams(
     ((d_l, d_r), (b_l, b_r), (v_l, v_r), (o_l, o_r))
 }
 
-/// Separate an `AudioBuffer` (up to 1024 frames) into 4 stems: `drums`, `bass`, `vocals`, `other`.
+/// Separate an `AudioBuffer` (up to `oxide_core::MAX_BUFFER_SIZE` frames) into 4 stems: `drums`, `bass`, `vocals`, `other`.
 ///
 /// Invariant: Energy conservation / exact reconstruction (`drums + bass + vocals + other == audio`).
 pub fn separate_audio_into_4_stems(audio: &AudioBuffer) -> StemSeparationResult {
-    let count = audio.frame_count.min(1024);
+    let count = audio.frame_count.min(MAX_BUFFER_SIZE);
     if count == 0 {
         return StemSeparationResult {
             drums: AudioBuffer::new(),
@@ -461,12 +480,14 @@ pub fn read_wav_file<P: AsRef<Path>>(path: P) -> Result<(u32, u16, Vec<f32>), Bo
     }
 
     let mut pos = 12;
-    let mut sample_rate = 44100u32;
-    let mut channels = 2u16;
+    let mut fmt_seen = false;
+    let mut sample_rate = 0u32;
+    let mut channels = 0u16;
     let mut bits_per_sample = 16u16;
     let mut is_float = false;
     let mut data_offset = 0;
     let mut data_len = 0;
+    let mut data_found = false;
 
     while pos + 8 <= bytes.len() {
         let chunk_id = &bytes[pos..pos + 4];
@@ -477,6 +498,7 @@ pub fn read_wav_file<P: AsRef<Path>>(path: P) -> Result<(u32, u16, Vec<f32>), Bo
         ) as usize;
         pos += 8;
 
+        let padded_size = chunk_size.saturating_add(chunk_size & 1);
         if chunk_id == b"fmt " {
             if chunk_size < 16 || pos + 16 > bytes.len() {
                 return Err(BounceError::Format("Corrupt fmt chunk".into()));
@@ -488,19 +510,43 @@ pub fn read_wav_file<P: AsRef<Path>>(path: P) -> Result<(u32, u16, Vec<f32>), Bo
             if audio_format == 0xFFFE && chunk_size >= 40 && pos + 26 <= bytes.len() {
                 audio_format = u16::from_le_bytes(bytes[pos + 24..pos + 26].try_into().unwrap());
             }
+            if audio_format != 1 && audio_format != 3 {
+                return Err(BounceError::Format(format!(
+                    "Unsupported WAV audio format: {}",
+                    audio_format
+                )));
+            }
+            if channels == 0 || sample_rate == 0 {
+                return Err(BounceError::Format(
+                    "Invalid WAV fmt chunk: channels and sample_rate must be > 0".into(),
+                ));
+            }
             is_float = audio_format == 3;
-            pos += chunk_size + (chunk_size & 1);
+            fmt_seen = true;
+            pos = pos.saturating_add(padded_size);
         } else if chunk_id == b"data" {
             data_offset = pos;
             data_len = chunk_size.min(bytes.len().saturating_sub(pos));
-            break;
+            data_found = true;
+            pos = pos.saturating_add(padded_size);
         } else {
-            pos += chunk_size + (chunk_size & 1);
+            pos = pos.saturating_add(padded_size);
+        }
+        if fmt_seen && data_found {
+            break;
         }
     }
 
-    if data_offset == 0 {
+    if !fmt_seen {
+        return Err(BounceError::Format("Missing fmt chunk in WAV".into()));
+    }
+    if !data_found {
         return Err(BounceError::Format("Missing data chunk in WAV".into()));
+    }
+    if channels == 0 || sample_rate == 0 {
+        return Err(BounceError::Format(
+            "Invalid WAV header: channels and sample_rate must be > 0".into(),
+        ));
     }
 
     let raw_data = &bytes[data_offset..data_offset + data_len];
@@ -523,7 +569,7 @@ pub fn read_wav_file<P: AsRef<Path>>(path: P) -> Result<(u32, u16, Vec<f32>), Bo
             let s = val as f32 / 2_147_483_648.0;
             samples.push(if s.is_finite() { s } else { 0.0 });
         }
-    } else if bits_per_sample == 24 {
+    } else if !is_float && bits_per_sample == 24 {
         let count = data_len / 3;
         samples.reserve(count);
         for i in 0..count {
@@ -532,7 +578,7 @@ pub fn read_wav_file<P: AsRef<Path>>(path: P) -> Result<(u32, u16, Vec<f32>), Bo
             let sample = (raw >> 8) as f32 / 8_388_608.0;
             samples.push(if sample.is_finite() { sample } else { 0.0 });
         }
-    } else if bits_per_sample == 16 {
+    } else if !is_float && bits_per_sample == 16 {
         let count = data_len / 2;
         samples.reserve(count);
         for i in 0..count {
@@ -637,13 +683,11 @@ fn apply_gain_and_pan(left: &mut [f32], right: &mut [f32], volume_db: f32, pan: 
 }
 
 fn compute_swing_delay_beats(swing_ratio: f32, step_dur_beats: f64) -> f64 {
-    if !swing_ratio.is_finite() || swing_ratio <= 0.0 || (swing_ratio - 0.5).abs() < 1e-4 {
+    if !swing_ratio.is_finite() || swing_ratio <= 0.5 {
         0.0
-    } else if swing_ratio > 0.5 {
+    } else {
         let norm = ((swing_ratio.min(0.75) - 0.5) * 2.0) as f64;
         norm * step_dur_beats
-    } else {
-        (swing_ratio as f64 * 0.5) * step_dur_beats
     }
 }
 
@@ -696,7 +740,15 @@ fn run_audio_effect_device<D: AudioEffectDevice>(
 }
 
 fn configure_eq8_from_params(eq: &mut EQEight, params: &std::collections::HashMap<String, f32>, sample_rate: f32) {
+    let has_zero_based = params.keys().any(|key| {
+        let kl = key.to_ascii_lowercase();
+        kl.starts_with("band0_") || kl.starts_with("band_0_")
+    });
+
     for (key, &val) in params {
+        if !val.is_finite() {
+            continue;
+        }
         let k = key.to_ascii_lowercase();
         match k.as_str() {
             "low_gain" | "low_gain_db" => eq.set_band_gain(1, val),
@@ -705,18 +757,24 @@ fn configure_eq8_from_params(eq: &mut EQEight, params: &std::collections::HashMa
             "highpass_freq" | "lowcut_freq" => eq.set_band_freq(0, val),
             "lowpass_freq" | "highcut_freq" => eq.set_band_freq(7, val),
             _ => {
-                for b in 0..8 {
-                    let prefix_us = format!("band_{b}_");
-                    let prefix_plain = format!("band{b}_");
+                let (range_start, range_end, offset) = if has_zero_based {
+                    (0usize, 8usize, 0usize)
+                } else {
+                    (1usize, 9usize, 1usize)
+                };
+                for b_key in range_start..range_end {
+                    let prefix_us = format!("band_{b_key}_");
+                    let prefix_plain = format!("band{b_key}_");
                     if let Some(sub) = k.strip_prefix(&prefix_us).or_else(|| k.strip_prefix(&prefix_plain)) {
+                        let band_idx = b_key - offset;
                         match sub {
-                            "gain" | "gain_db" => eq.set_band_gain(b, val),
-                            "freq" | "freq_hz" => eq.set_band_freq(b, val),
+                            "gain" | "gain_db" => eq.set_band_gain(band_idx, val),
+                            "freq" | "freq_hz" => eq.set_band_freq(band_idx, val),
                             "q" => {
-                                eq.bands[b].q = val.clamp(0.05, 30.0);
-                                eq.bands[b].recompute(sample_rate);
+                                eq.bands[band_idx].q = val.clamp(0.05, 30.0);
+                                eq.bands[band_idx].recompute(sample_rate);
                             }
-                            "enabled" => eq.bands[b].enabled = val >= 0.5,
+                            "enabled" => eq.bands[band_idx].enabled = val >= 0.5,
                             _ => {}
                         }
                     }
@@ -724,6 +782,39 @@ fn configure_eq8_from_params(eq: &mut EQEight, params: &std::collections::HashMa
             }
         }
     }
+}
+
+fn process_master_limiter_compensated(
+    limiter: &mut MasterLimiter,
+    left: &mut [f32],
+    right: &mut [f32],
+) {
+    let total_frames = left.len().min(right.len());
+    if total_frames == 0 {
+        return;
+    }
+
+    let padded_len = total_frames + LOOKAHEAD_SAMPLES;
+    let mut padded_l = Vec::with_capacity(padded_len);
+    let mut padded_r = Vec::with_capacity(padded_len);
+    padded_l.extend_from_slice(&left[..total_frames]);
+    padded_r.extend_from_slice(&right[..total_frames]);
+    padded_l.resize(padded_len, 0.0);
+    padded_r.resize(padded_len, 0.0);
+
+    const BLOCK_SIZE: usize = 128;
+    let mut frame = 0;
+    while frame < padded_len {
+        let cur_block = (padded_len - frame).min(BLOCK_SIZE);
+        limiter.process_block(
+            &mut padded_l[frame..frame + cur_block],
+            &mut padded_r[frame..frame + cur_block],
+        );
+        frame += cur_block;
+    }
+
+    left[..total_frames].copy_from_slice(&padded_l[LOOKAHEAD_SAMPLES..LOOKAHEAD_SAMPLES + total_frames]);
+    right[..total_frames].copy_from_slice(&padded_r[LOOKAHEAD_SAMPLES..LOOKAHEAD_SAMPLES + total_frames]);
 }
 
 fn process_generic_device(
@@ -739,7 +830,9 @@ fn process_generic_device(
     let get_p = |names: &[&str]| -> Option<f32> {
         for name in names {
             if let Some(&v) = params.get(*name) {
-                return Some(v);
+                if v.is_finite() {
+                    return Some(v);
+                }
             }
         }
         None
@@ -758,13 +851,26 @@ fn process_generic_device(
             if let Some(v) = get_p(&["attack_ms", "attack"]) { dev.attack_ms = v.max(0.01); }
             if let Some(v) = get_p(&["release_s", "release"]) { dev.release_s = v; }
             if let Some(v) = get_p(&["makeup_gain_db", "makeup"]) { dev.makeup_gain_db = v; }
+            if let Some(v) = get_p(&["range_db", "range"]) { dev.range_db = v.clamp(0.0, 60.0); }
             if let Some(v) = get_p(&["dry_wet", "mix", "wet"]) { dev.dry_wet = v.clamp(0.0, 1.0); }
+            if let Some(v) = get_p(&["soft_clip"]) { dev.soft_clip = v >= 0.5; }
             run_audio_effect_device(&mut dev, left, right, bpm, start_beat_offset, sample_rate);
         }
         "roar" => {
             let mut dev = Roar::new(sample_rate);
             if let Some(v) = get_p(&["drive_db", "drive"]) { dev.stage1.drive_db = v; }
+            if let Some(v) = get_p(&["bias", "stage1_bias"]) { dev.stage1.bias = v.clamp(-1.0, 1.0); }
             if let Some(v) = get_p(&["tone"]) { dev.stage1.tone = v.clamp(-1.0, 1.0); }
+            if let Some(v) = get_p(&["stage2_drive_db"]) { dev.stage2.drive_db = v; }
+            if let Some(v) = get_p(&["stage2_tone"]) { dev.stage2.tone = v.clamp(-1.0, 1.0); }
+            if let Some(v) = get_p(&["stage2_bias"]) { dev.stage2.bias = v.clamp(-1.0, 1.0); }
+            if let Some(v) = get_p(&["feedback_amount", "feedback"]) {
+                dev.feedback_amount = v.clamp(0.0, 0.99);
+                if dev.feedback_amount > 0.0 {
+                    dev.topology = RoarTopology::Feedback;
+                }
+            }
+            if let Some(v) = get_p(&["feedback_delay_ms"]) { dev.feedback_delay_ms = v.clamp(1.0, 500.0); }
             if let Some(v) = get_p(&["dry_wet", "mix", "wet"]) { dev.dry_wet = v.clamp(0.0, 1.0); }
             if let Some(v) = get_p(&["output_gain_db", "output_gain"]) { dev.output_gain_db = v; }
             run_audio_effect_device(&mut dev, left, right, bpm, start_beat_offset, sample_rate);
@@ -773,6 +879,19 @@ fn process_generic_device(
             let mut dev = AutoFilter::new(sample_rate);
             if let Some(v) = get_p(&["cutoff_hz", "cutoff", "frequency"]) { dev.cutoff_hz = v.clamp(20.0, 20000.0); }
             if let Some(v) = get_p(&["resonance"]) { dev.resonance = v.clamp(0.0, 1.0); }
+            if let Some(v) = get_p(&["drive"]) { dev.drive = v.clamp(0.0, 24.0); }
+            if let Some(v) = get_p(&["morph"]) { dev.morph = v.clamp(0.0, 1.0); }
+            if let Some(v) = get_p(&["env_amount"]) { dev.env_amount = v.clamp(-1.0, 1.0); }
+            if let Some(v) = get_p(&["env_attack_ms"]) { dev.env_attack_ms = v.clamp(0.1, 500.0); }
+            if let Some(v) = get_p(&["env_release_ms"]) { dev.env_release_ms = v.clamp(1.0, 2000.0); }
+            if let Some(v) = get_p(&["lfo_rate_hz"]) { dev.lfo_rate_hz = v.clamp(0.01, 50.0); }
+            if let Some(v) = get_p(&["lfo_amount"]) {
+                dev.lfo_amount = v.clamp(0.0, 1.0);
+                if dev.lfo_amount > 0.0 {
+                    dev.lfo_enabled = true;
+                }
+            }
+            if let Some(v) = get_p(&["lfo_enabled"]) { dev.lfo_enabled = v >= 0.5; }
             if let Some(v) = get_p(&["dry_wet", "mix", "wet"]) { dev.dry_wet = v.clamp(0.0, 1.0); }
             run_audio_effect_device(&mut dev, left, right, bpm, start_beat_offset, sample_rate);
         }
@@ -792,13 +911,16 @@ fn process_generic_device(
             if let Some(v) = get_p(&["time_macro", "time"]) { dev.time_macro = v.clamp(0.1, 10.0); }
             if let Some(v) = get_p(&["input_gain_db"]) { dev.input_gain_db = v; }
             if let Some(v) = get_p(&["output_gain_db"]) { dev.output_gain_db = v; }
+            if let Some(v) = get_p(&["low_gain_db"]) { dev.low_band.gain_db = v.clamp(-24.0, 24.0); }
+            if let Some(v) = get_p(&["mid_gain_db"]) { dev.mid_band.gain_db = v.clamp(-24.0, 24.0); }
+            if let Some(v) = get_p(&["high_gain_db"]) { dev.high_band.gain_db = v.clamp(-24.0, 24.0); }
             run_audio_effect_device(&mut dev, left, right, bpm, start_beat_offset, sample_rate);
         }
         "saturator" => {
             let mut dev = Saturator::new();
             if let Some(v) = get_p(&["drive_db", "drive"]) { dev.set_drive_db(v); }
             if let Some(v) = get_p(&["output_gain_db", "output_gain"]) { dev.set_output_gain_db(v); }
-            if let Some(v) = get_p(&["wet", "dry_wet", "mix"]) { dev.wet = v.clamp(0.0, 1.0); }
+            if let Some(v) = get_p(&["wet", "dry_wet", "mix", "curve"]) { dev.wet = v.clamp(0.0, 1.0); }
             dev.process_block(left, right);
         }
         "delay" | "tempodelay" => {
@@ -830,14 +952,29 @@ fn process_generic_device(
             if let Some(v) = get_p(&["decay_s", "decay"]) { dev.decay_s = v.max(0.1); }
             if let Some(v) = get_p(&["size", "room_size"]) { dev.size = v.clamp(0.2, 2.0); }
             if let Some(v) = get_p(&["damping"]) { dev.damping = v.clamp(0.0, 1.0); }
+            if let Some(v) = get_p(&["predelay_ms"]) { dev.predelay_ms = v.clamp(0.0, 500.0); }
+            if let Some(v) = get_p(&["conv_algo_blend", "blend"]) { dev.conv_algo_blend = v.clamp(0.0, 1.0); }
             if let Some(v) = get_p(&["dry_wet", "mix", "wet"]) { dev.dry_wet = v.clamp(0.0, 1.0); }
             run_audio_effect_device(&mut dev, left, right, bpm, start_beat_offset, sample_rate);
         }
         "echo" => {
             let mut dev = Echo::new(sample_rate);
-            if let Some(v) = get_p(&["delay_time_l_ms", "time_ms"]) { dev.delay_time_l_ms = v.max(1.0); }
-            if let Some(v) = get_p(&["delay_time_r_ms", "time_ms"]) { dev.delay_time_r_ms = v.max(1.0); }
+            let beat_ms = (60_000.0 / bpm.max(20.0)) as f32;
+            if let Some(v) = get_p(&["delay_time_l_ms", "time_ms"]) {
+                dev.delay_time_l_ms = v.max(1.0);
+            } else if let Some(tb) = get_p(&["time_beats"]) {
+                dev.delay_time_l_ms = (tb.max(0.01) * beat_ms).clamp(1.0, 2400.0);
+            }
+            if let Some(v) = get_p(&["delay_time_r_ms", "time_ms"]) {
+                dev.delay_time_r_ms = v.max(1.0);
+            } else if let Some(tb) = get_p(&["time_beats"]) {
+                dev.delay_time_r_ms = (tb.max(0.01) * beat_ms * 0.75).clamp(1.0, 2400.0);
+            }
             if let Some(v) = get_p(&["feedback"]) { dev.feedback = v.clamp(0.0, 0.98); }
+            if let Some(v) = get_p(&["cross_feed"]) { dev.cross_feed = v.clamp(0.0, 1.0); }
+            if let Some(v) = get_p(&["wow"]) { dev.wow = v.clamp(0.0, 1.0); }
+            if let Some(v) = get_p(&["flutter"]) { dev.flutter = v.clamp(0.0, 1.0); }
+            if let Some(v) = get_p(&["ducking_db"]) { dev.ducking_db = v.clamp(-60.0, 0.0); }
             if let Some(v) = get_p(&["dry_wet", "mix", "wet"]) { dev.dry_wet = v.clamp(0.0, 1.0); }
             run_audio_effect_device(&mut dev, left, right, bpm, start_beat_offset, sample_rate);
         }
@@ -845,18 +982,27 @@ fn process_generic_device(
             let mut dev = SpectralResonator::new(sample_rate);
             if let Some(v) = get_p(&["root_hz", "frequency"]) { dev.root_hz = v.clamp(20.0, 8000.0); }
             if let Some(v) = get_p(&["decay_s", "decay"]) { dev.decay_s = v.max(0.05); }
+            if let Some(v) = get_p(&["harmonic_count", "harmonics"]) { dev.harmonic_count = (v.round() as usize).clamp(1, 32); }
+            if let Some(v) = get_p(&["unison_spread", "unison"]) { dev.unison_spread = v.clamp(0.0, 1.0); }
             if let Some(v) = get_p(&["dry_wet", "mix", "wet"]) { dev.dry_wet = v.clamp(0.0, 1.0); }
             run_audio_effect_device(&mut dev, left, right, bpm, start_beat_offset, sample_rate);
         }
         "corpus" => {
             let mut dev = Corpus::new(sample_rate);
-            if let Some(v) = get_p(&["tune_hz", "frequency"]) { dev.tune_hz = v.clamp(20.0, 8000.0); }
-            if let Some(v) = get_p(&["decay_s", "decay"]) { dev.decay_s = v.max(0.01); }
-            if let Some(v) = get_p(&["dry_wet", "mix", "wet"]) { dev.dry_wet = v.clamp(0.0, 1.0); }
+            // Corpus AudioEffectDevice param IDs: 0=dry_wet, 1=tune_hz, 2=decay_s, 3=material
+            if let Some(v) = get_p(&["tune_hz", "frequency"]) { AudioEffectDevice::set_parameter(&mut dev, 1, v); }
+            if let Some(v) = get_p(&["decay_s", "decay"]) { AudioEffectDevice::set_parameter(&mut dev, 2, v); }
+            if let Some(v) = get_p(&["material"]) { AudioEffectDevice::set_parameter(&mut dev, 3, v); }
+            if let Some(v) = get_p(&["dry_wet", "mix", "wet"]) { AudioEffectDevice::set_parameter(&mut dev, 0, v); }
             run_audio_effect_device(&mut dev, left, right, bpm, start_beat_offset, sample_rate);
         }
         "beatrepeat" => {
             let mut dev = BeatRepeat::new(sample_rate);
+            if let Some(v) = get_p(&["interval_beats", "interval"]) { dev.interval_beats = (v as f64).clamp(0.0625, 16.0); }
+            if let Some(v) = get_p(&["grid_beats", "grid"]) { dev.grid_beats = (v as f64).clamp(0.03125, 4.0); }
+            if let Some(v) = get_p(&["chance"]) { dev.chance = v.clamp(0.0, 1.0); }
+            if let Some(v) = get_p(&["gate"]) { dev.gate = v.clamp(0.05, 1.0); }
+            if let Some(v) = get_p(&["pitch_decay"]) { dev.pitch_decay = v.clamp(0.0, 1.0); }
             if let Some(v) = get_p(&["dry_wet", "mix", "wet"]) { dev.dry_wet = v.clamp(0.0, 1.0); }
             run_audio_effect_device(&mut dev, left, right, bpm, start_beat_offset, sample_rate);
         }
@@ -884,6 +1030,7 @@ fn process_generic_device(
             let mut dev = Redux::new();
             if let Some(v) = get_p(&["downsample"]) { dev.downsample = (v.round() as usize).clamp(1, 256); }
             if let Some(v) = get_p(&["bit_depth"]) { dev.bit_depth = (v.round() as u8).clamp(1, 16); }
+            if let Some(v) = get_p(&["jitter"]) { dev.jitter = v.clamp(0.0, 1.0); }
             if let Some(v) = get_p(&["dry_wet", "mix", "wet"]) { dev.dry_wet = v.clamp(0.0, 1.0); }
             run_audio_effect_device(&mut dev, left, right, bpm, start_beat_offset, sample_rate);
         }
@@ -892,14 +1039,25 @@ fn process_generic_device(
             if let Some(v) = get_p(&["gain_db", "gain"]) { dev.gain_db = v; }
             if let Some(v) = get_p(&["pan"]) { dev.pan = v.clamp(-1.0, 1.0); }
             if let Some(v) = get_p(&["width"]) { dev.width = v.clamp(0.0, 4.0); }
+            if let Some(v) = get_p(&["bass_mono_freq_hz", "bass_mono_freq"]) { dev.bass_mono_freq_hz = v.clamp(20.0, 500.0); }
+            if let Some(v) = get_p(&["bass_mono"]) { dev.bass_mono = v >= 0.5; }
+            if let Some(v) = get_p(&["phase_invert_l"]) { dev.phase_invert_l = v >= 0.5; }
+            if let Some(v) = get_p(&["phase_invert_r"]) { dev.phase_invert_r = v >= 0.5; }
+            if let Some(v) = get_p(&["mute"]) { dev.mute = v >= 0.5; }
             run_audio_effect_device(&mut dev, left, right, bpm, start_beat_offset, sample_rate);
         }
         "limiter" | "masterlimiter" => {
             let mut dev = MasterLimiter::new(sample_rate);
-            if let Some(v) = get_p(&["ceiling_db", "ceiling"]) {
-                dev.ceiling = 10.0_f32.powf(v.clamp(-24.0, 0.0) / 20.0);
+            if let Some(db) = get_p(&["ceiling_db"]) {
+                dev.ceiling = 10.0_f32.powf(db.clamp(-24.0, 0.0) / 20.0);
+            } else if let Some(c) = get_p(&["ceiling"]) {
+                dev.ceiling = if c > 0.0 && c <= 1.0 {
+                    c.clamp(0.01, 1.0)
+                } else {
+                    10.0_f32.powf(c.clamp(-24.0, 0.0) / 20.0)
+                };
             }
-            dev.process_block(left, right);
+            process_master_limiter_compensated(&mut dev, left, right);
         }
         _ => {}
     }
@@ -917,12 +1075,15 @@ fn process_insert_fx_chain(
         match fx {
             InsertEffectConfig::Saturator {
                 drive_db,
-                curve: _,
+                curve,
                 output_gain_db,
             } => {
                 let mut sat = Saturator::new();
                 sat.set_drive_db(*drive_db);
                 sat.set_output_gain_db(*output_gain_db);
+                if *curve > 0.0 && curve.is_finite() {
+                    sat.wet = curve.clamp(0.0, 1.0);
+                }
                 sat.process_block(left, right);
             }
             InsertEffectConfig::TempoDelay {
@@ -1071,6 +1232,9 @@ pub(crate) fn apply_master_fx_and_limiter(
         let mut sat = Saturator::new();
         sat.set_drive_db(master_track.saturator_drive_db);
         sat.set_output_gain_db(master_track.saturator_output_db);
+        if master_track.saturator_curve > 0.0 && master_track.saturator_curve.is_finite() {
+            sat.wet = master_track.saturator_curve.clamp(0.0, 1.0);
+        }
         sat.process_block(master_l, master_r);
     }
     if master_track.delay_mix > 0.0 {
@@ -1106,17 +1270,7 @@ pub(crate) fn apply_master_fx_and_limiter(
 
     let mut limiter = MasterLimiter::new(sample_rate);
     limiter.ceiling = 10.0_f32.powf(master_track.limiter_ceiling_db.clamp(-24.0, 0.0) / 20.0);
-    const BLOCK_SIZE: usize = 128;
-    let total_frames = master_l.len().min(master_r.len());
-    let mut frame = 0;
-    while frame < total_frames {
-        let cur_block = (total_frames - frame).min(BLOCK_SIZE);
-        limiter.process_block(
-            &mut master_l[frame..frame + cur_block],
-            &mut master_r[frame..frame + cur_block],
-        );
-        frame += cur_block;
-    }
+    process_master_limiter_compensated(&mut limiter, master_l, master_r);
 }
 
 pub(crate) fn render_project_mix_with_stems(
@@ -1136,7 +1290,14 @@ pub(crate) fn render_project_mix_with_stems(
         Vec::new()
     };
 
-    let any_solo = project.tracks.iter().any(|t| t.mixer.solo);
+    let any_source_solo = project
+        .tracks
+        .iter()
+        .any(|t| t.track_type != TrackType::Return && t.mixer.solo);
+    let any_return_solo = project
+        .tracks
+        .iter()
+        .any(|t| t.track_type == TrackType::Return && t.mixer.solo);
     let return_indices: Vec<usize> = project
         .tracks
         .iter()
@@ -1153,9 +1314,10 @@ pub(crate) fn render_project_mix_with_stems(
         if track.track_type == TrackType::Return {
             continue;
         }
-        let is_active_in_mix = !track.mixer.mute && (!any_solo || track.mixer.solo);
+        let is_source_selected = !track.mixer.mute && (!any_source_solo || track.mixer.solo);
+        let dry_to_master = is_source_selected && (!any_return_solo || (any_source_solo && track.mixer.solo));
 
-        if is_active_in_mix || collect_all_stems {
+        if is_source_selected || collect_all_stems {
             let (trk_l, trk_r) = if track.mixer.mute {
                 (vec![0.0f32; total_frames], vec![0.0f32; total_frames])
             } else {
@@ -1169,14 +1331,16 @@ pub(crate) fn render_project_mix_with_stems(
                 )
             };
 
-            if is_active_in_mix {
-                for i in 0..total_frames {
-                    master_l[i] += trk_l[i];
-                    master_r[i] += trk_r[i];
+            if is_source_selected {
+                if dry_to_master {
+                    for i in 0..total_frames {
+                        master_l[i] += trk_l[i];
+                        master_r[i] += trk_r[i];
+                    }
                 }
                 for (send_idx, (ret_l, ret_r)) in return_buses.iter_mut().enumerate() {
                     let send_db = track.mixer.get_send_db(send_idx);
-                    if send_db > -70.0 {
+                    if send_db > -69.9 {
                         let send_gain = 10.0_f32.powf(send_db.clamp(-70.0, 6.0) / 20.0);
                         for i in 0..total_frames {
                             ret_l[i] += trk_l[i] * send_gain;
@@ -1197,7 +1361,7 @@ pub(crate) fn render_project_mix_with_stems(
         let track = &project.tracks[track_idx];
         let (mut ret_l, mut ret_r) = std::mem::take(&mut return_buses[ret_slot]);
 
-        if track.mixer.mute {
+        if track.mixer.mute || (any_return_solo && !track.mixer.solo) {
             ret_l.fill(0.0);
             ret_r.fill(0.0);
         } else {
@@ -1479,6 +1643,7 @@ fn schedule_drum_pattern_events(
     swing_16th_ratio: f32,
     sample_rate: f32,
     total_frames: usize,
+    loop_enabled: bool,
     events: &mut Vec<(usize, DrumTrigger)>,
 ) {
     let _ = clip_end_beat;
@@ -1494,11 +1659,17 @@ fn schedule_drum_pattern_events(
             if !step.active {
                 continue;
             }
-            let raw_phase = (step_idx as f64) * step_dur
-                + if step_idx % 2 == 1 { swing_delay } else { 0.0 };
-            let ev_phase = raw_phase.rem_euclid(pat_len);
-            let k_start = ((rel_min - ev_phase) / pat_len).floor() as i64 - 1;
-            let k_end = ((rel_max - ev_phase) / pat_len).ceil() as i64 + 1;
+            let base_phase = ((step_idx as f64) * step_dur).rem_euclid(pat_len);
+            let swing_off = if step_idx % 2 == 1 { swing_delay } else { 0.0 };
+            let ev_phase = base_phase + swing_off;
+            let (k_start, k_end) = if loop_enabled {
+                (
+                    (((rel_min - ev_phase) / pat_len).floor() as i64 - 1).max(0),
+                    ((rel_max - ev_phase) / pat_len).ceil() as i64 + 1,
+                )
+            } else {
+                (0, 0)
+            };
 
             let vel = if step.accent {
                 ((step.velocity as f32 * 1.15).round().clamp(1.0, 127.0)) as u8
@@ -1534,6 +1705,7 @@ fn schedule_drum_midi_events(
     swing_16th_ratio: f32,
     sample_rate: f32,
     total_frames: usize,
+    loop_enabled: bool,
     events: &mut Vec<(usize, DrumTrigger)>,
 ) {
     let pat_len = midi_pattern.length_beats.max(0.0625);
@@ -1547,11 +1719,17 @@ fn schedule_drum_midi_events(
         let nearest = sixteenth_pos.round();
         let is_offbeat_16th = (sixteenth_pos - nearest).abs() < 0.05
             && (nearest as i64).rem_euclid(2) == 1;
-        let ev_phase = (note.start_beat + if is_offbeat_16th { swing_delay } else { 0.0 })
-            .rem_euclid(pat_len);
+        let base_phase = note.start_beat.rem_euclid(pat_len);
+        let ev_phase = base_phase + if is_offbeat_16th { swing_delay } else { 0.0 };
 
-        let k_start = ((rel_min - ev_phase) / pat_len).floor() as i64 - 1;
-        let k_end = ((rel_max - ev_phase) / pat_len).ceil() as i64 + 1;
+        let (k_start, k_end) = if loop_enabled {
+            (
+                (((rel_min - ev_phase) / pat_len).floor() as i64 - 1).max(0),
+                ((rel_max - ev_phase) / pat_len).ceil() as i64 + 1,
+            )
+        } else {
+            (0, 0)
+        };
 
         for k in k_start..=k_end {
             if !deterministic_note_prob_passes(track_id, k as u64, note_idx, note.probability) {
@@ -1675,6 +1853,7 @@ fn render_drum_track(
                         swing_16th_ratio,
                         sample_rate,
                         total_frames,
+                        true,
                         &mut events,
                     );
                 }
@@ -1691,6 +1870,7 @@ fn render_drum_track(
                         swing_16th_ratio,
                         sample_rate,
                         total_frames,
+                        true,
                         &mut events,
                     );
                 }
@@ -1728,6 +1908,7 @@ fn render_drum_track(
                         swing_16th_ratio,
                         sample_rate,
                         total_frames,
+                        s_clip.loop_enabled,
                         &mut events,
                     );
                 }
@@ -1744,6 +1925,7 @@ fn render_drum_track(
                         swing_16th_ratio,
                         sample_rate,
                         total_frames,
+                        s_clip.loop_enabled,
                         &mut events,
                     );
                 }
@@ -1862,6 +2044,7 @@ fn schedule_synth_midi_events(
     swing_16th_ratio: f32,
     sample_rate: f32,
     total_frames: usize,
+    loop_enabled: bool,
     events: &mut Vec<(usize, bool, u8, u8)>, // (frame, is_note_on, pitch, velocity)
 ) {
     let pat_len = midi_pattern.length_beats.max(0.0625);
@@ -1877,12 +2060,17 @@ fn schedule_synth_midi_events(
             && (nearest as i64).rem_euclid(2) == 1;
         let swing_off = if is_offbeat_16th { swing_delay } else { 0.0 };
 
-        let note_rel_start = note.start_beat + swing_off;
         let note_dur = note.duration_beats.max(0.01);
-        let base_phase = note_rel_start.rem_euclid(pat_len);
+        let base_phase = note.start_beat.rem_euclid(pat_len) + swing_off;
 
-        let k_start = ((rel_min - base_phase - note_dur) / pat_len).floor() as i64 - 1;
-        let k_end = ((rel_max - base_phase) / pat_len).ceil() as i64 + 1;
+        let (k_start, k_end) = if loop_enabled {
+            (
+                (((rel_min - base_phase - note_dur) / pat_len).floor() as i64 - 1).max(0),
+                ((rel_max - base_phase) / pat_len).ceil() as i64 + 1,
+            )
+        } else {
+            (0, 0)
+        };
 
         for k in k_start..=k_end {
             if !deterministic_note_prob_passes(track_id, k as u64, note_idx, note.probability) {
@@ -1898,14 +2086,14 @@ fn schedule_synth_midi_events(
 
             let clamped_start = note_abs_start.max(active_start_beat);
             let clamped_end = note_abs_end.min(clip_end_beat).min(active_end_beat);
-            if clamped_end <= clamped_start {
+            if clamped_end <= clamped_start || total_frames == 0 {
                 continue;
             }
 
             let on_f = beat_to_frame_offset(clamped_start, start_beat_offset, bpm, sample_rate)
                 .clamp(0, (total_frames.saturating_sub(1)) as isize) as usize;
             let off_f = beat_to_frame_offset(clamped_end, start_beat_offset, bpm, sample_rate)
-                .clamp(on_f as isize, total_frames as isize) as usize;
+                .clamp((on_f + 1) as isize, total_frames as isize) as usize;
 
             events.push((on_f, true, note.pitch, note.velocity.max(1)));
             if off_f < total_frames {
@@ -1943,7 +2131,7 @@ fn render_synth_track(
         if let Some(val) = params.get_parameter(name) {
             if preset_loaded {
                 if let Some(def_val) = defaults.get_parameter(name) {
-                    if (val - def_val).abs() > 1e-6 {
+                    if (val - def_val).abs() > 1e-6 || params.is_overridden(name) {
                         synth.set_parameter(name, val);
                     }
                 }
@@ -1983,6 +2171,7 @@ fn render_synth_track(
                         swing_16th_ratio,
                         sample_rate,
                         total_frames,
+                        true,
                         &mut events,
                     );
                 }
@@ -2017,6 +2206,7 @@ fn render_synth_track(
                     swing_16th_ratio,
                     sample_rate,
                     total_frames,
+                    s_clip.loop_enabled,
                     &mut events,
                 );
             }
@@ -2049,10 +2239,11 @@ fn render_synth_track(
         if f % 64 == 0 && !resolved_lanes.is_empty() {
             for (lane, param_name) in &resolved_lanes {
                 let val = lane.interpolate_at(current_beat, 0.5);
-                let is_large_domain = ParameterBank::get_descriptor(param_name)
-                    .map(|d| d.max > 1.5)
+                // Only treat [0.0, 1.0] as normalized for parameters whose entire physical range lies strictly above 1.5 (e.g. filter_frequency 20..20000 Hz)
+                let normalized_only_range = ParameterBank::get_descriptor(param_name)
+                    .map(|d| d.min > 1.5)
                     .unwrap_or(false);
-                if is_large_domain && (0.0..=1.0).contains(&val) {
+                if normalized_only_range && (0.0..=1.0).contains(&val) {
                     synth.set_parameter_normalized(param_name, val);
                 } else {
                     synth.set_parameter(param_name, val);
@@ -2086,12 +2277,25 @@ fn mix_resampled_audio(
     dur_frames: usize,
     gain: f32,
     looping: bool,
+    loop_start_frame: usize,
+    loop_end_frame: usize,
     out_l: &mut [f32],
     out_r: &mut [f32],
 ) -> bool {
     let ch = (src_channels as usize).max(1);
     let total_src_frames = samples.len() / ch;
     if total_src_frames == 0 || dur_frames == 0 || src_sr == 0 || render_sr <= 0.0 {
+        return false;
+    }
+
+    let loop_end = if loop_end_frame == 0 {
+        total_src_frames
+    } else {
+        loop_end_frame.min(total_src_frames)
+    };
+    let loop_start = loop_start_frame.min(loop_end);
+    let loop_len = loop_end.saturating_sub(loop_start);
+    if loop_len == 0 {
         return false;
     }
 
@@ -2108,20 +2312,30 @@ fn mix_resampled_audio(
             src_pos += src_step;
             continue;
         }
-        let mut idx0 = src_pos.floor() as usize;
-        if idx0 >= total_src_frames {
-            if looping {
-                idx0 %= total_src_frames;
+        let effective_pos = if looping {
+            if src_pos >= loop_end as f64 {
+                loop_start as f64 + (src_pos - loop_start as f64).rem_euclid(loop_len as f64)
             } else {
+                src_pos
+            }
+        } else {
+            if src_pos >= loop_end as f64 {
                 break;
             }
-        }
-        let idx1 = if looping {
-            (idx0 + 1) % total_src_frames
-        } else {
-            (idx0 + 1).min(total_src_frames - 1)
+            src_pos
         };
-        let frac = (src_pos - src_pos.floor()) as f32;
+        let idx0 = (effective_pos.floor() as usize).min(loop_end - 1);
+        let idx1 = if looping {
+            if idx0 >= loop_start {
+                let next = idx0 + 1;
+                if next >= loop_end { loop_start } else { next }
+            } else {
+                (idx0 + 1).min(total_src_frames - 1)
+            }
+        } else {
+            (idx0 + 1).min(loop_end - 1)
+        };
+        let frac = (effective_pos - effective_pos.floor()) as f32;
 
         let l0 = samples[idx0 * ch];
         let l1 = samples[idx1 * ch];
@@ -2138,6 +2352,29 @@ fn mix_resampled_audio(
     }
 
     rendered
+}
+
+fn resolve_audio_clip_pcm(
+    data: &oxide_timeline::AudioClipData,
+    default_sr: f32,
+) -> Option<(u32, u16, std::borrow::Cow<'_, [f32]>)> {
+    if !data.samples.is_empty() {
+        let src_sr = if data.sample_rate > 0 {
+            data.sample_rate
+        } else {
+            default_sr as u32
+        };
+        let src_ch = data.channels.max(1);
+        Some((src_sr, src_ch, std::borrow::Cow::Borrowed(&data.samples)))
+    } else if let Some(resolved) = resolve_asset_or_file(&data.file_path) {
+        if let Ok((wav_sr, wav_ch, samples)) = read_wav_file(&resolved) {
+            Some((wav_sr, wav_ch, std::borrow::Cow::Owned(samples)))
+        } else {
+            None
+        }
+    } else {
+        None
+    }
 }
 
 fn render_audio_track(
@@ -2157,7 +2394,7 @@ fn render_audio_track(
     let window_beats = (total_frames as f64 / sample_rate as f64) / seconds_per_beat;
     let window_end_beat = start_beat_offset + window_beats;
 
-    // 1. Render arrangement clips placed on timeline
+    // 1. Render arrangement clips placed on timeline (supports looped extension past source length)
     if !track.arrangement_clips.is_empty() {
         for clip in &track.arrangement_clips {
             if clip.muted {
@@ -2182,15 +2419,16 @@ fn render_audio_track(
                     .min(total_frames.saturating_sub(out_start_frame));
                 let clip_gain = db_to_linear_gain(data.gain_db);
 
-                if !data.samples.is_empty() {
-                    let src_sr = if data.sample_rate > 0 {
-                        data.sample_rate
+                if let Some((src_sr, src_ch, samples)) = resolve_audio_clip_pcm(data, sample_rate) {
+                    let total_src_frames = samples.len() / (src_ch as usize).max(1);
+                    let loop_end_frame = if data.length_beats > 0.0 {
+                        ((data.length_beats * seconds_per_beat * src_sr as f64).round() as usize)
+                            .clamp(1, total_src_frames.max(1))
                     } else {
-                        sample_rate as u32
+                        total_src_frames
                     };
-                    let src_ch = data.channels.max(1);
                     mix_resampled_audio(
-                        &data.samples,
+                        &samples,
                         src_ch,
                         src_sr,
                         sample_rate,
@@ -2198,76 +2436,89 @@ fn render_audio_track(
                         out_start_frame,
                         dur_frames,
                         clip_gain,
-                        false,
+                        true,
+                        0,
+                        loop_end_frame,
                         out_l,
                         out_r,
                     );
-                } else if let Some(resolved) = resolve_asset_or_file(&data.file_path) {
-                    if let Ok((wav_sr, wav_ch, samples)) = read_wav_file(&resolved) {
-                        mix_resampled_audio(
-                            &samples,
-                            wav_ch,
-                            wav_sr,
-                            sample_rate,
-                            src_start_seconds,
-                            out_start_frame,
-                            dur_frames,
-                            clip_gain,
-                            false,
-                            out_l,
-                            out_r,
-                        );
-                    }
                 }
             }
         }
         return;
     }
 
-    // 2. If track has no arrangement clips at all, render first audio session clip
+    // 2. If track has no arrangement clips at all, render first audio session clip cleanly windowed
     for s_clip in track.session_clips.iter().flatten() {
         if let ClipPattern::Audio(data) = &s_clip.pattern {
-            let clip_gain = db_to_linear_gain(data.gain_db);
-            let src_start_seconds = s_clip.loop_start_beat.max(0.0) * seconds_per_beat;
-            if !data.samples.is_empty() {
-                let src_sr = if data.sample_rate > 0 {
-                    data.sample_rate
+            if let Some((src_sr, src_ch, samples)) = resolve_audio_clip_pcm(data, sample_rate) {
+                let total_src_frames = samples.len() / (src_ch as usize).max(1);
+                if total_src_frames == 0 || src_sr == 0 {
+                    continue;
+                }
+                let clip_gain = db_to_linear_gain(data.gain_db);
+                let loop_start_beats = s_clip.loop_start_beat.max(0.0);
+                let total_src_beats = (total_src_frames as f64 / src_sr as f64) / seconds_per_beat;
+                let end_beats = if s_clip.loop_end_beat > loop_start_beats {
+                    s_clip.loop_end_beat.min(total_src_beats)
                 } else {
-                    sample_rate as u32
+                    total_src_beats
                 };
-                let src_ch = data.channels.max(1);
+                let loop_start_frame = ((loop_start_beats * seconds_per_beat * src_sr as f64).round()
+                    as usize)
+                    .min(total_src_frames.saturating_sub(1));
+                let loop_end_frame = ((end_beats * seconds_per_beat * src_sr as f64).round()
+                    as usize)
+                    .clamp(loop_start_frame + 1, total_src_frames);
+
+                let (src_start_seconds, out_start_frame, dur_frames) = if s_clip.loop_enabled {
+                    if start_beat_offset < 0.0 {
+                        let delay_frames = ((-start_beat_offset) * seconds_per_beat * sample_rate as f64)
+                            .round() as usize;
+                        (
+                            loop_start_beats * seconds_per_beat,
+                            delay_frames,
+                            total_frames.saturating_sub(delay_frames),
+                        )
+                    } else {
+                        (
+                            (loop_start_beats + start_beat_offset) * seconds_per_beat,
+                            0,
+                            total_frames,
+                        )
+                    }
+                } else {
+                    let clip_play_beats = (end_beats - loop_start_beats).max(0.0);
+                    let overlap_start = start_beat_offset.max(0.0);
+                    let overlap_end = window_end_beat.min(clip_play_beats);
+                    if overlap_end <= overlap_start {
+                        continue;
+                    }
+                    let out_start = ((overlap_start - start_beat_offset) * seconds_per_beat * sample_rate as f64)
+                        .round() as usize;
+                    let src_start = (loop_start_beats + overlap_start) * seconds_per_beat;
+                    let dur = (((overlap_end - overlap_start) * seconds_per_beat * sample_rate as f64)
+                        .ceil() as usize)
+                        .min(total_frames.saturating_sub(out_start));
+                    (src_start, out_start, dur)
+                };
+
                 if mix_resampled_audio(
-                    &data.samples,
+                    &samples,
                     src_ch,
                     src_sr,
                     sample_rate,
                     src_start_seconds,
-                    0,
-                    total_frames,
+                    out_start_frame,
+                    dur_frames,
                     clip_gain,
                     s_clip.loop_enabled,
+                    loop_start_frame,
+                    loop_end_frame,
                     out_l,
                     out_r,
                 ) {
                     break;
-                }
-            } else if let Some(resolved) = resolve_asset_or_file(&data.file_path) {
-                if let Ok((wav_sr, wav_ch, samples)) = read_wav_file(&resolved) {
-                    if mix_resampled_audio(
-                        &samples,
-                        wav_ch,
-                        wav_sr,
-                        sample_rate,
-                        src_start_seconds,
-                        0,
-                        total_frames,
-                        clip_gain,
-                        s_clip.loop_enabled,
-                        out_l,
-                        out_r,
-                    ) {
-                        break;
-                    }
                 }
             }
         }
@@ -2826,5 +3077,172 @@ mod tests {
             sum_sq += (buf.right[i] * buf.right[i]) as f64;
         }
         ((sum_sq / (buf.frame_count * 2) as f64).sqrt()) as f32
+    }
+
+    #[test]
+    fn test_eq8_1based_bands_and_master_limiter_ceiling_db_and_corpus_params() {
+        let mut eq = EQEight::new(44100.0);
+        let mut params = std::collections::HashMap::new();
+        params.insert("band1_gain_db".to_string(), 6.0);
+        params.insert("band8_gain_db".to_string(), -9.0);
+        configure_eq8_from_params(&mut eq, &params, 44100.0);
+        assert!((eq.bands[0].gain_db - 6.0).abs() < 1e-4, "band1 must map to bands[0]");
+        assert!((eq.bands[7].gain_db - (-9.0)).abs() < 1e-4, "band8 must map to bands[7]");
+
+        let mut sig_l = vec![0.5f32; 512];
+        let mut sig_r = vec![0.5f32; 512];
+        let mut lim_params = std::collections::HashMap::new();
+        lim_params.insert("ceiling_db".to_string(), -6.0);
+        process_generic_device("MasterLimiter", &lim_params, &mut sig_l, &mut sig_r, 44100.0, 120.0, 0.0);
+        let peak = sig_l.iter().map(|s| s.abs()).fold(0.0f32, f32::max);
+        assert!(peak < 0.55 && peak > 0.35, "MasterLimiter -6 dBFS ceiling (~0.501), got {}", peak);
+
+        // Corpus tune_hz change must alter output via AudioEffectDevice::set_parameter(rebuild_modes)
+        let mut c1_l: Vec<f32> = (0..2048).map(|i| if i == 0 { 0.8 } else { 0.0 }).collect();
+        let mut c1_r = c1_l.clone();
+        let mut c2_l = c1_l.clone();
+        let mut c2_r = c1_l.clone();
+        let mut cp1 = std::collections::HashMap::new();
+        cp1.insert("tune_hz".to_string(), 100.0);
+        cp1.insert("dry_wet".to_string(), 1.0);
+        let mut cp2 = std::collections::HashMap::new();
+        cp2.insert("tune_hz".to_string(), 600.0);
+        cp2.insert("dry_wet".to_string(), 1.0);
+        process_generic_device("Corpus", &cp1, &mut c1_l, &mut c1_r, 44100.0, 120.0, 0.0);
+        process_generic_device("Corpus", &cp2, &mut c2_l, &mut c2_r, 44100.0, 120.0, 0.0);
+        let diff: f32 = c1_l.iter().zip(c2_l.iter()).map(|(a, b)| (a - b).abs()).sum();
+        assert!(diff > 0.1, "Corpus tune_hz must rebuild modal frequencies");
+    }
+
+    #[test]
+    fn test_return_track_solo_feeds_sends_and_mutes_dry() {
+        use oxide_timeline::{ArrangementClip, MidiNote};
+
+        let mut project = DAWProject::new("Return Solo");
+        project.transport.bpm = 120.0;
+
+        let mut src = TrackDefinition::new_synth(1, "Source");
+        src.mixer.set_send_db(0, 0.0);
+        let mut mp = MidiPattern::new(4.0);
+        mp.notes.push(MidiNote { pitch: 60, velocity: 120, start_beat: 0.0, duration_beats: 1.0, probability: 1.0 });
+        src.arrangement_clips.push(ArrangementClip::new(1, "Note", 0.0, 4.0, ClipPattern::Midi(mp)));
+
+        let mut ret_a = TrackDefinition::new_return(2, "Return A");
+        ret_a.mixer.solo = true;
+        ret_a.insert_fx.push(InsertEffectConfig::Reverb { ir_path: None, decay_ms: 1000.0, mix: 1.0 });
+
+        let mut ret_b = TrackDefinition::new_return(3, "Return B");
+        ret_b.mixer.solo = false;
+        ret_b.insert_fx.push(InsertEffectConfig::Reverb { ir_path: None, decay_ms: 1000.0, mix: 1.0 });
+        src.mixer.set_send_db(1, 0.0);
+
+        project.tracks.push(src);
+        project.tracks.push(ret_a);
+        project.tracks.push(ret_b);
+
+        let (ml, _, stems) = render_project_mix_with_stems(&project, 44100.0, 120.0, 0.0, 1.0, true);
+        let ret_a_e: f32 = stems[1].0.iter().map(|s| s * s).sum();
+        let ret_b_e: f32 = stems[2].0.iter().map(|s| s * s).sum();
+        let dry_e: f32 = stems[0].0.iter().map(|s| s * s).sum();
+        let master_e: f32 = ml.iter().map(|s| s * s).sum();
+        assert!(ret_a_e > 1e-4 && master_e > 1e-4, "Soloed return A must output wet send signal");
+        assert!(ret_b_e < 1e-9, "Non-soloed return B must be silenced when return A is soloed");
+        assert!(dry_e > 1e-2, "Source stem generated signal");
+        // Dry source was NOT added to master (master only equals limited Return A)
+        let wet_diff: f32 = ml.iter().zip(stems[1].0.iter()).map(|(m, r)| (m - r).abs()).sum();
+        assert!(
+            wet_diff < master_e.sqrt() * 2.0,
+            "Return solo master should match wet return without dry bleed (diff={}, ret_a_e={})",
+            wet_diff,
+            ret_a_e
+        );
+    }
+
+    #[test]
+    fn test_swing_continuity_wrap_note_order_and_windowed_session_audio() {
+        assert_eq!(compute_swing_delay_beats(0.49, 0.25), 0.0);
+        assert_eq!(compute_swing_delay_beats(0.50, 0.25), 0.0);
+        assert!(compute_swing_delay_beats(0.51, 0.25) > 0.0);
+
+        // Swung late-bar note must NOT wrap onto beat 0.0 of bar 0
+        let mut pat = MidiPattern::new(4.0);
+        pat.notes.push(oxide_timeline::MidiNote {
+            pitch: 60,
+            velocity: 110,
+            start_beat: 3.9,
+            duration_beats: 0.2,
+            probability: 1.0,
+        });
+        let mut events = Vec::new();
+        schedule_synth_midi_events(&pat, 1, 0.0, 4.0, 0.0, 0.0, 4.0, 0.0, 120.0, 0.75, 44100.0, 88200, true, &mut events);
+        assert!(
+            events.iter().all(|(f, _, _, _)| *f > 44100),
+            "Late-bar swung note must never wrap into bar 0 frame 0..44100: {:?}",
+            events
+        );
+
+        // Short note guarantees off_f >= on_f + 1
+        let mut short_pat = MidiPattern::new(1.0);
+        short_pat.notes.push(oxide_timeline::MidiNote {
+            pitch: 64,
+            velocity: 100,
+            start_beat: 0.0,
+            duration_beats: 0.01,
+            probability: 1.0,
+        });
+        let mut ev2 = Vec::new();
+        schedule_synth_midi_events(&short_pat, 1, 0.0, 1.0, 0.0, 0.0, 1.0, 0.0, 120.0, 0.0, 100.0, 50, false, &mut ev2);
+        assert_eq!(ev2.len(), 2);
+        assert!(ev2[1].0 >= ev2[0].0 + 1, "NoteOff frame must be strictly after NoteOn frame");
+
+        // Windowed session audio respects start_beat_offset and loop_end_beat
+        let mut sc = oxide_timeline::SessionClip::new(1, "SessAudio", {
+            let mut ad = oxide_timeline::AudioClipData::new("/mem/test.wav", 44100, 1, 4.0);
+            ad.samples = (0..88200).map(|i| if i < 44100 { 0.4 } else { -0.4 }).collect();
+            ClipPattern::Audio(ad)
+        });
+        sc.loop_enabled = false;
+        sc.loop_start_beat = 0.0;
+        sc.loop_end_beat = 2.0; // ends at 1.0s (beat 2 at 120 BPM)
+        let mut trk = TrackDefinition::new_audio(1, "Audio Sess");
+        trk.session_clips.push(Some(sc));
+        let (l_late, _) = render_single_track_window_with_swing(&trk, 44100.0, 120.0, 0.0, 2.5, 0.5);
+        assert!(l_late.iter().all(|&s| s.abs() < 1e-6), "Non-looped session audio past loop_end_beat must be silent");
+    }
+
+    #[test]
+    fn test_preset_override_back_to_default_alters_render() {
+        let mut pat = MidiPattern::new(4.0);
+        pat.add_note(oxide_timeline::MidiNote::new(45, 110, 0.0, 1.5));
+        let mut trk = TrackDefinition::new_synth(1, "Lead");
+        trk.arrangement_clips.push(oxide_timeline::ArrangementClip::new(
+            1,
+            "Acid",
+            0.0,
+            4.0,
+            ClipPattern::Midi(pat),
+        ));
+
+        let mut base_params = SynthPatchParameters::default();
+        base_params.preset_name = Some("3dsynth.preset".to_string());
+        let mut out_l1 = vec![0.0; 22050];
+        let mut out_r1 = vec![0.0; 22050];
+        render_synth_track(&trk, &base_params, 44100.0, 120.0, 0.0, 0.0, 22050, &mut out_l1, &mut out_r1);
+
+        let mut overridden = base_params.clone();
+        overridden.set_overridden_parameter("amplitude_envelope_attack", 0.05);
+        overridden.set_overridden_parameter("amplitude_envelope_decay", 0.35);
+        overridden.set_overridden_parameter("filter_frequency", 3000.0);
+        overridden.set_overridden_parameter("filter_resonance", 0.2);
+        let mut out_l2 = vec![0.0; 22050];
+        let mut out_r2 = vec![0.0; 22050];
+        render_synth_track(&trk, &overridden, 44100.0, 120.0, 0.0, 0.0, 22050, &mut out_l2, &mut out_r2);
+
+        let diff: f32 = out_l1.iter().zip(out_l2.iter()).map(|(a, b)| (a - b).abs()).sum();
+        assert!(
+            diff > 1.0,
+            "Overriding preset params back to Init defaults must alter rendered audio (diff={})",
+            diff
+        );
     }
 }

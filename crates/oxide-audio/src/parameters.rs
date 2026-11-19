@@ -6,18 +6,18 @@ use std::sync::Arc;
 
 pub const MAX_PARAMS: usize = 64;
 
-// Well-known parameter indices
+// Well-known parameter indices (kept non-overlapping with processor PARAM_ID_* command IDs)
 pub const PARAM_MASTER_VOL: usize = 0;
-pub const PARAM_BPM: usize = 1;
-pub const PARAM_SYNTH_CUTOFF: usize = 2;
-pub const PARAM_SYNTH_RESONANCE: usize = 3;
-pub const PARAM_SYNTH_MACRO_X: usize = 4;
-pub const PARAM_SYNTH_MACRO_Y: usize = 5;
 pub const PARAM_FX_DRIVE: usize = 6;
 pub const PARAM_FX_DELAY_WET: usize = 7;
 pub const PARAM_FX_REVERB_WET: usize = 8;
 pub const PARAM_TRACK_VOL_BASE: usize = 16; // 16..31
 pub const PARAM_TRACK_PAN_BASE: usize = 32; // 32..47
+pub const PARAM_BPM: usize = 48;
+pub const PARAM_SYNTH_CUTOFF: usize = 49;
+pub const PARAM_SYNTH_RESONANCE: usize = 50;
+pub const PARAM_SYNTH_MACRO_X: usize = 51;
+pub const PARAM_SYNTH_MACRO_Y: usize = 52;
 
 #[derive(Clone)]
 pub struct AtomicParameters {

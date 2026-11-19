@@ -196,8 +196,9 @@ fn test_raw_xml_auto_detection() {
         </Name>
         <DeviceChain>
           <Mixer>
-            <Volume><Manual Value="0.6783214"/></Volume>
+            <Volume><Manual Value="0.7943282"/></Volume>
             <Pan><Manual Value="0.0"/></Pan>
+            <Speaker><Manual Value="true"/></Speaker>
             <On><Manual Value="true"/></On>
           </Mixer>
           <MainSequencer>
@@ -263,4 +264,65 @@ fn test_corrupt_bytes_error_handling() {
     let fake_gzip = [0x1f, 0x8b, 0x08, 0x00, 0x00, 0x00, 0x00, 0x00, 0xff, 0xff];
     let res2 = DAWProject::from_als_bytes(&fake_gzip);
     assert!(res2.is_err(), "Corrupt gzip payload must return Err");
+}
+
+#[test]
+fn test_als_roundtrip_group_overridden_params_and_arrangement_fidelity() {
+    use oxide_project::{InstrumentConfig, TrackDefinition};
+    use oxide_timeline::ArrangementClip;
+
+    let mut project = DAWProject::new("Live 12 Fidelity Roundtrip");
+    project.transport.bpm = 136.0;
+    project.master_track.volume_db = 0.0;
+
+    let grp = TrackDefinition::new_group(10, "Bass Bus");
+    project.tracks.push(grp);
+
+    let mut synth = TrackDefinition::new_synth(11, "Sub 909 Bass");
+    synth.group_id = Some(10);
+    synth.mixer.mute = true;
+    assert_eq!(synth.mixer.send_a_db, -70.0);
+    assert_eq!(synth.mixer.send_b_db, -70.0);
+    if let InstrumentConfig::BuiltinSubtractiveSynth(ref mut patch) = synth.instrument {
+        patch.preset_name = Some("wowbass".to_string());
+        patch.set_overridden_parameter("filter_frequency", 3000.0);
+    }
+
+    let mut pat = MidiPattern::new(4.0);
+    pat.add_note(MidiNote::new(36, 120, 0.0, 0.5));
+    let mut arr = ArrangementClip::new(501, "Bass Arr", 8.0, 4.0, ClipPattern::Midi(pat));
+    arr.muted = true;
+    arr.pattern_offset_beats = 1.25;
+    synth.arrangement_clips.push(arr);
+    project.tracks.push(synth);
+
+    let mut s = Scene::new(1, "Drop");
+    s.bpm_override = Some(140.0);
+    project.scenes.push(s);
+
+    let xml = project.to_als_xml();
+    assert!(xml.contains("<MainTrack Id=\"0\">"));
+    assert!(xml.contains("<PreHearTrack>"));
+
+    let reloaded = DAWProject::from_als_xml(&xml).expect("Reload must succeed");
+    assert_eq!(reloaded.tracks.len(), 2);
+
+    let reloaded_synth = &reloaded.tracks[1];
+    assert_eq!(reloaded_synth.track_type, oxide_project::TrackType::MidiSynth);
+    assert_eq!(reloaded_synth.group_id, Some(10));
+    assert!(reloaded_synth.mixer.mute);
+    assert!((reloaded_synth.mixer.send_a_db - (-70.0)).abs() < 1e-3);
+    assert!(reloaded_synth.session_clips.is_empty());
+    assert_eq!(reloaded_synth.arrangement_clips.len(), 1);
+    assert!(reloaded_synth.arrangement_clips[0].muted);
+    assert!((reloaded_synth.arrangement_clips[0].pattern_offset_beats - 1.25).abs() < 1e-3);
+    if let InstrumentConfig::BuiltinSubtractiveSynth(ref patch) = reloaded_synth.instrument {
+        assert_eq!(patch.preset_name.as_deref(), Some("wowbass"));
+        assert_eq!(patch.overridden_params, vec!["filter_frequency".to_string()]);
+        assert!((patch.filter_frequency - 3000.0).abs() < 1e-3);
+    } else {
+        panic!("Expected BuiltinSubtractiveSynth");
+    }
+
+    assert_eq!(reloaded.scenes[0].bpm_override, Some(140.0));
 }

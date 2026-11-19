@@ -65,6 +65,7 @@ impl ArpRate {
 
 #[derive(Debug, Clone)]
 pub struct ArpeggiatorDevice {
+    pub enabled: bool,
     pub style: ArpStyle,
     pub rate: ArpRate,
     pub gate: f32,    // 0.1 .. 2.0 (1.0 = 100%)
@@ -78,34 +79,46 @@ pub struct ArpeggiatorDevice {
     pub active_playing_note: Option<u8>,
     pub active_playing_chord: Vec<u8>,
     pub rng_state: u32,
+    held_channels: Vec<(u8, u8, u8)>, // (channel, note, velocity)
+    active_channel: u8,
+    active_chord_channels: Vec<(u8, u8)>,
+    sequence_scratch: Vec<(u8, u8, u8)>, // (channel, note, velocity)
 }
 
 impl ArpeggiatorDevice {
     pub fn new() -> Self {
         Self {
+            enabled: true,
             style: ArpStyle::Up,
             rate: ArpRate::Rate1_16,
             gate: 0.9,
             octaves: 1,
             synced: true,
             free_rate_hz: 8.0,
-            held_notes: Vec::new(),
+            held_notes: Vec::with_capacity(16),
             last_step: -1,
             step_index: 0,
             direction_up: true,
             active_playing_note: None,
-            active_playing_chord: Vec::new(),
+            active_playing_chord: Vec::with_capacity(16),
             rng_state: 0x19283746,
+            held_channels: Vec::with_capacity(16),
+            active_channel: 0,
+            active_chord_channels: Vec::with_capacity(16),
+            sequence_scratch: Vec::with_capacity(64),
         }
     }
 
     pub fn reset(&mut self) {
         self.held_notes.clear();
+        self.held_channels.clear();
         self.last_step = -1;
         self.step_index = 0;
         self.direction_up = true;
         self.active_playing_note = None;
+        self.active_channel = 0;
         self.active_playing_chord.clear();
+        self.active_chord_channels.clear();
     }
 
     fn next_rand(&mut self) -> f32 {
@@ -116,46 +129,56 @@ impl ArpeggiatorDevice {
     }
 
     pub fn process_events(&mut self, events_in: &[MidiEvent], events_out: &mut Vec<MidiEvent>, time: &MusicalTime) {
+        if !self.enabled {
+            events_out.extend_from_slice(events_in);
+            return;
+        }
+
         for ev in events_in {
             match *ev {
-                MidiEvent::NoteOn { note, velocity, .. } => {
+                MidiEvent::NoteOn { channel, note, velocity } => {
                     if velocity > 0 {
-                        if !self.held_notes.iter().any(|(n, _)| *n == note) {
+                        if !self.held_channels.iter().any(|(ch, n, _)| *ch == channel && *n == note) {
+                            self.held_channels.push((channel, note, velocity));
+                            self.held_channels.sort_by_key(|n| n.1);
                             self.held_notes.push((note, velocity));
                             self.held_notes.sort_by_key(|n| n.0);
                         }
                     } else {
+                        self.held_channels.retain(|(ch, n, _)| !(*ch == channel && *n == note));
                         self.held_notes.retain(|(n, _)| *n != note);
                     }
                 }
-                MidiEvent::NoteOff { note, .. } => {
+                MidiEvent::NoteOff { channel, note } => {
+                    self.held_channels.retain(|(ch, n, _)| !(*ch == channel && *n == note));
                     self.held_notes.retain(|(n, _)| *n != note);
                 }
                 _ => events_out.push(*ev),
             }
         }
 
-        if self.held_notes.is_empty() {
+        if self.held_channels.is_empty() {
             if let Some(prev) = self.active_playing_note.take() {
-                events_out.push(MidiEvent::NoteOff { channel: 0, note: prev });
+                events_out.push(MidiEvent::NoteOff { channel: self.active_channel, note: prev });
             }
-            for prev in self.active_playing_chord.drain(..) {
-                events_out.push(MidiEvent::NoteOff { channel: 0, note: prev });
+            for (ch, prev) in self.active_chord_channels.drain(..) {
+                events_out.push(MidiEvent::NoteOff { channel: ch, note: prev });
             }
+            self.active_playing_chord.clear();
             return;
         }
 
-        // Build pattern note table across octaves
+        // Build pattern note table across octaves into pre-allocated scratch vec
         let num_octaves = self.octaves.clamp(1, 4);
-        let mut sequence = Vec::with_capacity(self.held_notes.len() * num_octaves as usize);
+        self.sequence_scratch.clear();
         for oct in 0..num_octaves {
-            for &(pitch, vel) in &self.held_notes {
+            for &(ch, pitch, vel) in &self.held_channels {
                 let note = (pitch as i16 + (oct as i16 * 12)).clamp(0, 127) as u8;
-                sequence.push((note, vel));
+                self.sequence_scratch.push((ch, note, vel));
             }
         }
 
-        if sequence.is_empty() {
+        if self.sequence_scratch.is_empty() {
             return;
         }
 
@@ -175,37 +198,40 @@ impl ArpeggiatorDevice {
         if current_step != self.last_step {
             self.last_step = current_step;
 
-            // Silence previous note(s)
+            // Silence previous note(s) preserving their original MIDI channels
             if let Some(prev) = self.active_playing_note.take() {
-                events_out.push(MidiEvent::NoteOff { channel: 0, note: prev });
+                events_out.push(MidiEvent::NoteOff { channel: self.active_channel, note: prev });
             }
-            for prev in self.active_playing_chord.drain(..) {
-                events_out.push(MidiEvent::NoteOff { channel: 0, note: prev });
+            for (ch, prev) in self.active_chord_channels.drain(..) {
+                events_out.push(MidiEvent::NoteOff { channel: ch, note: prev });
             }
+            self.active_playing_chord.clear();
 
             if self.style == ArpStyle::ChordTrigger {
-                for &(target_note, target_vel) in &sequence {
+                for &(ch, target_note, target_vel) in &self.sequence_scratch {
                     self.active_playing_chord.push(target_note);
+                    self.active_chord_channels.push((ch, target_note));
                     events_out.push(MidiEvent::NoteOn {
-                        channel: 0,
+                        channel: ch,
                         note: target_note,
                         velocity: target_vel,
                     });
                 }
             } else {
+                let seq_len = self.sequence_scratch.len();
                 let idx = match self.style {
                     ArpStyle::Up => {
-                        let i = self.step_index % sequence.len();
-                        self.step_index = (self.step_index + 1) % sequence.len();
+                        let i = self.step_index % seq_len;
+                        self.step_index = (self.step_index + 1) % seq_len;
                         i
                     }
                     ArpStyle::Down => {
-                        let i = (sequence.len() - 1) - (self.step_index % sequence.len());
-                        self.step_index = (self.step_index + 1) % sequence.len();
+                        let i = (seq_len - 1) - (self.step_index % seq_len);
+                        self.step_index = (self.step_index + 1) % seq_len;
                         i
                     }
                     ArpStyle::UpDown => {
-                        let n = sequence.len();
+                        let n = seq_len;
                         if n <= 1 {
                             0
                         } else {
@@ -216,7 +242,7 @@ impl ArpeggiatorDevice {
                         }
                     }
                     ArpStyle::DownUp => {
-                        let n = sequence.len();
+                        let n = seq_len;
                         if n <= 1 {
                             0
                         } else {
@@ -227,7 +253,7 @@ impl ArpeggiatorDevice {
                         }
                     }
                     ArpStyle::UpAndDown => {
-                        let n = sequence.len();
+                        let n = seq_len;
                         if n <= 1 {
                             0
                         } else {
@@ -238,7 +264,7 @@ impl ArpeggiatorDevice {
                         }
                     }
                     ArpStyle::DownAndUp => {
-                        let n = sequence.len();
+                        let n = seq_len;
                         if n <= 1 {
                             0
                         } else {
@@ -249,7 +275,7 @@ impl ArpeggiatorDevice {
                         }
                     }
                     ArpStyle::Converge => {
-                        let n = sequence.len();
+                        let n = seq_len;
                         let half = self.step_index % n;
                         self.step_index += 1;
                         if half.is_multiple_of(2) {
@@ -259,7 +285,7 @@ impl ArpeggiatorDevice {
                         }
                     }
                     ArpStyle::Diverge => {
-                        let n = sequence.len();
+                        let n = seq_len;
                         let rev_step = (n - 1) - (self.step_index % n);
                         self.step_index += 1;
                         if rev_step.is_multiple_of(2) {
@@ -269,15 +295,16 @@ impl ArpeggiatorDevice {
                         }
                     }
                     ArpStyle::Random => {
-                        (self.next_rand() * sequence.len() as f32) as usize % sequence.len()
+                        (self.next_rand() * seq_len as f32) as usize % seq_len
                     }
                     ArpStyle::ChordTrigger => 0,
                 };
 
-                let (target_note, target_vel) = sequence[idx];
+                let (ch, target_note, target_vel) = self.sequence_scratch[idx];
                 self.active_playing_note = Some(target_note);
+                self.active_channel = ch;
                 events_out.push(MidiEvent::NoteOn {
-                    channel: 0,
+                    channel: ch,
                     note: target_note,
                     velocity: target_vel,
                 });
@@ -298,6 +325,7 @@ impl Default for ArpeggiatorDevice {
 
 #[derive(Debug, Clone)]
 pub struct ChordDevice {
+    pub enabled: bool,
     pub shifts: [i8; 6],           // up to 6 interval shifts in semitones
     pub velocity_scales: [f32; 6], // per-voice velocity multipliers
     pub num_shifts: usize,         // active voices (0..6)
@@ -306,6 +334,7 @@ pub struct ChordDevice {
 impl ChordDevice {
     pub fn new() -> Self {
         Self {
+            enabled: true,
             shifts: [3, 7, 10, 14, 0, 0], // Minor 9th chord preset
             velocity_scales: [0.9, 0.85, 0.8, 0.75, 1.0, 1.0],
             num_shifts: 4,
@@ -314,6 +343,7 @@ impl ChordDevice {
 
     pub fn major_triad() -> Self {
         Self {
+            enabled: true,
             shifts: [4, 7, 0, 0, 0, 0],
             velocity_scales: [0.9, 0.85, 1.0, 1.0, 1.0, 1.0],
             num_shifts: 2,
@@ -322,6 +352,7 @@ impl ChordDevice {
 
     pub fn minor_triad() -> Self {
         Self {
+            enabled: true,
             shifts: [3, 7, 0, 0, 0, 0],
             velocity_scales: [0.9, 0.85, 1.0, 1.0, 1.0, 1.0],
             num_shifts: 2,
@@ -329,6 +360,10 @@ impl ChordDevice {
     }
 
     pub fn process_events(&mut self, events_in: &[MidiEvent], events_out: &mut Vec<MidiEvent>) {
+        if !self.enabled {
+            events_out.extend_from_slice(events_in);
+            return;
+        }
         for ev in events_in {
             match *ev {
                 MidiEvent::NoteOn { channel, note, velocity } => {
@@ -375,6 +410,7 @@ impl Default for ChordDevice {
 
 #[derive(Debug, Clone)]
 pub struct NoteLengthDevice {
+    pub enabled: bool,
     pub gate_multiplier: f32,    // duration scaling
     pub release_trigger: bool,   // trigger note on key release
     pub release_velocity: u8,
@@ -383,13 +419,20 @@ pub struct NoteLengthDevice {
 impl NoteLengthDevice {
     pub fn new() -> Self {
         Self {
+            enabled: true,
             gate_multiplier: 1.0,
             release_trigger: false,
             release_velocity: 96,
         }
     }
 
+    pub fn reset(&mut self) {}
+
     pub fn process_events(&mut self, events_in: &[MidiEvent], events_out: &mut Vec<MidiEvent>) {
+        if !self.enabled {
+            events_out.extend_from_slice(events_in);
+            return;
+        }
         for ev in events_in {
             match *ev {
                 MidiEvent::NoteOn { .. } => {
@@ -428,6 +471,7 @@ impl Default for NoteLengthDevice {
 
 #[derive(Debug, Clone)]
 pub struct PitchDevice {
+    pub enabled: bool,
     pub transpose: i16, // -128 .. +128
     pub lowest_note: u8,
     pub highest_note: u8,
@@ -436,6 +480,7 @@ pub struct PitchDevice {
 impl PitchDevice {
     pub fn new() -> Self {
         Self {
+            enabled: true,
             transpose: 0,
             lowest_note: 0,
             highest_note: 127,
@@ -443,6 +488,10 @@ impl PitchDevice {
     }
 
     pub fn process_events(&mut self, events_in: &[MidiEvent], events_out: &mut Vec<MidiEvent>) {
+        if !self.enabled {
+            events_out.extend_from_slice(events_in);
+            return;
+        }
         for ev in events_in {
             match *ev {
                 MidiEvent::NoteOn { channel, note, velocity } => {
@@ -483,23 +532,27 @@ pub enum RandomSign {
 
 #[derive(Debug, Clone)]
 pub struct RandomDevice {
+    pub enabled: bool,
     pub chance: f32, // 0.0 .. 1.0 probability
     pub choices: u8, // 1 .. 24 semitone options
     pub sign: RandomSign,
     pub rng_state: u32,
     pub note_history: [(u8, u8); 16], // (input_note, randomized_note)
     pub history_len: usize,
+    note_channels: [u8; 16],
 }
 
 impl RandomDevice {
     pub fn new() -> Self {
         Self {
+            enabled: true,
             chance: 0.5,
             choices: 12,
             sign: RandomSign::Bidirectional,
             rng_state: 0x99238475,
             note_history: [(0, 0); 16],
             history_len: 0,
+            note_channels: [0; 16],
         }
     }
 
@@ -511,6 +564,10 @@ impl RandomDevice {
     }
 
     pub fn process_events(&mut self, events_in: &[MidiEvent], events_out: &mut Vec<MidiEvent>) {
+        if !self.enabled {
+            events_out.extend_from_slice(events_in);
+            return;
+        }
         for ev in events_in {
             match *ev {
                 MidiEvent::NoteOn { channel, note, velocity } => {
@@ -527,6 +584,7 @@ impl RandomDevice {
                         let rand_note = (note as i16 + signed_offset).clamp(0, 127) as u8;
                         if self.history_len < 16 {
                             self.note_history[self.history_len] = (note, rand_note);
+                            self.note_channels[self.history_len] = channel;
                             self.history_len += 1;
                         }
                         events_out.push(MidiEvent::NoteOn { channel, note: rand_note, velocity });
@@ -537,10 +595,11 @@ impl RandomDevice {
                 MidiEvent::NoteOff { channel, note } => {
                     let mut found = false;
                     for i in 0..self.history_len {
-                        if self.note_history[i].0 == note {
+                        if self.note_history[i].0 == note && self.note_channels[i] == channel {
                             let mapped = self.note_history[i].1;
                             events_out.push(MidiEvent::NoteOff { channel, note: mapped });
                             self.note_history[i] = self.note_history[self.history_len - 1];
+                            self.note_channels[i] = self.note_channels[self.history_len - 1];
                             self.history_len -= 1;
                             found = true;
                             break;
@@ -557,6 +616,7 @@ impl RandomDevice {
 
     pub fn reset(&mut self) {
         self.history_len = 0;
+        self.note_channels = [0; 16];
     }
 }
 
@@ -572,6 +632,7 @@ impl Default for RandomDevice {
 
 #[derive(Debug, Clone)]
 pub struct ScaleDevice {
+    pub enabled: bool,
     pub base_root: u8, // 0..11 (0=C, 1=C#, etc.)
     pub intervals: [bool; 12],
 }
@@ -579,6 +640,7 @@ pub struct ScaleDevice {
 impl ScaleDevice {
     pub fn new() -> Self {
         Self {
+            enabled: true,
             base_root: 0, // C
             // Major scale: C, D, E, F, G, A, B
             intervals: [true, false, true, false, true, true, false, true, false, true, false, true],
@@ -587,6 +649,7 @@ impl ScaleDevice {
 
     pub fn minor() -> Self {
         Self {
+            enabled: true,
             base_root: 0,
             // Natural Minor: C, D, Eb, F, G, Ab, Bb
             intervals: [true, false, true, true, false, true, false, true, true, false, true, false],
@@ -595,6 +658,7 @@ impl ScaleDevice {
 
     pub fn dorian() -> Self {
         Self {
+            enabled: true,
             base_root: 0,
             // Dorian: C, D, Eb, F, G, A, Bb
             intervals: [true, false, true, true, false, true, false, true, false, true, true, false],
@@ -603,6 +667,7 @@ impl ScaleDevice {
 
     pub fn pentatonic() -> Self {
         Self {
+            enabled: true,
             base_root: 0,
             // Major Pentatonic: C, D, E, G, A
             intervals: [true, false, true, false, true, false, false, true, false, true, false, false],
@@ -615,21 +680,31 @@ impl ScaleDevice {
             return note;
         }
 
-        // Fold to nearest allowed degree
-        for dist in 1..6 {
+        // Fold to nearest allowed degree within valid MIDI range
+        for dist in 1..=6 {
             let up = (rel_pitch + dist) % 12;
             if self.intervals[up] {
-                return (note as i16 + dist as i16).clamp(0, 127) as u8;
+                let candidate = note as i16 + dist as i16;
+                if (0..=127).contains(&candidate) {
+                    return candidate as u8;
+                }
             }
             let down = (rel_pitch + 12 - dist) % 12;
             if self.intervals[down] {
-                return (note as i16 - dist as i16).clamp(0, 127) as u8;
+                let candidate = note as i16 - dist as i16;
+                if (0..=127).contains(&candidate) {
+                    return candidate as u8;
+                }
             }
         }
         note
     }
 
     pub fn process_events(&mut self, events_in: &[MidiEvent], events_out: &mut Vec<MidiEvent>) {
+        if !self.enabled {
+            events_out.extend_from_slice(events_in);
+            return;
+        }
         for ev in events_in {
             match *ev {
                 MidiEvent::NoteOn { channel, note, velocity } => {
@@ -666,6 +741,7 @@ pub enum VelocityCurve {
 
 #[derive(Debug, Clone)]
 pub struct VelocityDevice {
+    pub enabled: bool,
     pub curve: VelocityCurve,
     pub drive: f32,       // -1.0 .. +1.0
     pub compand: f32,     // 0.2 .. 3.0
@@ -678,6 +754,7 @@ pub struct VelocityDevice {
 impl VelocityDevice {
     pub fn new() -> Self {
         Self {
+            enabled: true,
             curve: VelocityCurve::Linear,
             drive: 0.0,
             compand: 1.0,
@@ -726,10 +803,19 @@ impl VelocityDevice {
             out += r_offset;
         }
 
-        out.clamp(self.out_low as f32, self.out_high as f32).round() as u8
+        let (lo, hi) = if self.out_low <= self.out_high {
+            (self.out_low as f32, self.out_high as f32)
+        } else {
+            (self.out_high as f32, self.out_low as f32)
+        };
+        out.clamp(lo, hi).round() as u8
     }
 
     pub fn process_events(&mut self, events_in: &[MidiEvent], events_out: &mut Vec<MidiEvent>) {
+        if !self.enabled {
+            events_out.extend_from_slice(events_in);
+            return;
+        }
         for ev in events_in {
             match *ev {
                 MidiEvent::NoteOn { channel, note, velocity } => {
@@ -754,6 +840,7 @@ impl Default for VelocityDevice {
 
 #[derive(Debug, Clone)]
 pub struct MpeControlDevice {
+    pub enabled: bool,
     pub curve_skew: f32,    // -1.0 .. +1.0 (pitch-bend curve shaping)
     pub slide_skew: f32,    // -1.0 .. +1.0 (CC74 curve shaping)
     pub pressure_skew: f32, // -1.0 .. +1.0 (aftertouch shaping)
@@ -762,11 +849,14 @@ pub struct MpeControlDevice {
 impl MpeControlDevice {
     pub fn new() -> Self {
         Self {
+            enabled: true,
             curve_skew: 0.0,
             slide_skew: 0.0,
             pressure_skew: 0.0,
         }
     }
+
+    pub fn reset(&mut self) {}
 
     fn shape_curve(val_norm: f32, skew: f32) -> f32 {
         let v = val_norm.clamp(0.0, 1.0);
@@ -776,6 +866,10 @@ impl MpeControlDevice {
     }
 
     pub fn process_events(&mut self, events_in: &[MidiEvent], events_out: &mut Vec<MidiEvent>) {
+        if !self.enabled {
+            events_out.extend_from_slice(events_in);
+            return;
+        }
         for ev in events_in {
             match *ev {
                 MidiEvent::PitchBend { channel, value } => {
@@ -856,10 +950,38 @@ impl MidiEffectDevice {
         }
     }
 
+    pub fn is_enabled(&self) -> bool {
+        match self {
+            MidiEffectDevice::Arpeggiator(d) => d.enabled,
+            MidiEffectDevice::Chord(d) => d.enabled,
+            MidiEffectDevice::NoteLength(d) => d.enabled,
+            MidiEffectDevice::Pitch(d) => d.enabled,
+            MidiEffectDevice::Random(d) => d.enabled,
+            MidiEffectDevice::Scale(d) => d.enabled,
+            MidiEffectDevice::Velocity(d) => d.enabled,
+            MidiEffectDevice::MpeControl(d) => d.enabled,
+        }
+    }
+
+    pub fn set_enabled(&mut self, enabled: bool) {
+        match self {
+            MidiEffectDevice::Arpeggiator(d) => d.enabled = enabled,
+            MidiEffectDevice::Chord(d) => d.enabled = enabled,
+            MidiEffectDevice::NoteLength(d) => d.enabled = enabled,
+            MidiEffectDevice::Pitch(d) => d.enabled = enabled,
+            MidiEffectDevice::Random(d) => d.enabled = enabled,
+            MidiEffectDevice::Scale(d) => d.enabled = enabled,
+            MidiEffectDevice::Velocity(d) => d.enabled = enabled,
+            MidiEffectDevice::MpeControl(d) => d.enabled = enabled,
+        }
+    }
+
     pub fn reset(&mut self) {
         match self {
             MidiEffectDevice::Arpeggiator(arp) => arp.reset(),
+            MidiEffectDevice::NoteLength(nl) => nl.reset(),
             MidiEffectDevice::Random(rand) => rand.reset(),
+            MidiEffectDevice::MpeControl(mpe) => mpe.reset(),
             _ => {}
         }
     }
@@ -875,10 +997,12 @@ impl Device for MidiEffectDevice {
     }
 
     fn is_enabled(&self) -> bool {
-        true
+        MidiEffectDevice::is_enabled(self)
     }
 
-    fn set_enabled(&mut self, _enabled: bool) {}
+    fn set_enabled(&mut self, enabled: bool) {
+        MidiEffectDevice::set_enabled(self, enabled);
+    }
 
     fn reset(&mut self) {
         self.reset();
@@ -897,14 +1021,28 @@ impl IMidiEffectDevice for MidiEffectDevice {
 }
 
 /// Sequential chain of native MIDI effects processing input events with zero hanging notes.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct MidiEffectChain {
+    pub enabled: bool,
     pub devices: Vec<MidiEffectDevice>,
+    scratch_a: Vec<MidiEvent>,
+    scratch_b: Vec<MidiEvent>,
+}
+
+impl Default for MidiEffectChain {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl MidiEffectChain {
     pub fn new() -> Self {
-        Self { devices: Vec::new() }
+        Self {
+            enabled: true,
+            devices: Vec::new(),
+            scratch_a: Vec::with_capacity(64),
+            scratch_b: Vec::with_capacity(64),
+        }
     }
 
     pub fn add(&mut self, device: MidiEffectDevice) {
@@ -912,21 +1050,34 @@ impl MidiEffectChain {
     }
 
     pub fn process(&mut self, events_in: &[MidiEvent], events_out: &mut Vec<MidiEvent>, time: &MusicalTime) {
-        if self.devices.is_empty() {
+        if !self.enabled || self.devices.is_empty() {
             events_out.extend_from_slice(events_in);
             return;
         }
 
-        let mut buf_a = events_in.to_vec();
-        let mut buf_b = Vec::new();
+        self.scratch_a.clear();
+        self.scratch_a.extend_from_slice(events_in);
+        let mut use_a_as_input = true;
 
         for dev in &mut self.devices {
-            buf_b.clear();
-            dev.process_events(&buf_a, &mut buf_b, time);
-            std::mem::swap(&mut buf_a, &mut buf_b);
+            if !dev.is_enabled() {
+                continue;
+            }
+            if use_a_as_input {
+                self.scratch_b.clear();
+                dev.process_events(&self.scratch_a, &mut self.scratch_b, time);
+            } else {
+                self.scratch_a.clear();
+                dev.process_events(&self.scratch_b, &mut self.scratch_a, time);
+            }
+            use_a_as_input = !use_a_as_input;
         }
 
-        events_out.extend(buf_a);
+        if use_a_as_input {
+            events_out.extend_from_slice(&self.scratch_a);
+        } else {
+            events_out.extend_from_slice(&self.scratch_b);
+        }
     }
 }
 
@@ -940,10 +1091,12 @@ impl Device for MidiEffectChain {
     }
 
     fn is_enabled(&self) -> bool {
-        true
+        self.enabled
     }
 
-    fn set_enabled(&mut self, _enabled: bool) {}
+    fn set_enabled(&mut self, enabled: bool) {
+        self.enabled = enabled;
+    }
 
     fn reset(&mut self) {
         for dev in &mut self.devices {

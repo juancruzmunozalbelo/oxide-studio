@@ -51,6 +51,17 @@ impl XorShift32 {
         self.state = x;
         (x as i32 as f32) * 4.6566128730773926e-10
     }
+
+    /// Generate next pseudo-random scalar uniformly distributed in [0.0, 1.0).
+    #[inline(always)]
+    pub fn next_f32_unit(&mut self) -> f32 {
+        let mut x = self.state;
+        x ^= x << 13;
+        x ^= x >> 17;
+        x ^= x << 5;
+        self.state = x;
+        ((x >> 8) as f32) * (1.0 / 16_777_216.0)
+    }
 }
 
 impl Default for XorShift32 {

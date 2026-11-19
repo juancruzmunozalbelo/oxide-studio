@@ -7,7 +7,7 @@ use crate::envelope::AdsrEnvelope;
 use crate::physical::collision::ModalFilter;
 
 pub const MAX_TENSION_VOICES: usize = 8;
-pub const MAX_DELAY_LENGTH: usize = 2048;
+pub const MAX_DELAY_LENGTH: usize = 8192;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TensionExciterType {
@@ -24,7 +24,7 @@ pub struct TensionVoice {
     pub age: u64,
 
     // Delay lines for bidirectional string waveguide
-    pub delay_line: [f32; MAX_DELAY_LENGTH],
+    pub delay_line: Box<[f32]>,
     pub write_pos: usize,
     pub delay_length: f32,
 
@@ -53,7 +53,7 @@ impl TensionVoice {
             note: 60,
             velocity: 0.8,
             age: 0,
-            delay_line: [0.0; MAX_DELAY_LENGTH],
+            delay_line: vec![0.0; MAX_DELAY_LENGTH].into_boxed_slice(),
             write_pos: 0,
             delay_length: 200.0,
             filter_state: 0.0,
@@ -69,7 +69,7 @@ impl TensionVoice {
 
     pub fn reset(&mut self) {
         self.active = false;
-        self.delay_line = [0.0; MAX_DELAY_LENGTH];
+        self.delay_line.fill(0.0);
         self.write_pos = 0;
         self.filter_state = 0.0;
         self.ap_x1 = 0.0;

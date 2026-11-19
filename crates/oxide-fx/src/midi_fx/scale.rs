@@ -38,22 +38,27 @@ impl Scale {
     /// Snap pitch to the closest in-scale semitone.
     pub fn quantize_pitch(&self, note: u8) -> u8 {
         let transposed = (note as i16 + self.transpose as i16).clamp(0, 127) as u8;
-        let octave = transposed / 12;
         let pitch_class = (transposed % 12 + 12 - self.base_note % 12) % 12;
 
         if (self.scale_degrees & (1 << pitch_class)) != 0 {
             return transposed;
         }
 
-        // Find nearest scale pitch class
+        // Find nearest scale pitch class (preserving true octave wrap)
         for dist in 1..=6 {
             let lower = (pitch_class + 12 - dist) % 12;
             if (self.scale_degrees & (1 << lower)) != 0 {
-                return ((octave as i16 * 12 + (lower + self.base_note) as i16).clamp(0, 127)) as u8;
+                let candidate = transposed as i16 - dist as i16;
+                if (0..=127).contains(&candidate) {
+                    return candidate as u8;
+                }
             }
             let upper = (pitch_class + dist) % 12;
             if (self.scale_degrees & (1 << upper)) != 0 {
-                return ((octave as i16 * 12 + (upper + self.base_note) as i16).clamp(0, 127)) as u8;
+                let candidate = transposed as i16 + dist as i16;
+                if (0..=127).contains(&candidate) {
+                    return candidate as u8;
+                }
             }
         }
 

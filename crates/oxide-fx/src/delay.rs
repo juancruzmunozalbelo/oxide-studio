@@ -52,13 +52,17 @@ impl Default for TempoDelay {
 
 impl TempoDelay {
     pub fn new(sample_rate: f32, bpm: f64) -> Self {
-        let sr = if sample_rate <= 0.0 { 44100.0 } else { sample_rate };
+        let sr = if sample_rate.is_finite() && sample_rate > 0.0 {
+            sample_rate
+        } else {
+            44100.0
+        };
         let mut delay = Self {
             buffer_left: vec![0.0; MAX_DELAY_SAMPLES].into_boxed_slice(),
             buffer_right: vec![0.0; MAX_DELAY_SAMPLES].into_boxed_slice(),
             write_pos: 0,
             sample_rate: sr,
-            bpm: if bpm <= 0.0 { 120.0 } else { bpm },
+            bpm: if bpm.is_finite() && bpm > 0.0 { bpm } else { 120.0 },
             subdivision: DelaySubdivision::EighthDotted,
             delay_samples_l: 0,
             delay_samples_r: 0,
@@ -74,7 +78,7 @@ impl TempoDelay {
     }
 
     pub fn set_tempo(&mut self, bpm: f64) {
-        if bpm > 20.0 && (self.bpm - bpm).abs() > 0.01 {
+        if bpm.is_finite() && bpm > 20.0 && (self.bpm - bpm).abs() > 0.01 {
             self.bpm = bpm;
             self.recompute_delay_times();
         }
@@ -86,7 +90,7 @@ impl TempoDelay {
     }
 
     pub fn set_sample_rate(&mut self, sample_rate: f32) {
-        if sample_rate > 0.0 {
+        if sample_rate.is_finite() && sample_rate > 0.0 {
             self.sample_rate = sample_rate;
             self.recompute_delay_times();
         }
@@ -94,14 +98,19 @@ impl TempoDelay {
 
     fn recompute_delay_times(&mut self) {
         let beats = self.subdivision.beats();
-        let seconds_per_beat = 60.0 / self.bpm;
+        let bpm = if self.bpm.is_finite() && self.bpm > 0.0 {
+            self.bpm
+        } else {
+            120.0
+        };
+        let seconds_per_beat = 60.0 / bpm;
         let base_samples = (beats * seconds_per_beat * self.sample_rate as f64).round() as usize;
         let clamped = base_samples.clamp(1, MAX_DELAY_SAMPLES - 1);
 
         self.delay_samples_l = clamped;
-        // In ping-pong mode, slightly offset R or match base
+        // In ping-pong mode, offset right tap (3:4) for stereo ping-pong spread
         self.delay_samples_r = if self.ping_pong {
-            clamped
+            ((clamped * 3) / 4).clamp(1, MAX_DELAY_SAMPLES - 1)
         } else {
             clamped
         };
@@ -118,14 +127,28 @@ impl TempoDelay {
     /// Process a block of stereo planar samples with zero allocations.
     pub fn process_block(&mut self, left: &mut [f32], right: &mut [f32]) {
         let len = left.len().min(right.len());
-        let delay_l = self.delay_samples_l;
-        let delay_r = self.delay_samples_r;
-        let fb = self.feedback.clamp(0.0, 0.98);
-        let alpha = (1.0 - self.damping.clamp(0.0, 0.95)).clamp(0.05, 1.0);
+        let delay_l = self.delay_samples_l.clamp(1, MAX_DELAY_SAMPLES - 1);
+        let delay_r = self.delay_samples_r.clamp(1, MAX_DELAY_SAMPLES - 1);
+        let fb = if self.feedback.is_finite() {
+            self.feedback.clamp(0.0, 0.98)
+        } else {
+            0.0
+        };
+        let damping = if self.damping.is_finite() {
+            self.damping.clamp(0.0, 0.95)
+        } else {
+            0.3
+        };
+        let wet = if self.wet.is_finite() {
+            self.wet.clamp(0.0, 1.0)
+        } else {
+            0.0
+        };
+        let alpha = (1.0 - damping).clamp(0.05, 1.0);
 
         for i in 0..len {
-            let in_l = left[i];
-            let in_r = right[i];
+            let in_l = if left[i].is_finite() { left[i] } else { 0.0 };
+            let in_r = if right[i].is_finite() { right[i] } else { 0.0 };
 
             // Read delayed samples
             let read_idx_l = (self.write_pos + MAX_DELAY_SAMPLES - delay_l) % MAX_DELAY_SAMPLES;
@@ -143,19 +166,19 @@ impl TempoDelay {
 
             if self.ping_pong {
                 // Cross-feedback ping-pong
-                self.buffer_left[self.write_pos] = in_l + filtered_fb_r;
-                self.buffer_right[self.write_pos] = in_r + filtered_fb_l;
+                self.buffer_left[self.write_pos] = (in_l + filtered_fb_r).clamp(-4.0, 4.0);
+                self.buffer_right[self.write_pos] = (in_r + filtered_fb_l).clamp(-4.0, 4.0);
             } else {
                 // Independent stereo feedback
-                self.buffer_left[self.write_pos] = in_l + filtered_fb_l;
-                self.buffer_right[self.write_pos] = in_r + filtered_fb_r;
+                self.buffer_left[self.write_pos] = (in_l + filtered_fb_l).clamp(-4.0, 4.0);
+                self.buffer_right[self.write_pos] = (in_r + filtered_fb_r).clamp(-4.0, 4.0);
             }
 
             self.write_pos = (self.write_pos + 1) % MAX_DELAY_SAMPLES;
 
             // Wet/dry mix
-            left[i] = in_l * (1.0 - self.wet) + delayed_l * self.wet;
-            right[i] = in_r * (1.0 - self.wet) + delayed_r * self.wet;
+            left[i] = in_l * (1.0 - wet) + delayed_l * wet;
+            right[i] = in_r * (1.0 - wet) + delayed_r * wet;
         }
     }
 }

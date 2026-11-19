@@ -56,8 +56,19 @@ impl BeatRepeat {
     }
 
     pub fn set_sample_rate(&mut self, sample_rate: f32) {
-        if sample_rate > 0.0 {
-            *self = Self::new(sample_rate);
+        if sample_rate.is_finite() && sample_rate > 0.0 {
+            let max_samples = ((sample_rate * 2.0) as usize).max(128);
+            self.sample_rate = sample_rate;
+            self.capture_buf_l = vec![0.0; max_samples];
+            self.capture_buf_r = vec![0.0; max_samples];
+            self.capture_write_pos = 0;
+            self.capture_start_pos = 0;
+            self.captured_len = ((sample_rate * 0.25) as usize).clamp(64, max_samples.saturating_sub(1).max(64));
+            self.repeat_pos = 0;
+            self.repeat_read_pos = 0.0;
+            self.is_repeating = false;
+            self.repeat_count = 0;
+            self.last_beat = 0.0;
         }
     }
 }
@@ -111,6 +122,14 @@ impl AudioEffectDevice for BeatRepeat {
 
         let buf_len = self.capture_buf_l.len();
         let current_beat = time.beat;
+        if current_beat < self.last_beat {
+            // Transport jumped backward (loop wrap or seek): clear active repeat state
+            self.is_repeating = false;
+            self.repeat_pos = 0;
+            self.repeat_read_pos = 0.0;
+            self.repeat_count = 0;
+            self.last_beat = current_beat;
+        }
         // Check for interval boundary trigger
         let interval = self.interval_beats.max(0.25);
         if (current_beat / interval).floor() > (self.last_beat / interval).floor() {

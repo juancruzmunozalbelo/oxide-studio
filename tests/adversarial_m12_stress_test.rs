@@ -305,7 +305,8 @@ fn test_adv_tcp_lom_client_offline_unbound_port() {
 
 #[test]
 fn test_adv_tcp_lom_client_immediate_drop_connection() {
-    let listener = TcpListener::bind("127.0.0.1:28906").unwrap();
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
     let running = Arc::new(AtomicBool::new(true));
     let r_clone = running.clone();
 
@@ -321,7 +322,7 @@ fn test_adv_tcp_lom_client_immediate_drop_connection() {
         }
     });
 
-    let client = TcpLomClient::new("127.0.0.1", 28906);
+    let client = TcpLomClient::new("127.0.0.1", port);
 
     let res = client.send_request("ping", json!({}));
     assert!(res.is_err(), "Expected error when server drops connection immediately");
@@ -339,7 +340,7 @@ fn test_adv_tcp_lom_client_immediate_drop_connection() {
 
     running.store(false, Ordering::Relaxed);
     // Unblock accept by connecting once
-    let _ = std::net::TcpStream::connect("127.0.0.1:28906");
+    let _ = std::net::TcpStream::connect(("127.0.0.1", port));
     let _ = handle.join();
 }
 
@@ -349,7 +350,8 @@ fn test_adv_tcp_lom_client_immediate_drop_connection() {
 
 #[test]
 fn test_adv_tcp_lom_client_malformed_json_response() {
-    let listener = TcpListener::bind("127.0.0.1:28907").unwrap();
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
     let running = Arc::new(AtomicBool::new(true));
     let r_clone = running.clone();
 
@@ -369,7 +371,7 @@ fn test_adv_tcp_lom_client_malformed_json_response() {
         }
     });
 
-    let client = TcpLomClient::new("127.0.0.1", 28907);
+    let client = TcpLomClient::new("127.0.0.1", port);
 
     let res = client.send_request("ping", json!({}));
     assert!(res.is_err(), "Expected error when server returns corrupt JSON");
@@ -382,7 +384,7 @@ fn test_adv_tcp_lom_client_malformed_json_response() {
     assert_eq!(fallback["result"]["recovered"], true);
 
     running.store(false, Ordering::Relaxed);
-    let _ = std::net::TcpStream::connect("127.0.0.1:28907");
+    let _ = std::net::TcpStream::connect(("127.0.0.1", port));
     let _ = handle.join();
 }
 
@@ -392,7 +394,8 @@ fn test_adv_tcp_lom_client_malformed_json_response() {
 
 #[test]
 fn test_adv_tcp_lom_client_jsonrpc_error_handling() {
-    let listener = TcpListener::bind("127.0.0.1:28908").unwrap();
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
     let running = Arc::new(AtomicBool::new(true));
     let r_clone = running.clone();
 
@@ -418,7 +421,7 @@ fn test_adv_tcp_lom_client_jsonrpc_error_handling() {
         }
     });
 
-    let client = TcpLomClient::new("127.0.0.1", 28908);
+    let client = TcpLomClient::new("127.0.0.1", port);
 
     let res = client.send_request("get_track_devices", json!({ "track_index": 0 }));
     assert!(res.is_err());
@@ -434,7 +437,7 @@ fn test_adv_tcp_lom_client_jsonrpc_error_handling() {
     assert_eq!(fallback["result"]["native_device_count"], 2);
 
     running.store(false, Ordering::Relaxed);
-    let _ = std::net::TcpStream::connect("127.0.0.1:28908");
+    let _ = std::net::TcpStream::connect(("127.0.0.1", port));
     let _ = handle.join();
 }
 
@@ -444,7 +447,8 @@ fn test_adv_tcp_lom_client_jsonrpc_error_handling() {
 
 #[test]
 fn test_adv_tcp_lom_client_read_timeout() {
-    let listener = TcpListener::bind("127.0.0.1:28909").unwrap();
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
     let running = Arc::new(AtomicBool::new(true));
     let r_clone = running.clone();
 
@@ -460,7 +464,7 @@ fn test_adv_tcp_lom_client_read_timeout() {
         }
     });
 
-    let mut client = TcpLomClient::new("127.0.0.1", 28909);
+    let mut client = TcpLomClient::new("127.0.0.1", port);
     // Set a 200ms read timeout
     client.timeout = Duration::from_millis(200);
 
@@ -476,7 +480,7 @@ fn test_adv_tcp_lom_client_read_timeout() {
     );
 
     running.store(false, Ordering::Relaxed);
-    let _ = std::net::TcpStream::connect("127.0.0.1:28909");
+    let _ = std::net::TcpStream::connect(("127.0.0.1", port));
     let _ = handle.join();
 }
 
@@ -486,8 +490,12 @@ fn test_adv_tcp_lom_client_read_timeout() {
 
 #[test]
 fn test_adv_tcp_lom_client_concurrency_stress() {
-    // 1. Offline concurrency: 10 threads hammering an offline port
-    let offline_client = Arc::new(TcpLomClient::new("127.0.0.1", 28910));
+    // 1. Offline concurrency: 10 threads hammering an offline ephemeral port
+    let offline_port = {
+        let l = TcpListener::bind("127.0.0.1:0").unwrap();
+        l.local_addr().unwrap().port()
+    };
+    let offline_client = Arc::new(TcpLomClient::new("127.0.0.1", offline_port));
     let mut handles = Vec::new();
 
     for thread_idx in 0..10 {
@@ -509,7 +517,8 @@ fn test_adv_tcp_lom_client_concurrency_stress() {
     }
 
     // 2. Online concurrency: 8 threads hammering an online mock TCP server
-    let listener = TcpListener::bind("127.0.0.1:28911").unwrap();
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let online_port = listener.local_addr().unwrap().port();
     let running = Arc::new(AtomicBool::new(true));
     let r_clone = running.clone();
 
@@ -539,7 +548,7 @@ fn test_adv_tcp_lom_client_concurrency_stress() {
         }
     });
 
-    let online_client = Arc::new(TcpLomClient::new("127.0.0.1", 28911));
+    let online_client = Arc::new(TcpLomClient::new("127.0.0.1", online_port));
     let mut online_handles = Vec::new();
 
     for thread_idx in 0..8 {
@@ -561,7 +570,7 @@ fn test_adv_tcp_lom_client_concurrency_stress() {
     }
 
     running.store(false, Ordering::Relaxed);
-    let _ = std::net::TcpStream::connect("127.0.0.1:28911");
+    let _ = std::net::TcpStream::connect(("127.0.0.1", online_port));
     let _ = server_handle.join();
 }
 

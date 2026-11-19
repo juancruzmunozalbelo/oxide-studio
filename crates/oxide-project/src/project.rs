@@ -141,8 +141,13 @@ mod tests {
         project.transport.bpm = 128.0;
         project.transport.swing_16th_ratio = 0.16;
 
-        // Add Synth track with session clip and automation
+        // Add Synth track with session clip, group_id, overridden_params, and automation
         let mut synth_track = TrackDefinition::new_synth(1, "Acid Bass");
+        synth_track.group_id = Some(99);
+        if let crate::InstrumentConfig::BuiltinSubtractiveSynth(ref mut patch) = synth_track.instrument {
+            patch.preset_name = Some("wowbass".to_string());
+            patch.set_overridden_parameter("filter_frequency", 3000.0);
+        }
         let mut bass_pattern = MidiPattern::new(4.0);
         bass_pattern.add_note(MidiNote::new(36, 120, 0.0, 0.5));
         bass_pattern.add_note(MidiNote::new(38, 100, 1.0, 0.5));
@@ -274,6 +279,7 @@ mod tests {
         }"##;
 
         let mut loaded = DAWProject::from_json_str(legacy_json).expect("Legacy JSON must deserialize");
+        assert_eq!(loaded.tracks[0].group_id, None);
         assert!(!loaded.master_track.saturator_enabled);
         assert_eq!(loaded.master_track.delay_mix, 0.0);
         assert_eq!(loaded.master_track.reverb_mix, 0.0);
@@ -281,6 +287,7 @@ mod tests {
         assert_eq!(loaded.tracks[0].mixer.get_send_db(1), -60.0);
         loaded.tracks[0].mixer.set_send_db(2, -9.0);
         assert_eq!(loaded.tracks[0].mixer.get_send_db(0), -12.0);
+        assert_eq!(loaded.tracks[0].mixer.get_send_db(1), -60.0);
         assert_eq!(loaded.tracks[0].mixer.get_send_db(2), -9.0);
         if let crate::InstrumentConfig::ElectronicDrumRack(dr) = &loaded.tracks[0].instrument {
             assert!(!dr.pads[0].mute);

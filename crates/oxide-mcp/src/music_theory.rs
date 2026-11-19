@@ -71,7 +71,37 @@ pub fn get_scale_intervals(scale_name: &str) -> &'static [u8] {
 
 /// Roman numeral degrees (0-indexed scale step, e.g. "I" -> 0, "ii" -> 1).
 pub fn parse_roman_degree(token: &str) -> Option<(usize, bool)> {
-    let clean = token.trim().trim_end_matches("°").trim_end_matches("dim").trim_end_matches("7");
+    let mut t = token.trim();
+    if t.is_empty() {
+        return None;
+    }
+    if let Some(rest) = t
+        .strip_prefix('#')
+        .or_else(|| t.strip_prefix('b'))
+        .or_else(|| t.strip_prefix('♭'))
+        .or_else(|| t.strip_prefix('♯'))
+    {
+        if !rest.is_empty() {
+            t = rest;
+        }
+    }
+    let clean = if t.ends_with("dim7") {
+        return None;
+    } else if let Some(s) = t.strip_suffix("°7") {
+        s
+    } else if let Some(s) = t.strip_suffix("maj7") {
+        s
+    } else if let Some(s) = t.strip_suffix("m7") {
+        s
+    } else if let Some(s) = t.strip_suffix('7') {
+        s
+    } else if let Some(s) = t.strip_suffix('°') {
+        s
+    } else if let Some(s) = t.strip_suffix("dim") {
+        s
+    } else {
+        t
+    };
     let is_minor = clean.chars().next()?.is_lowercase();
     let lower = clean.to_lowercase();
     let step = match lower.as_str() {
@@ -99,9 +129,10 @@ pub fn build_chord_notes(
     if scale_len == 0 {
         return Vec::new();
     }
-    let root_offset = scale_intervals[degree_step % scale_len] as i32;
-    let third_offset = scale_intervals[(degree_step + 2) % scale_len] as i32 + if degree_step + 2 >= scale_len { 12 } else { 0 };
-    let fifth_offset = scale_intervals[(degree_step + 4) % scale_len] as i32 + if degree_step + 4 >= scale_len { 12 } else { 0 };
+    let deg = degree_step % scale_len;
+    let root_offset = scale_intervals[deg] as i32;
+    let third_offset = scale_intervals[(deg + 2) % scale_len] as i32 + if deg + 2 >= scale_len { 12 } else { 0 };
+    let fifth_offset = scale_intervals[(deg + 4) % scale_len] as i32 + if deg + 4 >= scale_len { 12 } else { 0 };
 
     let clamped_octave = base_octave.min(8) as i32;
     let base_midi = ((clamped_octave + 1) * 12 + root_pitch as i32).clamp(0, 127);
@@ -185,33 +216,37 @@ pub fn generate_drum_groove(
     complexity: f32,
 ) -> DrumStepPattern {
     let mut pattern = DrumStepPattern::new_16_step();
-    let comp = complexity.clamp(0.0, 1.0);
+    let comp = if complexity.is_finite() {
+        complexity.clamp(0.0, 1.0)
+    } else {
+        0.5
+    };
 
     let s = style.to_lowercase();
     match s.as_str() {
         "techno_peak" | "techno" => {
-            // Driving 4-on-the-floor kick
+            // Driving 4-on-the-floor kick (pad 0 = Kick)
             for step in [0, 4, 8, 12] {
                 pattern.set_step(0, step, DrumStep::new(true, 125, 36).with_accent(true));
             }
-            // Claps on 4 and 12
-            pattern.set_step(3, 4, DrumStep::new(true, 115, 39));
-            pattern.set_step(3, 12, DrumStep::new(true, 118, 39));
-            // Open HH on offbeats 2, 6, 10, 14
+            // Claps on 4 and 12 (pad 6 = Clap)
+            pattern.set_step(6, 4, DrumStep::new(true, 115, 42));
+            pattern.set_step(6, 12, DrumStep::new(true, 118, 42));
+            // Open HH on offbeats 2, 6, 10, 14 (pad 9 = Open HH)
             for step in [2, 6, 10, 14] {
-                pattern.set_step(10, step, DrumStep::new(true, 105, 46));
+                pattern.set_step(9, step, DrumStep::new(true, 105, 45));
             }
-            // 16th closed hats driving
+            // 16th closed hats driving (pad 8 = Closed HH)
             for step in 0..16 {
                 if step % 2 != 0 {
                     let vel = if step % 4 == 3 { 90 } else { 75 };
-                    pattern.set_step(6, step, DrumStep::new(true, vel, 42));
+                    pattern.set_step(8, step, DrumStep::new(true, vel, 44));
                 }
             }
-            // High tom or rimshot perc accents if complexity > 0.4
+            // Mid Tom and Rimshot perc accents if complexity > 0.4
             if comp > 0.4 {
-                pattern.set_step(1, 14, DrumStep::new(true, 95, 37));
-                pattern.set_step(9, 7, DrumStep::new(true, 85, 47));
+                pattern.set_step(5, 14, DrumStep::new(true, 95, 41));
+                pattern.set_step(3, 7, DrumStep::new(true, 85, 39));
             }
         }
         "electro_funk" | "electro" => {
@@ -219,17 +254,17 @@ pub fn generate_drum_groove(
             for step in [0, 3, 6, 10, 12] {
                 pattern.set_step(0, step, DrumStep::new(true, 120, 36));
             }
-            // Snare on 4 and 12
-            pattern.set_step(2, 4, DrumStep::new(true, 115, 38));
-            pattern.set_step(2, 12, DrumStep::new(true, 115, 38));
-            // Closed HH funky 16ths
+            // Snare on 4 and 12 (pad 1 = Snare)
+            pattern.set_step(1, 4, DrumStep::new(true, 115, 37));
+            pattern.set_step(1, 12, DrumStep::new(true, 115, 37));
+            // Closed HH funky 16ths (pad 8 = Closed HH)
             for step in [0, 2, 4, 6, 8, 10, 12, 14] {
-                pattern.set_step(6, step, DrumStep::new(true, 90, 42));
+                pattern.set_step(8, step, DrumStep::new(true, 90, 44));
             }
             if comp > 0.3 {
-                pattern.set_step(6, 7, DrumStep::new(true, 80, 42));
-                pattern.set_step(6, 15, DrumStep::new(true, 85, 42));
-                pattern.set_step(1, 11, DrumStep::new(true, 95, 37));
+                pattern.set_step(8, 7, DrumStep::new(true, 80, 44));
+                pattern.set_step(8, 15, DrumStep::new(true, 85, 44));
+                pattern.set_step(5, 11, DrumStep::new(true, 95, 41));
             }
         }
         "breakbeat" | "breaks" => {
@@ -237,17 +272,17 @@ pub fn generate_drum_groove(
             pattern.set_step(0, 0, DrumStep::new(true, 125, 36));
             pattern.set_step(0, 6, DrumStep::new(true, 110, 36));
             pattern.set_step(0, 10, DrumStep::new(true, 120, 36));
-            // Snare on 4, 12, 15
-            pattern.set_step(2, 4, DrumStep::new(true, 120, 38));
-            pattern.set_step(2, 12, DrumStep::new(true, 120, 38));
-            pattern.set_step(2, 15, DrumStep::new(true, 95, 38));
+            // Snare on 4, 12, 15 (pad 1 = Snare)
+            pattern.set_step(1, 4, DrumStep::new(true, 120, 37));
+            pattern.set_step(1, 12, DrumStep::new(true, 120, 37));
+            pattern.set_step(1, 15, DrumStep::new(true, 95, 37));
             // Ghost snares
-            pattern.set_step(2, 7, DrumStep::new(true, 65, 38));
-            pattern.set_step(2, 11, DrumStep::new(true, 70, 38));
-            // Ride/Hat shuffle
+            pattern.set_step(1, 7, DrumStep::new(true, 65, 37));
+            pattern.set_step(1, 11, DrumStep::new(true, 70, 37));
+            // Closed HH shuffle (pad 8 = Closed HH)
             for step in 0..16 {
                 if step % 2 == 0 {
-                    pattern.set_step(6, step, DrumStep::new(true, 90, 42));
+                    pattern.set_step(8, step, DrumStep::new(true, 90, 44));
                 }
             }
         }
@@ -255,15 +290,15 @@ pub fn generate_drum_groove(
             // Sparse sub kick on 0 and 8
             pattern.set_step(0, 0, DrumStep::new(true, 110, 36));
             pattern.set_step(0, 8, DrumStep::new(true, 105, 36));
-            // Delicate rimshot on 4, 12
-            pattern.set_step(1, 4, DrumStep::new(true, 85, 37));
-            pattern.set_step(1, 12, DrumStep::new(true, 90, 37));
-            // Sparse closed HH on 2, 6, 10, 14
+            // Delicate rimshot on 4, 12 (pad 5 = Rimshot)
+            pattern.set_step(5, 4, DrumStep::new(true, 85, 41));
+            pattern.set_step(5, 12, DrumStep::new(true, 90, 41));
+            // Sparse closed HH on 2, 6, 10, 14 (pad 8 = Closed HH)
             for step in [2, 6, 10, 14] {
-                pattern.set_step(6, step, DrumStep::new(true, 75, 42));
+                pattern.set_step(8, step, DrumStep::new(true, 75, 44));
             }
             if comp > 0.5 {
-                pattern.set_step(10, 15, DrumStep::new(true, 60, 46));
+                pattern.set_step(9, 15, DrumStep::new(true, 60, 45));
             }
         }
         _ => {
@@ -271,20 +306,20 @@ pub fn generate_drum_groove(
             for step in [0, 4, 8, 12] {
                 pattern.set_step(0, step, DrumStep::new(true, 120, 36));
             }
-            // Clap & Snare on 4 and 12
-            pattern.set_step(3, 4, DrumStep::new(true, 110, 39));
-            pattern.set_step(3, 12, DrumStep::new(true, 110, 39));
-            // Offbeat open hi-hat
+            // Clap on 4 and 12 (pad 6 = Clap)
+            pattern.set_step(6, 4, DrumStep::new(true, 110, 42));
+            pattern.set_step(6, 12, DrumStep::new(true, 110, 42));
+            // Offbeat open hi-hat (pad 9 = Open HH)
             for step in [2, 6, 10, 14] {
-                pattern.set_step(10, step, DrumStep::new(true, 100, 46));
+                pattern.set_step(9, step, DrumStep::new(true, 100, 45));
             }
-            // Closed hats on downbeats
+            // Closed hats on downbeats (pad 8 = Closed HH)
             for step in [0, 4, 8, 12] {
-                pattern.set_step(6, step, DrumStep::new(true, 80, 42));
+                pattern.set_step(8, step, DrumStep::new(true, 80, 44));
             }
             if comp > 0.4 {
-                pattern.set_step(1, 7, DrumStep::new(true, 85, 37));
-                pattern.set_step(1, 15, DrumStep::new(true, 85, 37));
+                pattern.set_step(5, 7, DrumStep::new(true, 85, 41));
+                pattern.set_step(5, 15, DrumStep::new(true, 85, 41));
             }
         }
     }
@@ -329,6 +364,18 @@ mod tests {
         // Standard C major close voicing
         let c_maj = build_chord_notes(0, &[0, 2, 4, 5, 7, 9, 11], 0, "close", 3);
         assert_eq!(c_maj, vec![48, 52, 55]); // C3, E3, G3
+    }
+
+    #[test]
+    fn test_roman_degree_extensions_and_nan_drum_groove() {
+        assert_eq!(parse_roman_degree("vii°7"), Some((6, true)));
+        assert_eq!(parse_roman_degree("IVmaj7"), Some((3, false)));
+        assert_eq!(parse_roman_degree("bVII"), Some((6, false)));
+        assert_eq!(parse_roman_degree("IVdim7"), None);
+        assert_eq!(parse_roman_degree("iio"), None);
+
+        let pat = generate_drum_groove("techno_peak", 130.0, 0.0, f32::NAN);
+        assert!(pat.tracks[0].steps[0].active);
     }
 }
 

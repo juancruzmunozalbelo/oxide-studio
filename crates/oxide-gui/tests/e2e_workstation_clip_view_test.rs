@@ -351,6 +351,7 @@ fn test_f6_key_gutter_audition_and_command_dispatch() {
         transpose_changed: None,
         warp_marker_moved: false,
         audition_note: Some((audition_pitch, audition_velocity)),
+        audition_note_off: None,
         loop_length_changed: None,
         envelope_mutated: false,
     };

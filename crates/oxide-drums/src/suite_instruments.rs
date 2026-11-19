@@ -368,13 +368,13 @@ impl GranulatorIIIEngine {
         };
 
         let grain_len = ((self.grain_size_ms * 0.001 * self.sample_rate) as usize).clamp(64, GRANULATOR_BUFFER_SIZE / 2);
-        let spray_offset = (self.rng.next_f32() * 2.0 - 1.0) * self.spray * (GRANULATOR_BUFFER_SIZE as f32 * 0.25);
+        let spray_offset = (self.rng.next_f32_unit() * 2.0 - 1.0) * self.spray * (GRANULATOR_BUFFER_SIZE as f32 * 0.25);
         let pos = (self.playhead + spray_offset as f64).rem_euclid(GRANULATOR_BUFFER_SIZE as f64);
 
         let note_trans = (self.current_note as f32 - 60.0) + self.pitch_bend_semi;
         let step = 2.0f64.powf((note_trans / 12.0) as f64);
 
-        let pan = self.rng.next_f32().clamp(0.0, 1.0);
+        let pan = self.rng.next_f32_unit().clamp(0.0, 1.0);
         let pan_rad = pan * 0.5 * PI;
 
         *slot = Grain {
@@ -625,9 +625,8 @@ impl SuiteInstrumentEngine {
 
         if self.pan != 0.0 {
             let p = (self.pan.clamp(-1.0, 1.0) + 1.0) * 0.25 * PI;
-            let mono = (l + r) * 0.5;
-            l = mono * p.cos() * 1.414;
-            r = mono * p.sin() * 1.414;
+            l *= p.cos() * std::f32::consts::SQRT_2;
+            r *= p.sin() * std::f32::consts::SQRT_2;
         }
 
         (l * self.volume, r * self.volume)

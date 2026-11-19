@@ -31,26 +31,30 @@ mod tests {
         assert_eq!(rack.voices.len(), 32);
         assert_eq!(rack.pads[0].name, "Kick");
         assert_eq!(rack.pads[6].name, "Clap");
+        assert_eq!(rack.pads[6].choke_group, None);
         assert_eq!(rack.pads[8].name, "Closed HH");
         assert_eq!(rack.pads[8].choke_group, Some(1));
-        assert_eq!(rack.pads[10].choke_group, Some(1));
+        assert_eq!(rack.pads[9].name, "Open HH");
+        assert_eq!(rack.pads[9].choke_group, Some(1));
+        assert_eq!(rack.pads[10].name, "Crash");
+        assert_eq!(rack.pads[10].choke_group, None);
     }
 
     #[test]
     fn test_choke_group_damping() {
         let mut rack = DrumRack::new(44100.0);
-        // Trigger Open HH
-        rack.trigger_pad(10, 127);
+        // Trigger Open HH (pad 9)
+        rack.trigger_pad(9, 127);
         let mut left = [0.0; 256];
         let mut right = [0.0; 256];
         rack.process_block(&mut left, &mut right);
 
         let active_idx = rack.voices.iter().position(|v| v.active).unwrap();
-        assert_eq!(rack.voices[active_idx].pad_idx, 10);
+        assert_eq!(rack.voices[active_idx].pad_idx, 9);
         assert!(!rack.voices[active_idx].is_fading_out);
 
-        // Trigger Closed HH on same choke group
-        rack.trigger_pad(6, 127);
+        // Trigger Closed HH (pad 8) on same choke group
+        rack.trigger_pad(8, 127);
         assert!(rack.voices[active_idx].is_fading_out);
 
         // Process 240 samples (< 5.5ms)
@@ -64,6 +68,19 @@ mod tests {
             "Choke group must damp voice below -60 dBFS (<0.001) in <5ms, got {}",
             env
         );
+    }
+
+    #[test]
+    fn test_clap_and_crash_are_not_choked_by_hihats() {
+        let mut rack = DrumRack::new(44100.0);
+        rack.trigger_pad(6, 127); // Clap
+        rack.trigger_pad(10, 127); // Crash
+        rack.trigger_pad(8, 127); // Closed HH (choke group 1)
+
+        let clap_voice = rack.voices.iter().find(|v| v.active && v.pad_idx == 6).unwrap();
+        let crash_voice = rack.voices.iter().find(|v| v.active && v.pad_idx == 10).unwrap();
+        assert!(!clap_voice.is_fading_out, "Clap must not be choked by Hi-Hat");
+        assert!(!crash_voice.is_fading_out, "Crash must not be choked by Hi-Hat");
     }
 
     #[test]
@@ -101,13 +118,44 @@ mod tests {
 
     #[test]
     fn test_sample_loading_if_present() {
-        let path = "/Users/juancruz/ableton-rust/assets/kick.wav";
-        if Path::new(path).exists() {
-            let res = load_wav_file(path);
-            assert!(res.is_ok());
-            let decoded = res.unwrap();
-            assert_eq!(decoded.sample_rate, 44100);
-            assert!(decoded.samples.len() > 1000);
+        let asset_kick = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../assets/kick.wav");
+        let (wav_path, cleanup) = if asset_kick.exists() {
+            (asset_kick, false)
+        } else {
+            let temp_wav = std::env::temp_dir().join("oxide_drums_synthetic_kick.wav");
+            let num_frames: u32 = 2048;
+            let data_bytes = num_frames * 2;
+            let riff_size = 36 + data_bytes;
+            let mut bytes = Vec::with_capacity(44 + data_bytes as usize);
+            bytes.extend_from_slice(b"RIFF");
+            bytes.extend_from_slice(&riff_size.to_le_bytes());
+            bytes.extend_from_slice(b"WAVE");
+            bytes.extend_from_slice(b"fmt ");
+            bytes.extend_from_slice(&16u32.to_le_bytes());
+            bytes.extend_from_slice(&1u16.to_le_bytes()); // PCM
+            bytes.extend_from_slice(&1u16.to_le_bytes()); // Mono
+            bytes.extend_from_slice(&44100u32.to_le_bytes());
+            bytes.extend_from_slice(&(44100u32 * 2).to_le_bytes());
+            bytes.extend_from_slice(&2u16.to_le_bytes());
+            bytes.extend_from_slice(&16u16.to_le_bytes());
+            bytes.extend_from_slice(b"data");
+            bytes.extend_from_slice(&data_bytes.to_le_bytes());
+            for i in 0..num_frames {
+                let sample = (((i as f32 / 44100.0) * 60.0 * std::f32::consts::TAU).sin() * 16000.0) as i16;
+                bytes.extend_from_slice(&sample.to_le_bytes());
+            }
+            std::fs::write(&temp_wav, &bytes).unwrap();
+            (temp_wav, true)
+        };
+
+        let res = load_wav_file(&wav_path);
+        assert!(res.is_ok(), "WAV loading failed: {:?}", res.err());
+        let decoded = res.unwrap();
+        assert_eq!(decoded.sample_rate, 44100);
+        assert!(decoded.samples.len() > 1000);
+
+        if cleanup {
+            let _ = std::fs::remove_file(&wav_path);
         }
     }
 }

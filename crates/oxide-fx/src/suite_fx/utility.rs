@@ -74,7 +74,7 @@ impl Device for Utility {
     }
 
     fn is_enabled(&self) -> bool {
-        self.enabled && !self.mute
+        self.enabled
     }
 
     fn set_enabled(&mut self, enabled: bool) {

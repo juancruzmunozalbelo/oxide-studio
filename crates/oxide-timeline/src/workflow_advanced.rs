@@ -151,6 +151,18 @@ impl TrackFreezeEngine {
         duration_beats: f64,
         sample_rate: f64,
     ) -> FrozenAudioTail {
+        if !sample_rate.is_finite() || sample_rate <= 0.0 || !duration_beats.is_finite() {
+            return FrozenAudioTail {
+                track_id,
+                duration_beats: if duration_beats.is_finite() { duration_beats.max(0.0) } else { 0.0 },
+                sample_rate: if sample_rate.is_finite() && sample_rate > 0.0 { sample_rate } else { 0.0 },
+                audio_left: Vec::new(),
+                audio_right: Vec::new(),
+                tail_samples: 0,
+                is_frozen: true,
+            };
+        }
+
         let bpm = 120.0;
         let seconds_per_beat = 60.0 / bpm;
         let body_samples = ((duration_beats.max(1.0) * seconds_per_beat) * sample_rate) as usize;
@@ -384,6 +396,17 @@ impl LinkedTrackGroup {
     /// Split clips across all linked tracks at `split_beat`.
     /// Returns the number of clips split.
     pub fn split_clips(&self, tracks: &mut [ArrangementTrack], split_beat: f64) -> usize {
+        if !split_beat.is_finite() {
+            return 0;
+        }
+        let mut next_id = tracks
+            .iter()
+            .flat_map(|t| t.clips.iter())
+            .map(|c| c.id)
+            .max()
+            .unwrap_or(0)
+            .saturating_add(1);
+
         let mut split_count = 0;
 
         for track in tracks.iter_mut() {
@@ -398,8 +421,10 @@ impl LinkedTrackGroup {
                     let second_duration = clip.duration_beats - first_duration;
                     let second_offset = clip.pattern_offset_beats + first_duration;
 
+                    let assigned_id = next_id;
+                    next_id = next_id.saturating_add(1);
                     let mut second_clip = ArrangementClip::new(
-                        clip.id + 10000,
+                        assigned_id,
                         format!("{}_part2", clip.name),
                         split_beat,
                         second_duration,
@@ -755,5 +780,27 @@ mod tests {
         assert_eq!(tracks[1].clips.len(), 1);
         assert_eq!(tracks[0].clips[0].duration_beats, 4.0);
         assert_eq!(tracks[1].clips[0].duration_beats, 4.0);
+    }
+
+    #[test]
+    fn test_track_freeze_zero_sr_and_linked_split_unique_ids() {
+        let notes = vec![MidiNote::new(60, 100, 0.0, 1.0)];
+        let frozen_zero = TrackFreezeEngine::freeze_track(0, &notes, 2.0, 0.0);
+        assert!(frozen_zero.audio_left.iter().all(|s| s.is_finite()));
+        assert!(frozen_zero.audio_right.iter().all(|s| s.is_finite()));
+
+        // Linked split when existing clips have colliding offsets like 1 and 10001
+        let mut t1 = ArrangementTrack::new(1, "T1", "Midi");
+        let pattern = ClipPattern::Midi(MidiPattern::new(4.0));
+        t1.add_clip(ArrangementClip::new(1, "C1", 0.0, 4.0, pattern.clone()));
+        t1.add_clip(ArrangementClip::new(10001, "C2", 4.0, 4.0, pattern));
+        let mut tracks = vec![t1];
+        let group = LinkedTrackGroup::new(1, vec![1]);
+        assert_eq!(group.split_clips(&mut tracks, 2.0), 1);
+        assert_eq!(group.split_clips(&mut tracks, 6.0), 1);
+
+        let ids: Vec<u32> = tracks[0].clips.iter().map(|c| c.id).collect();
+        let unique: std::collections::HashSet<u32> = ids.iter().copied().collect();
+        assert_eq!(ids.len(), unique.len(), "Split clip IDs must never collide: {:?}", ids);
     }
 }

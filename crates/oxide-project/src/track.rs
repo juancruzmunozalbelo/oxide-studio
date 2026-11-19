@@ -43,6 +43,8 @@ pub struct TrackDefinition {
     pub session_clips: Vec<Option<SessionClip>>,
     pub arrangement_clips: Vec<ArrangementClip>,
     pub automation_lanes: Vec<AutomationLane>,
+    #[serde(default)]
+    pub group_id: Option<u32>,
 }
 
 impl TrackDefinition {
@@ -58,6 +60,7 @@ impl TrackDefinition {
             session_clips: Vec::new(),
             arrangement_clips: Vec::new(),
             automation_lanes: Vec::new(),
+            group_id: None,
         }
     }
 
@@ -73,6 +76,7 @@ impl TrackDefinition {
             session_clips: Vec::new(),
             arrangement_clips: Vec::new(),
             automation_lanes: Vec::new(),
+            group_id: None,
         }
     }
 
@@ -88,6 +92,7 @@ impl TrackDefinition {
             session_clips: Vec::new(),
             arrangement_clips: Vec::new(),
             automation_lanes: Vec::new(),
+            group_id: None,
         }
     }
 
@@ -103,6 +108,7 @@ impl TrackDefinition {
             session_clips: Vec::new(),
             arrangement_clips: Vec::new(),
             automation_lanes: Vec::new(),
+            group_id: None,
         }
     }
 
@@ -118,6 +124,23 @@ impl TrackDefinition {
             session_clips: Vec::new(),
             arrangement_clips: Vec::new(),
             automation_lanes: Vec::new(),
+            group_id: None,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_track_group_id_default_and_serde() {
+        let mut trk = TrackDefinition::new_synth(1, "Bass");
+        assert_eq!(trk.group_id, None);
+        trk.group_id = Some(5);
+
+        let json = serde_json::to_string(&trk).unwrap();
+        let reloaded: TrackDefinition = serde_json::from_str(&json).unwrap();
+        assert_eq!(reloaded.group_id, Some(5));
     }
 }

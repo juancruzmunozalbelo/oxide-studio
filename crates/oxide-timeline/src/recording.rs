@@ -80,7 +80,7 @@ impl SessionToArrangementRecorder {
         }
         self.control_states[track_idx] = ArrangementControlState::SessionOverride;
 
-        if self.is_recording {
+        if self.is_recording && launch_beat.is_finite() {
             // Close any existing in-progress clip on this track
             self.finalize_track_clip(track_idx, arrangement_track, launch_beat);
 
@@ -105,7 +105,7 @@ impl SessionToArrangementRecorder {
         arrangement_track: &mut ArrangementTrack,
         stop_beat: f64,
     ) {
-        if self.is_recording {
+        if self.is_recording && stop_beat.is_finite() {
             self.finalize_track_clip(track_idx, arrangement_track, stop_beat);
         }
     }
@@ -120,9 +120,9 @@ impl SessionToArrangementRecorder {
         beat: f64,
         value_norm: f32,
     ) {
-        if self.is_recording {
+        if self.is_recording && beat.is_finite() && value_norm.is_finite() {
             let lane = arrangement_track.get_or_create_automation_lane(param_id, param_name);
-            lane.add_point(AutomationPoint::linear(beat, value_norm));
+            lane.add_point(AutomationPoint::linear(beat, value_norm.clamp(0.0, 1.0)));
         }
     }
 
@@ -161,7 +161,11 @@ impl SessionToArrangementRecorder {
         end_beat: f64,
     ) {
         if let Some(in_progress) = self.in_progress_clips.remove(&track_idx) {
-            let duration = (end_beat - in_progress.start_beat).max(0.25);
+            let duration = if end_beat.is_finite() {
+                (end_beat - in_progress.start_beat).max(0.25)
+            } else {
+                0.25
+            };
             let arr_clip = ArrangementClip::new(
                 in_progress.clip_id,
                 in_progress.clip_name,

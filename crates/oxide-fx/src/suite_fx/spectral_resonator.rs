@@ -50,8 +50,14 @@ impl SpectralResonator {
     }
 
     pub fn set_sample_rate(&mut self, sample_rate: f32) {
-        if sample_rate > 0.0 {
-            *self = Self::new(sample_rate);
+        if sample_rate.is_finite() && sample_rate > 0.0 {
+            let max_len = ((sample_rate / 20.0) as usize).max(64);
+            let count = self.comb_buffers_l.len().max(8);
+            self.sample_rate = sample_rate;
+            self.comb_buffers_l = (0..count).map(|_| vec![0.0; max_len]).collect();
+            self.comb_buffers_r = (0..count).map(|_| vec![0.0; max_len]).collect();
+            self.comb_indices_l = vec![0; count];
+            self.comb_indices_r = vec![0; count];
         }
     }
 }

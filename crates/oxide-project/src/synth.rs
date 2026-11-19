@@ -51,6 +51,10 @@ pub struct SynthPatchParameters {
     pub global_slew_time: f32,
     pub glide_time: f32,
     pub amplitude: f32,
+
+    /// Parameter names explicitly overridden by the user (preserved even if reset to Init defaults).
+    #[serde(default)]
+    pub overridden_params: Vec<String>,
 }
 
 impl Default for SynthPatchParameters {
@@ -87,6 +91,7 @@ impl Default for SynthPatchParameters {
             global_slew_time: 50.0,
             glide_time: 0.0,
             amplitude: 1.0,
+            overridden_params: Vec::new(),
         }
     }
 }
@@ -129,8 +134,11 @@ impl SynthPatchParameters {
         }
     }
 
-    /// Set a parameter value by name.
+    /// Set a parameter value by name. Returns `false` if unknown or non-finite.
     pub fn set_parameter(&mut self, name: &str, val: f32) -> bool {
+        if !val.is_finite() {
+            return false;
+        }
         match name {
             "oscillator_noise_amplitude" => { self.oscillator_noise_amplitude = val; true }
             "oscillator_pulse_amplitude" => { self.oscillator_pulse_amplitude = val; true }
@@ -163,6 +171,28 @@ impl SynthPatchParameters {
             "glide_time" => { self.glide_time = val; true }
             "amplitude" => { self.amplitude = val; true }
             _ => false,
+        }
+    }
+
+    /// Record `name` as explicitly overridden by the user if not already tracked.
+    pub fn mark_overridden(&mut self, name: &str) {
+        if self.get_parameter(name).is_some() && !self.overridden_params.iter().any(|p| p == name) {
+            self.overridden_params.push(name.to_string());
+        }
+    }
+
+    /// Check whether `name` was explicitly overridden by the user.
+    pub fn is_overridden(&self, name: &str) -> bool {
+        self.overridden_params.iter().any(|p| p == name)
+    }
+
+    /// Set a parameter value and mark it as explicitly overridden.
+    pub fn set_overridden_parameter(&mut self, name: &str, val: f32) -> bool {
+        if self.set_parameter(name, val) {
+            self.mark_overridden(name);
+            true
+        } else {
+            false
         }
     }
 
@@ -242,33 +272,96 @@ pub struct MacroMappingDefinition {
     pub macro_y: Vec<MacroTargetDefinition>,
 }
 
-/// Load all 38 factory synth presets from the catalog.
-pub fn load_all_factory_presets() -> Vec<PresetDefinition> {
-    let raw_presets = match oxide_dsp::presets::load_preset_catalog() {
-        Ok(p) => p,
-        Err(_) => return Vec::new(),
+/// Normalize a preset identifier by stripping an optional `.preset` suffix,
+/// lowercasing, and normalizing `_` / `-` separators to single spaces.
+pub fn normalize_preset_name(name: &str) -> String {
+    let trimmed = name.trim();
+    let stem = if trimmed.len() > 7 && trimmed[trimmed.len() - 7..].eq_ignore_ascii_case(".preset") {
+        &trimmed[..trimmed.len() - 7]
+    } else {
+        trimmed
     };
+    stem.replace(['_', '-'], " ")
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .to_ascii_lowercase()
+}
 
+impl PresetDefinition {
+    /// Returns `true` if `query` matches this preset's key (`.preset`), stem, or normalized name.
+    pub fn matches_name(&self, query: &str) -> bool {
+        let q_trim = query.trim();
+        if q_trim.is_empty() {
+            return false;
+        }
+        if self.key.eq_ignore_ascii_case(q_trim) || self.name.eq_ignore_ascii_case(q_trim) {
+            return true;
+        }
+        let q_norm = normalize_preset_name(q_trim);
+        !q_norm.is_empty()
+            && (normalize_preset_name(&self.key) == q_norm
+                || normalize_preset_name(&self.name) == q_norm)
+    }
+}
+
+/// Find a preset by catalog key (with or without `.preset`), stem, or normalized name.
+pub fn find_factory_preset<'a>(
+    presets: &'a [PresetDefinition],
+    query: &str,
+) -> Option<&'a PresetDefinition> {
+    let q_trim = query.trim();
+    if q_trim.is_empty() {
+        return None;
+    }
+    presets
+        .iter()
+        .find(|p| p.key.eq_ignore_ascii_case(q_trim) || p.name.eq_ignore_ascii_case(q_trim))
+        .or_else(|| presets.iter().find(|p| p.matches_name(q_trim)))
+}
+
+fn build_presets_from_catalog(
+    raw_presets: HashMap<String, oxide_dsp::presets::Preset>,
+    raw_mappings: &HashMap<String, oxide_dsp::presets::MacroMapping>,
+) -> Vec<PresetDefinition> {
     let mut list = Vec::with_capacity(raw_presets.len());
     for (key, preset) in raw_presets {
-        let name = key.trim_end_matches(".preset").replace('_', " ");
+        let stem = key.strip_suffix(".preset").unwrap_or(&key).to_string();
         let mut param_map = HashMap::new();
         for entry in &preset.parameters {
             param_map.insert(entry.name.clone(), entry.value);
         }
 
-        let patch = SynthPatchParameters::from_parameter_map(&param_map, Some(name.clone()));
+        let mapping_key = {
+            let candidate = format!("{stem}.mapping");
+            if raw_mappings.contains_key(&candidate) {
+                Some(candidate)
+            } else {
+                None
+            }
+        };
+        let patch = SynthPatchParameters::from_parameter_map(&param_map, Some(stem.clone()));
         list.push(PresetDefinition {
             key,
-            name,
+            name: stem,
             description: None,
-            mapping_key: None,
+            mapping_key,
             patch,
         });
     }
 
     list.sort_by(|a, b| a.key.cmp(&b.key));
     list
+}
+
+/// Load all 38 factory synth presets from the catalog.
+pub fn load_all_factory_presets() -> Vec<PresetDefinition> {
+    let raw_presets = match oxide_dsp::presets::load_preset_catalog() {
+        Ok(p) => p,
+        Err(_) => return Vec::new(),
+    };
+    let raw_mappings = oxide_dsp::presets::load_mapping_catalog().unwrap_or_default();
+    build_presets_from_catalog(raw_presets, &raw_mappings)
 }
 
 /// Load all 17 factory XY macro breakpoint mappings from the catalog.
@@ -326,12 +419,65 @@ mod tests {
         let mut copy = patch.clone();
         assert!(copy.set_parameter("filter_frequency", 880.0));
         assert_eq!(copy.get_parameter("filter_frequency"), Some(880.0));
+        assert!(!copy.set_parameter("filter_frequency", f32::NAN));
+        assert_eq!(copy.get_parameter("filter_frequency"), Some(880.0));
+    }
+
+    #[test]
+    fn test_synth_overridden_params_roundtrip_and_backwards_compat() {
+        let mut patch = SynthPatchParameters {
+            preset_name: Some("wowbass".to_string()),
+            ..Default::default()
+        };
+        assert!(patch.overridden_params.is_empty());
+        assert!(patch.set_overridden_parameter("filter_frequency", 3000.0));
+        assert!(patch.is_overridden("filter_frequency"));
+
+        let json = serde_json::to_string(&patch).unwrap();
+        let decoded: SynthPatchParameters = serde_json::from_str(&json).unwrap();
+        assert_eq!(decoded, patch);
+        assert_eq!(decoded.overridden_params, vec!["filter_frequency".to_string()]);
+
+        // Legacy JSON without overridden_params deserializes cleanly
+        let mut v: serde_json::Value = serde_json::from_str(&json).unwrap();
+        v.as_object_mut().unwrap().remove("overridden_params");
+        let legacy: SynthPatchParameters = serde_json::from_value(v).unwrap();
+        assert!(legacy.overridden_params.is_empty());
     }
 
     #[test]
     fn test_load_factory_catalogs() {
         let presets = load_all_factory_presets();
         assert_eq!(presets.len(), 38, "Must load all 38 factory presets");
+
+        assert!(find_factory_preset(&presets, "wowbass").is_some());
+        assert!(find_factory_preset(&presets, "wowbass.preset").is_some());
+        assert!(find_factory_preset(&presets, "two-sounds-in-one").is_some());
+        assert!(find_factory_preset(&presets, "two sounds in one").is_some());
+        assert!(find_factory_preset(&presets, "two_sounds_in_one.preset").is_some());
+
+        let wow = find_factory_preset(&presets, "wowbass").unwrap();
+        assert_eq!(wow.mapping_key.as_deref(), Some("wowbass.mapping"));
+
+        // Synthetic catalog entry with underscores and .preset suffix
+        let mut custom = HashMap::new();
+        custom.insert(
+            "deep_acid_303.preset".to_string(),
+            oxide_dsp::presets::Preset {
+                instrument_name: Some("learning-synth".to_string()),
+                parameters: vec![oxide_dsp::presets::PresetParamEntry {
+                    name: "filter_frequency".to_string(),
+                    value: 640.0,
+                }],
+            },
+        );
+        let built = build_presets_from_catalog(custom, &HashMap::new());
+        assert_eq!(built[0].key, "deep_acid_303.preset");
+        assert_eq!(built[0].name, "deep_acid_303");
+        assert_eq!(built[0].patch.preset_name.as_deref(), Some("deep_acid_303"));
+        assert!(find_factory_preset(&built, "deep_acid_303").is_some());
+        assert!(find_factory_preset(&built, "deep_acid_303.preset").is_some());
+        assert!(find_factory_preset(&built, "deep acid 303").is_some());
 
         let macros = load_all_factory_macros();
         assert_eq!(macros.len(), 17, "Must load all 17 XY macro mappings");

@@ -105,10 +105,14 @@ impl AudioEffectDevice for Compressor {
         let attack_coeff = (-1.0 / (self.attack_ms.max(0.1) * 0.001 * self.sample_rate)).exp();
         let release_coeff = (-1.0 / (self.release_ms.max(1.0) * 0.001 * self.sample_rate)).exp();
         let makeup_linear = 10.0_f32.powf(self.makeup_gain_db / 20.0);
+        let threshold_db = if self.threshold_db.is_finite() { self.threshold_db } else { -12.0 };
+        let ratio = if self.ratio.is_finite() { self.ratio.max(1.0) } else { 4.0 };
+        let knee_db = if self.knee_db.is_finite() { self.knee_db.max(0.0) } else { 0.0 };
+        let dry_wet = if self.dry_wet.is_finite() { self.dry_wet.clamp(0.0, 1.0) } else { 1.0 };
 
         for i in 0..count {
-            let dry_l = buffer.left[i];
-            let dry_r = buffer.right[i];
+            let dry_l = if buffer.left[i].is_finite() { buffer.left[i] } else { 0.0 };
+            let dry_r = if buffer.right[i].is_finite() { buffer.right[i] } else { 0.0 };
 
             let input_level = match self.mode {
                 CompressorMode::Peak => dry_l.abs().max(dry_r.abs()),
@@ -126,19 +130,30 @@ impl AudioEffectDevice for Compressor {
 
             let level_db = 20.0 * input_level.max(1e-6).log10();
 
-            // Gain calculation
+            // Gain calculation with quadratic soft knee
             let target_gain_db = match self.mode {
                 CompressorMode::Peak | CompressorMode::RMS => {
-                    if level_db > self.threshold_db {
-                        (1.0 - 1.0 / self.ratio.max(1.0)) * (self.threshold_db - level_db)
-                    } else {
+                    let slope = 1.0 - 1.0 / ratio;
+                    let over = level_db - threshold_db;
+                    if knee_db <= 1e-4 {
+                        if over > 0.0 {
+                            -slope * over
+                        } else {
+                            0.0
+                        }
+                    } else if 2.0 * over < -knee_db {
                         0.0
+                    } else if 2.0 * over.abs() <= knee_db {
+                        let diff = over + 0.5 * knee_db;
+                        -slope * (diff * diff) / (2.0 * knee_db)
+                    } else {
+                        -slope * over
                     }
                 }
                 CompressorMode::Expand => {
                     // Downward expander / gate: attenuates if below threshold
-                    if level_db < self.threshold_db {
-                        (self.ratio.max(1.0) - 1.0) * (level_db - self.threshold_db)
+                    if level_db < threshold_db {
+                        (ratio - 1.0) * (level_db - threshold_db)
                     } else {
                         0.0
                     }
@@ -156,8 +171,8 @@ impl AudioEffectDevice for Compressor {
             let wet_l = dry_l * linear_gain;
             let wet_r = dry_r * linear_gain;
 
-            buffer.left[i] = dry_l * (1.0 - self.dry_wet) + wet_l * self.dry_wet;
-            buffer.right[i] = dry_r * (1.0 - self.dry_wet) + wet_r * self.dry_wet;
+            buffer.left[i] = dry_l * (1.0 - dry_wet) + wet_l * dry_wet;
+            buffer.right[i] = dry_r * (1.0 - dry_wet) + wet_r * dry_wet;
         }
     }
 
