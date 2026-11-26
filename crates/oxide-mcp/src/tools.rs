@@ -1882,16 +1882,7 @@ pub fn call_tool(state: &mut DawState, name: &str, args: &Value) -> ToolCallResu
             let clip_id = ((track_id * 100) + slot_id + 1) as u32;
             let clip = SessionClip::new(clip_id, name, pattern);
 
-            // Attach to SessionMatrix
-            while state.matrix.tracks.len() <= track_id {
-                let tid = state.matrix.tracks.len() as u32;
-                state.matrix.tracks.push(oxide_timeline::SessionTrack::new(tid, format!("Track {}", tid), 8));
-            }
-            let track = &mut state.matrix.tracks[track_id];
-            while track.slots.len() <= slot_id {
-                track.slots.push(oxide_timeline::SessionSlot::default());
-            }
-            track.slots[slot_id].set_clip(Some(clip));
+            state.set_session_slot_clip(track_id, slot_id, clip);
 
             let _ = state.lom_client.call("create_clip", json!({
                 "track_index": track_id,
@@ -1957,15 +1948,7 @@ pub fn call_tool(state: &mut DawState, name: &str, args: &Value) -> ToolCallResu
             let clip_id = ((track_id * 100) + slot_id + 1) as u32;
             let clip = SessionClip::new(clip_id, name, ClipPattern::Drum(drum_pat));
 
-            while state.matrix.tracks.len() <= track_id {
-                let tid = state.matrix.tracks.len() as u32;
-                state.matrix.tracks.push(oxide_timeline::SessionTrack::new(tid, format!("Track {}", tid), 8));
-            }
-            let track = &mut state.matrix.tracks[track_id];
-            while track.slots.len() <= slot_id {
-                track.slots.push(oxide_timeline::SessionSlot::default());
-            }
-            track.slots[slot_id].set_clip(Some(clip));
+            state.set_session_slot_clip(track_id, slot_id, clip);
 
             ToolCallResult::json(&json!({
                 "status": "created",
@@ -2001,15 +1984,7 @@ pub fn call_tool(state: &mut DawState, name: &str, args: &Value) -> ToolCallResu
             let clip_id = ((track_id * 100) + slot_id + 1) as u32;
             let clip = SessionClip::new(clip_id, name, pattern);
 
-            while state.matrix.tracks.len() <= track_id {
-                let tid = state.matrix.tracks.len() as u32;
-                state.matrix.tracks.push(oxide_timeline::SessionTrack::new(tid, format!("Track {}", tid), 8));
-            }
-            let track = &mut state.matrix.tracks[track_id];
-            while track.slots.len() <= slot_id {
-                track.slots.push(oxide_timeline::SessionSlot::default());
-            }
-            track.slots[slot_id].set_clip(Some(clip));
+            state.set_session_slot_clip(track_id, slot_id, clip);
 
             ToolCallResult::json(&json!({
                 "status": "created",
@@ -2546,15 +2521,7 @@ pub fn call_tool(state: &mut DawState, name: &str, args: &Value) -> ToolCallResu
             let clip_id = ((track_id * 100) + slot_id + 1) as u32;
             let clip = SessionClip::new(clip_id, clip_name, pattern);
 
-            while state.matrix.tracks.len() <= track_id {
-                let tid = state.matrix.tracks.len() as u32;
-                state.matrix.tracks.push(oxide_timeline::SessionTrack::new(tid, format!("Track {}", tid), 8));
-            }
-            let track = &mut state.matrix.tracks[track_id];
-            while track.slots.len() <= slot_id {
-                track.slots.push(oxide_timeline::SessionSlot::default());
-            }
-            track.slots[slot_id].set_clip(Some(clip));
+            state.set_session_slot_clip(track_id, slot_id, clip);
 
             let _ = state.lom_client.call("create_clip", json!({
                 "track_index": track_id,
@@ -2718,15 +2685,7 @@ pub fn call_tool(state: &mut DawState, name: &str, args: &Value) -> ToolCallResu
             let clip_id = ((track_id * 100) + slot_id + 1) as u32;
             let clip = SessionClip::new(clip_id, clip_name, pattern);
 
-            while state.matrix.tracks.len() <= track_id {
-                let tid = state.matrix.tracks.len() as u32;
-                state.matrix.tracks.push(oxide_timeline::SessionTrack::new(tid, format!("Track {}", tid), 8));
-            }
-            let track = &mut state.matrix.tracks[track_id];
-            while track.slots.len() <= slot_id {
-                track.slots.push(oxide_timeline::SessionSlot::default());
-            }
-            track.slots[slot_id].set_clip(Some(clip));
+            state.set_session_slot_clip(track_id, slot_id, clip);
 
             ToolCallResult::json(&json!({
                 "status": "generated",
@@ -2842,15 +2801,7 @@ pub fn call_tool(state: &mut DawState, name: &str, args: &Value) -> ToolCallResu
             let clip_id = ((track_id * 100) + slot_id + 1) as u32;
             let clip = SessionClip::new(clip_id, clip_name, pattern);
 
-            while state.matrix.tracks.len() <= track_id {
-                let tid = state.matrix.tracks.len() as u32;
-                state.matrix.tracks.push(oxide_timeline::SessionTrack::new(tid, format!("Track {}", tid), 8));
-            }
-            let track = &mut state.matrix.tracks[track_id];
-            while track.slots.len() <= slot_id {
-                track.slots.push(oxide_timeline::SessionSlot::default());
-            }
-            track.slots[slot_id].set_clip(Some(clip));
+            state.set_session_slot_clip(track_id, slot_id, clip);
 
             ToolCallResult::json(&json!({
                 "status": "generated",
@@ -2908,15 +2859,7 @@ pub fn call_tool(state: &mut DawState, name: &str, args: &Value) -> ToolCallResu
             let clip_id = ((track_id * 100) + slot_id + 1) as u32;
             let clip = SessionClip::new(clip_id, clip_name, ClipPattern::Drum(drum_pat));
 
-            while state.matrix.tracks.len() <= track_id {
-                let tid = state.matrix.tracks.len() as u32;
-                state.matrix.tracks.push(oxide_timeline::SessionTrack::new(tid, format!("Track {}", tid), 8));
-            }
-            let track = &mut state.matrix.tracks[track_id];
-            while track.slots.len() <= slot_id {
-                track.slots.push(oxide_timeline::SessionSlot::default());
-            }
-            track.slots[slot_id].set_clip(Some(clip));
+            state.set_session_slot_clip(track_id, slot_id, clip);
 
             ToolCallResult::json(&json!({
                 "status": "generated",
@@ -2961,15 +2904,7 @@ pub fn call_tool(state: &mut DawState, name: &str, args: &Value) -> ToolCallResu
             let clip_id = ((track_id * 100) + slot_id + 1) as u32;
             let clip = SessionClip::new(clip_id, clip_name, ClipPattern::Drum(drum_pat));
 
-            while state.matrix.tracks.len() <= track_id {
-                let tid = state.matrix.tracks.len() as u32;
-                state.matrix.tracks.push(oxide_timeline::SessionTrack::new(tid, format!("Track {}", tid), 8));
-            }
-            let track = &mut state.matrix.tracks[track_id];
-            while track.slots.len() <= slot_id {
-                track.slots.push(oxide_timeline::SessionSlot::default());
-            }
-            track.slots[slot_id].set_clip(Some(clip));
+            state.set_session_slot_clip(track_id, slot_id, clip);
 
             ToolCallResult::json(&json!({
                 "status": "generated",
@@ -3033,8 +2968,28 @@ pub fn call_tool(state: &mut DawState, name: &str, args: &Value) -> ToolCallResu
                 state.matrix.tracks.push(oxide_timeline::SessionTrack::new(tid, name, 8));
             }
 
-            // Construct 3 arrangement tracks: Synth Lead, 909 Drums, Sub Bass
-            state.timeline.tracks.clear();
+            // Ensure arrangement tracks match project tracks (>= 3) without discarding extra tracks
+            let needed = state.project.tracks.len().max(3);
+            while state.timeline.tracks.len() < needed {
+                let tid = state.timeline.tracks.len() as u32;
+                let (t_name, t_type) = state
+                    .project
+                    .tracks
+                    .get(tid as usize)
+                    .map(|p| {
+                        let kind = match p.track_type {
+                            oxide_project::TrackType::DrumRack => "DrumRack",
+                            oxide_project::TrackType::Audio => "Audio",
+                            _ => "MidiSynth",
+                        };
+                        (p.name.as_str(), kind)
+                    })
+                    .unwrap_or(("Track", "MidiSynth"));
+                state
+                    .timeline
+                    .tracks
+                    .push(oxide_timeline::ArrangementTrack::new(tid, t_name, t_type));
+            }
             let mut trk_synth = oxide_timeline::ArrangementTrack::new(0, "Lead Synth", "MidiSynth");
             let mut trk_drums = oxide_timeline::ArrangementTrack::new(1, "909 Drums", "DrumRack");
             let mut trk_bass = oxide_timeline::ArrangementTrack::new(2, "Sub Bass", "MidiSynth");
@@ -3143,9 +3098,9 @@ pub fn call_tool(state: &mut DawState, name: &str, args: &Value) -> ToolCallResu
                 trk_bass.add_clip(bass_clip);
             }
 
-            state.timeline.tracks.push(trk_synth);
-            state.timeline.tracks.push(trk_drums);
-            state.timeline.tracks.push(trk_bass);
+            state.timeline.tracks[0] = trk_synth;
+            state.timeline.tracks[1] = trk_drums;
+            state.timeline.tracks[2] = trk_bass;
 
             ToolCallResult::json(&json!({
                 "status": "built",
@@ -3776,6 +3731,7 @@ pub fn call_tool(state: &mut DawState, name: &str, args: &Value) -> ToolCallResu
             let notes_count = pattern.notes.len();
             let clip_id = ((track_id * 100) + slot_id + 1) as u32;
             slot.set_clip(Some(SessionClip::new(clip_id, format!("Transformed Clip {}", transform), ClipPattern::Midi(pattern))));
+            state.audio_clips.remove(&(track_id as u32, slot_id as u32));
 
             ToolCallResult::json(&json!({
                 "status": "transformed",
@@ -3860,16 +3816,12 @@ pub fn call_tool(state: &mut DawState, name: &str, args: &Value) -> ToolCallResu
             };
 
             let notes_count = pattern.notes.len();
-            while state.matrix.tracks.len() <= track_id {
-                let tid = state.matrix.tracks.len() as u32;
-                state.matrix.tracks.push(oxide_timeline::SessionTrack::new(tid, format!("Track {}", tid), 8));
-            }
-            let track = &mut state.matrix.tracks[track_id];
-            while track.slots.len() <= slot_id {
-                track.slots.push(oxide_timeline::SessionSlot::default());
-            }
             let clip_id = ((track_id * 100) + slot_id + 1) as u32;
-            track.slots[slot_id].set_clip(Some(SessionClip::new(clip_id, format!("Generated Clip {}", generator), ClipPattern::Midi(pattern))));
+            state.set_session_slot_clip(
+                track_id,
+                slot_id,
+                SessionClip::new(clip_id, format!("Generated Clip {}", generator), ClipPattern::Midi(pattern)),
+            );
 
             ToolCallResult::json(&json!({
                 "status": "generated",
@@ -4493,7 +4445,14 @@ pub fn call_tool(state: &mut DawState, name: &str, args: &Value) -> ToolCallResu
             ToolCallResult::json(&res)
         }
         "live12_load_browser_item" => {
-            let track_index = args.get("track_index").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
+            let track_index = match validate_track_id(
+                args.get("track_index")
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(0) as usize,
+            ) {
+                Ok(v) => v as u32,
+                Err(e) => return e,
+            };
             let uri = args.get("uri").and_then(|v| v.as_str()).unwrap_or("");
             let lom_client = state.lom_client.clone();
             let res = lom_client.execute_with_fallback(
@@ -4591,16 +4550,12 @@ pub fn call_tool(state: &mut DawState, name: &str, args: &Value) -> ToolCallResu
                 "create_clip",
                 json!({ "track_index": track_index, "slot_index": slot_index, "length_beats": length_beats }),
                 || {
-                    while state.matrix.tracks.len() <= track_index as usize {
-                        let tid = state.matrix.tracks.len() as u32;
-                        state.matrix.tracks.push(oxide_timeline::SessionTrack::new(tid, format!("Track {}", tid), 8));
-                    }
-                    let track = &mut state.matrix.tracks[track_index as usize];
-                    while track.slots.len() <= slot_index as usize {
-                        track.slots.push(oxide_timeline::SessionSlot::default());
-                    }
                     let clip_id = ((track_index as usize * 100) + slot_index as usize + 1) as u32;
-                    track.slots[slot_index as usize].set_clip(Some(SessionClip::new(clip_id, "Live12 Clip", ClipPattern::Midi(MidiPattern::new(length_beats)))));
+                    state.set_session_slot_clip(
+                        track_index as usize,
+                        slot_index as usize,
+                        SessionClip::new(clip_id, "Live12 Clip", ClipPattern::Midi(MidiPattern::new(length_beats))),
+                    );
                     json!({ "created": true, "track_index": track_index, "slot_index": slot_index, "length_beats": length_beats })
                 },
             );
@@ -4650,6 +4605,7 @@ pub fn call_tool(state: &mut DawState, name: &str, args: &Value) -> ToolCallResu
                             "Live12 Clip",
                             ClipPattern::Midi(MidiPattern::new(4.0)),
                         )));
+                        state.audio_clips.remove(&(track_index as u32, slot_index as u32));
                     }
                     if let Some(ref mut clip) = trk.slots[slot_index].clip {
                         if let ClipPattern::Midi(ref mut pat) = clip.pattern {
@@ -5102,5 +5058,41 @@ mod tests {
             "track_id": 0, "simpler_device_index": 1
         }));
         assert!(!sliced.is_error, "explicit simpler_device_index 1 should slice: {:?}", sliced);
+    }
+
+    #[test]
+    fn test_mgw2_build_song_arrangement_preserves_extra_tracks() {
+        let mut state = DawState::new();
+        assert!(!call_tool(&mut state, "track_create_synth", &json!({"name": "Extra Synth"})).is_error);
+        assert!(!call_tool(&mut state, "track_create_synth", &json!({"name": "Extra Pad"})).is_error);
+        assert_eq!(state.project.tracks.len(), 4);
+
+        let res = call_tool(&mut state, "build_song_arrangement", &json!({
+            "genre": "techno", "key": "Am", "bpm": 130.0, "total_bars": 8
+        }));
+        assert!(!res.is_error, "{:?}", res);
+        assert_eq!(
+            state.timeline.tracks.len(),
+            state.project.tracks.len(),
+            "build_song_arrangement must preserve existing tracks beyond 3"
+        );
+    }
+
+    #[test]
+    fn test_mgw3_live12_load_browser_item_rejects_oob_track_index() {
+        let mut state = DawState::new();
+        state.lom_client = crate::bridge::TcpLomClient::new("127.0.0.1", 1);
+        let res = call_tool(&mut state, "live12_load_browser_item", &json!({
+            "track_index": 999999,
+            "uri": "Roar"
+        }));
+        assert!(res.is_error, "oob track_index must return error, got {:?}", res);
+        assert!(!state.device_chains.contains_key(&999999));
+
+        let wrap_res = call_tool(&mut state, "live12_load_browser_item", &json!({
+            "track_index": (1u64 << 32),
+            "uri": "Roar"
+        }));
+        assert!(wrap_res.is_error, "u32-wrapping track_index must error, got {:?}", wrap_res);
     }
 }

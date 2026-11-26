@@ -8,6 +8,7 @@ pub struct NoteLength {
     pub length_beats: f64, // Fixed note length in beats
     pub gate_percent: f32, // 0.1 .. 2.0
     active_notes: Vec<(u8, u8, f64)>, // (channel, pitch, note_on_beat)
+    last_beat: f64,
 }
 
 impl NoteLength {
@@ -18,6 +19,7 @@ impl NoteLength {
             length_beats: 0.25, // 1/16th note
             gate_percent: 1.0,
             active_notes: Vec::with_capacity(16),
+            last_beat: 0.0,
         }
     }
 }
@@ -47,6 +49,7 @@ impl Device for NoteLength {
 
     fn reset(&mut self) {
         self.active_notes.clear();
+        self.last_beat = 0.0;
     }
 }
 
@@ -60,6 +63,15 @@ impl MidiEffectDevice for NoteLength {
         if !self.enabled {
             events_out.extend_from_slice(events_in);
             return;
+        }
+
+        if time.beat.is_finite() && time.beat < self.last_beat {
+            for (channel, note, _) in self.active_notes.drain(..) {
+                events_out.push(MidiEvent::NoteOff { channel, note });
+            }
+        }
+        if time.beat.is_finite() {
+            self.last_beat = time.beat;
         }
 
         let target_len = self.length_beats * (self.gate_percent as f64);

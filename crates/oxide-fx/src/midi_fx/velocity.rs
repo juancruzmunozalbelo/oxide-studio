@@ -26,6 +26,9 @@ impl Velocity {
     }
 
     pub fn remap(&self, vel: u8) -> u8 {
+        if vel == 0 {
+            return 0;
+        }
         let norm = (vel as f32) / 127.0;
 
         // Apply drive curve

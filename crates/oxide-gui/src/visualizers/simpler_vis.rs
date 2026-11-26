@@ -56,10 +56,10 @@ impl<'a> Widget for SimplerVisualizerWidget<'a> {
     fn ui(self, ui: &mut Ui) -> Response {
         let (rect, mut response) = ui.allocate_exact_size(self.size, Sense::click_and_drag());
 
-        if response.clicked() {
+        if response.clicked() && rect.width() > 1.0 && rect.height() > 1.0 {
             if let Some(pos) = response.interact_pointer_pos() {
                 // Clicking waveform selects closest slice or adds slice marker
-                let norm_x = ((pos.x - rect.left()) / rect.width()).clamp(0.0, 1.0);
+                let norm_x = ((pos.x - rect.left()) / rect.width().max(1.0)).clamp(0.0, 1.0);
                 let mut closest_idx = 0;
                 let mut min_dist = 1.0f32;
                 for (idx, &s) in self.state.slice_markers.iter().enumerate() {

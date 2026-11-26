@@ -56,7 +56,7 @@ impl BiquadCoeffs {
     /// Calculate coefficients using RBJ Audio EQ Cookbook equations.
     pub fn calculate(band_type: EqBandType, freq_hz: f32, gain_db: f32, q: f32, sample_rate: f32) -> Self {
         let sr = if sample_rate <= 0.0 { 44100.0 } else { sample_rate };
-        let f0 = freq_hz.clamp(10.0, sr * 0.49);
+        let f0 = freq_hz.clamp(10.0, (sr * 0.49).max(10.0));
         let q_eff = q.clamp(0.05, 30.0);
         let w0 = 2.0 * PI * f0 / sr;
         let cos_w0 = w0.cos();
@@ -142,7 +142,7 @@ impl BiquadCoeffs {
     /// Evaluates the complex magnitude response |H(e^{j*w})| at frequency f_hz.
     pub fn magnitude_response(&self, freq_hz: f32, sample_rate: f32) -> f32 {
         let sr = if sample_rate <= 0.0 { 44100.0 } else { sample_rate };
-        let w = 2.0 * PI * (freq_hz.clamp(1.0, sr * 0.49)) / sr;
+        let w = 2.0 * PI * (freq_hz.clamp(1.0, (sr * 0.49).max(1.0))) / sr;
         let cos_w = w.cos();
         let sin_w = w.sin();
         let cos_2w = (2.0 * w).cos();

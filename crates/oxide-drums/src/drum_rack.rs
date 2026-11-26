@@ -14,6 +14,7 @@ pub const NUM_DRUM_PADS: usize = 16;
 pub const TOTAL_DRUM_PADS: usize = 128;
 pub const PADS_PER_BANK: usize = 16;
 pub const NUM_BANKS: usize = 8;
+pub const RETURN_A_DELAY_BUF_SIZE: usize = 8192;
 
 #[derive(Clone)]
 pub enum DrumPadSource {
@@ -176,8 +177,8 @@ pub struct DrumRack {
     pub return_a_level: f32,
     pub return_b_level: f32,
     // Return chains state
-    pub return_a_buffer_l: [f32; 2048],
-    pub return_a_buffer_r: [f32; 2048],
+    pub return_a_buffer_l: Box<[f32]>,
+    pub return_a_buffer_r: Box<[f32]>,
     pub return_a_pos: usize,
     pub return_a_filter_l: f32,
     pub return_a_filter_r: f32,
@@ -296,8 +297,8 @@ impl DrumRack {
             sample_rate: sr,
             return_a_level: 1.0,
             return_b_level: 1.0,
-            return_a_buffer_l: [0.0; 2048],
-            return_a_buffer_r: [0.0; 2048],
+            return_a_buffer_l: vec![0.0; RETURN_A_DELAY_BUF_SIZE].into_boxed_slice(),
+            return_a_buffer_r: vec![0.0; RETURN_A_DELAY_BUF_SIZE].into_boxed_slice(),
             return_a_pos: 0,
             return_a_filter_l: 0.0,
             return_a_filter_r: 0.0,
@@ -320,11 +321,18 @@ impl DrumRack {
             return;
         }
         self.sync_visible_pads_to_bank();
-        // Save current visible pads back to all_pads
+        // Save current visible pads back to all_pads without clobbering live Simpler voice state
         let start = self.active_bank * PADS_PER_BANK;
         for i in 0..PADS_PER_BANK {
             if start + i < self.all_pads.len() {
-                self.all_pads[start + i] = self.pads[i].clone();
+                if matches!(
+                    (&self.pads[i].source, &self.all_pads[start + i].source),
+                    (DrumPadSource::Simpler(_), DrumPadSource::Simpler(_))
+                ) {
+                    self.all_pads[start + i].name = self.pads[i].name.clone();
+                } else {
+                    self.all_pads[start + i] = self.pads[i].clone();
+                }
             }
         }
 
@@ -590,12 +598,9 @@ impl DrumRack {
             }
         }
 
-        // 2. If pad source is Simpler, trigger simpler directly!
+        // 2. If pad source is Simpler, trigger live Simpler in all_pads only (pads[i] is never rendered)
         if let DrumPadSource::Simpler(ref mut s) = self.all_pads[global_idx].source {
             s.trigger_note_on(pad_midi_note, velocity);
-            if let DrumPadSource::Simpler(ref mut vis_s) = self.pads[pad_idx as usize].source {
-                vis_s.trigger_note_on(pad_midi_note, velocity);
-            }
             return;
         }
 
@@ -729,7 +734,19 @@ impl DrumRack {
 
         self.sync_visible_pads_to_bank();
 
-        let n_frames = block_len.min(oxide_core::MAX_BUFFER_SIZE);
+        let mut offset = 0;
+        while offset < block_len {
+            let n_frames = (block_len - offset).min(oxide_core::MAX_BUFFER_SIZE);
+            self.process_sub_block(
+                &mut out_left[offset..offset + n_frames],
+                &mut out_right[offset..offset + n_frames],
+            );
+            offset += n_frames;
+        }
+    }
+
+    fn process_sub_block(&mut self, out_left: &mut [f32], out_right: &mut [f32]) {
+        let n_frames = out_left.len().min(out_right.len()).min(oxide_core::MAX_BUFFER_SIZE);
         self.send_a_l[..n_frames].fill(0.0);
         self.send_a_r[..n_frames].fill(0.0);
         self.send_b_l[..n_frames].fill(0.0);
@@ -743,6 +760,8 @@ impl DrumRack {
         let send_b_l = &mut self.send_b_l;
         let send_b_r = &mut self.send_b_r;
 
+        let any_solo = all_pads.iter().any(|p| p.solo);
+
         for voice in voices.iter_mut() {
             if !voice.active {
                 continue;
@@ -753,6 +772,7 @@ impl DrumRack {
                 continue;
             }
             let pad = &all_pads[pad_idx];
+            let pad_audible = !pad.mute && (!any_solo || pad.solo);
 
             let pan_norm = pad.pan.clamp(-1.0, 1.0);
             let theta = (pan_norm + 1.0) * 0.25 * PI;
@@ -828,6 +848,10 @@ impl DrumRack {
                     break;
                 }
 
+                if !pad_audible {
+                    continue;
+                }
+
                 let voice_sig = sample * voice.envelope_val * voice.velocity;
                 let dry_sig_l = voice_sig * pad.volume * pan_l;
                 let dry_sig_r = voice_sig * pad.volume * pan_r;
@@ -847,7 +871,6 @@ impl DrumRack {
         }
 
         // Render per-pad Simpler devices (independent polyphonic synthesis per pad)
-        let any_solo = all_pads.iter().any(|p| p.solo);
         for pad in all_pads.iter_mut() {
             if pad.mute || (any_solo && !pad.solo) {
                 continue;
@@ -882,13 +905,14 @@ impl DrumRack {
             }
         }
 
-        // Return chains processing
-        let delay_len_l = 882;
-        let delay_len_r = 1146;
+        // Return chains processing (sample-rate scaled 20 ms / 26 ms stereo delay)
+        let buf_len = self.return_a_buffer_l.len();
+        let delay_len_l = ((0.020 * sr_local).round() as usize).clamp(1, buf_len - 1);
+        let delay_len_r = ((0.026 * sr_local).round() as usize).clamp(1, buf_len - 1);
         for i in 0..n_frames {
             // Return Chain A: Stereo space delay with damping
-            let read_l = (self.return_a_pos + 2048 - delay_len_l) % 2048;
-            let read_r = (self.return_a_pos + 2048 - delay_len_r) % 2048;
+            let read_l = (self.return_a_pos + buf_len - delay_len_l) % buf_len;
+            let read_r = (self.return_a_pos + buf_len - delay_len_r) % buf_len;
             let del_l = self.return_a_buffer_l[read_l];
             let del_r = self.return_a_buffer_r[read_r];
 
@@ -897,7 +921,7 @@ impl DrumRack {
 
             self.return_a_buffer_l[self.return_a_pos] = send_a_l[i] + self.return_a_filter_r * 0.4;
             self.return_a_buffer_r[self.return_a_pos] = send_a_r[i] + self.return_a_filter_l * 0.4;
-            self.return_a_pos = (self.return_a_pos + 1) % 2048;
+            self.return_a_pos = (self.return_a_pos + 1) % buf_len;
 
             let ret_a_l = self.return_a_filter_l * self.return_a_level;
             let ret_a_r = self.return_a_filter_r * self.return_a_level;
@@ -1672,5 +1696,90 @@ mod tests {
         };
         rack.sync_visible_pads_to_bank();
         assert!(matches!(rack.all_pads[0].source, DrumPadSource::Sample { .. }));
+    }
+
+    #[test]
+    fn test_dsp6_active_voice_mute_solo_and_simpler_bank_switch() {
+        // (a) Active voice must go silent immediately when pad is muted or another pad is soloed
+        let mut rack = DrumRack::new(44100.0);
+        rack.trigger_pad(10, 127); // Crash (0.65s decay)
+        let mut l = [0.0f32; 64];
+        let mut r = [0.0f32; 64];
+        rack.process_block(&mut l, &mut r);
+        assert!(l.iter().map(|s| s * s).sum::<f32>() > 1e-4);
+
+        rack.pads[10].mute = true;
+        let mut lm = [0.0f32; 256];
+        let mut rm = [0.0f32; 256];
+        rack.process_block(&mut lm, &mut rm);
+        assert_eq!(
+            lm.iter().map(|s| s * s).sum::<f32>(),
+            0.0,
+            "Muting a pad must silence its already-active voice"
+        );
+
+        // (b) Finished OneShot Simpler pad must NOT resurrect on select_bank
+        let mut rack2 = DrumRack::new(44100.0);
+        let mut simpler = crate::simpler::SimplerDevice::new(44100.0);
+        simpler.mode = crate::simpler::SimplerMode::OneShot;
+        simpler.load_sample(vec![0.8f32; 256], 44100, 1);
+        rack2.load_simpler_pad(0, simpler).unwrap();
+
+        rack2.trigger_pad(0, 127);
+        let mut drain_l = vec![0.0f32; 2048];
+        let mut drain_r = vec![0.0f32; 2048];
+        rack2.process_block(&mut drain_l, &mut drain_r);
+
+        // Switch bank -> must not copy dormant pads[0] active Simpler voice over finished all_pads[0]
+        rack2.select_bank(1);
+        let mut after_l = [0.0f32; 256];
+        let mut after_r = [0.0f32; 256];
+        rack2.process_block(&mut after_l, &mut after_r);
+        let after_energy: f32 = after_l.iter().map(|s| s * s).sum();
+        assert_eq!(
+            after_energy, 0.0,
+            "select_bank resurrected a finished Simpler pad voice (energy={})",
+            after_energy
+        );
+    }
+
+    #[test]
+    fn test_dsp13_process_block_chunks_over_2048_and_scales_return_delay() {
+        let mut rack = DrumRack::new(44100.0);
+        rack.trigger_pad(0, 127); // Kick (0.30s = ~13230 frames)
+        let mut left = vec![0.0f32; 4096];
+        let mut right = vec![0.0f32; 4096];
+        rack.process_block(&mut left, &mut right);
+        let tail_energy: f32 = left[2048..4096].iter().map(|s| s * s).sum();
+        assert!(
+            tail_energy > 1e-3,
+            "process_block must render frames past 2048 without silent truncation"
+        );
+
+        // Return Chain A delay at 96 kHz must be ~20 ms (~1920 frames), NOT hardcoded 882 frames (9.2 ms)
+        let mut rack96 = DrumRack::new(96000.0);
+        rack96.pads[0].volume = 0.0;
+        rack96.pads[0].send_a = 1.0;
+        rack96.pads[0].pan = -1.0; // Left only
+        let mut imp = vec![0.0f32; 32];
+        imp[0] = 1.0;
+        rack96.pads[0].source = DrumPadSource::Sample {
+            sample_data: Arc::from(imp.into_boxed_slice()),
+            channels: 1,
+            sample_rate: 96000,
+        };
+        rack96.trigger_pad(0, 127);
+
+        let mut l96 = vec![0.0f32; 2400];
+        let mut r96 = vec![0.0f32; 2400];
+        rack96.process_block(&mut l96, &mut r96);
+        let early_energy: f32 = l96[880..950].iter().map(|s| s * s).sum();
+        let scaled_energy: f32 = l96[1900..2100].iter().map(|s| s * s).sum();
+        assert!(
+            early_energy < 1e-8 && scaled_energy > 1e-4,
+            "Return A delay at 96 kHz should arrive around ~1920 frames, early={} scaled={}",
+            early_energy,
+            scaled_energy
+        );
     }
 }

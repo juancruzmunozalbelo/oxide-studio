@@ -368,17 +368,19 @@ impl ChordDevice {
             match *ev {
                 MidiEvent::NoteOn { channel, note, velocity } => {
                     events_out.push(*ev);
-                    if velocity > 0 {
-                        for i in 0..self.num_shifts.min(6) {
-                            let shift = self.shifts[i];
-                            let shifted_note = (note as i16 + shift as i16).clamp(0, 127) as u8;
-                            let shifted_vel = ((velocity as f32) * self.velocity_scales[i]).clamp(1.0, 127.0) as u8;
-                            events_out.push(MidiEvent::NoteOn {
-                                channel,
-                                note: shifted_note,
-                                velocity: shifted_vel,
-                            });
-                        }
+                    for i in 0..self.num_shifts.min(6) {
+                        let shift = self.shifts[i];
+                        let shifted_note = (note as i16 + shift as i16).clamp(0, 127) as u8;
+                        let shifted_vel = if velocity > 0 {
+                            ((velocity as f32) * self.velocity_scales[i]).clamp(1.0, 127.0) as u8
+                        } else {
+                            0
+                        };
+                        events_out.push(MidiEvent::NoteOn {
+                            channel,
+                            note: shifted_note,
+                            velocity: shifted_vel,
+                        });
                     }
                 }
                 MidiEvent::NoteOff { channel, note } => {
@@ -563,6 +565,19 @@ impl RandomDevice {
         (self.rng_state as f32) / 4294967296.0
     }
 
+    fn take_mapped_note(&mut self, channel: u8, note: u8) -> Option<u8> {
+        for i in 0..self.history_len {
+            if self.note_history[i].0 == note && self.note_channels[i] == channel {
+                let mapped = self.note_history[i].1;
+                self.note_history[i] = self.note_history[self.history_len - 1];
+                self.note_channels[i] = self.note_channels[self.history_len - 1];
+                self.history_len -= 1;
+                return Some(mapped);
+            }
+        }
+        None
+    }
+
     pub fn process_events(&mut self, events_in: &[MidiEvent], events_out: &mut Vec<MidiEvent>) {
         if !self.enabled {
             events_out.extend_from_slice(events_in);
@@ -571,7 +586,10 @@ impl RandomDevice {
         for ev in events_in {
             match *ev {
                 MidiEvent::NoteOn { channel, note, velocity } => {
-                    if velocity > 0 && self.next_float() < self.chance {
+                    if velocity == 0 {
+                        let mapped = self.take_mapped_note(channel, note).unwrap_or(note);
+                        events_out.push(MidiEvent::NoteOn { channel, note: mapped, velocity: 0 });
+                    } else if self.next_float() < self.chance {
                         let choices = self.choices.clamp(1, 24) as f32;
                         let offset = (self.next_float() * choices).floor() as i16 + 1;
                         let signed_offset = match self.sign {
@@ -593,21 +611,8 @@ impl RandomDevice {
                     }
                 }
                 MidiEvent::NoteOff { channel, note } => {
-                    let mut found = false;
-                    for i in 0..self.history_len {
-                        if self.note_history[i].0 == note && self.note_channels[i] == channel {
-                            let mapped = self.note_history[i].1;
-                            events_out.push(MidiEvent::NoteOff { channel, note: mapped });
-                            self.note_history[i] = self.note_history[self.history_len - 1];
-                            self.note_channels[i] = self.note_channels[self.history_len - 1];
-                            self.history_len -= 1;
-                            found = true;
-                            break;
-                        }
-                    }
-                    if !found {
-                        events_out.push(*ev);
-                    }
+                    let mapped = self.take_mapped_note(channel, note).unwrap_or(note);
+                    events_out.push(MidiEvent::NoteOff { channel, note: mapped });
                 }
                 _ => events_out.push(*ev),
             }
@@ -874,7 +879,7 @@ impl MpeControlDevice {
             match *ev {
                 MidiEvent::PitchBend { channel, value } => {
                     let sign = if value >= 0 { 1.0 } else { -1.0 };
-                    let norm = value.abs() as f32 / 8192.0;
+                    let norm = (value as f32).abs() / 8192.0;
                     let shaped = Self::shape_curve(norm, self.curve_skew);
                     let new_val = (shaped * 8192.0 * sign).clamp(-8192.0, 8191.0) as i16;
                     events_out.push(MidiEvent::PitchBend { channel, value: new_val });

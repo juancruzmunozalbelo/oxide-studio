@@ -204,8 +204,9 @@ impl AudioEffectDevice for AutoFilter {
             let mod_octaves_l = self.env_amount * self.env_follower + self.lfo_amount * lfo_val_l;
             let mod_octaves_r = self.env_amount * self.env_follower + self.lfo_amount * lfo_val_r;
 
-            let fc_l = (self.cutoff_hz * 2.0_f32.powf(mod_octaves_l)).clamp(10.0, self.sample_rate * 0.48);
-            let fc_r = (self.cutoff_hz * 2.0_f32.powf(mod_octaves_r)).clamp(10.0, self.sample_rate * 0.48);
+            let max_fc = (self.sample_rate * 0.48).max(10.0);
+            let fc_l = (self.cutoff_hz * 2.0_f32.powf(mod_octaves_l)).clamp(10.0, max_fc);
+            let fc_r = (self.cutoff_hz * 2.0_f32.powf(mod_octaves_r)).clamp(10.0, max_fc);
 
             let g_l = (PI * fc_l / self.sample_rate).tan();
             let g_r = (PI * fc_r / self.sample_rate).tan();

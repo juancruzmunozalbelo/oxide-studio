@@ -2522,8 +2522,9 @@ impl DAWProject {
                         .or_else(|| p.get_attr_or_text("Value"))
                 })
                 .and_then(|v| v.parse::<f32>().ok())
+                .filter(|p| p.is_finite())
             {
-                master_track.pan = pan;
+                master_track.pan = pan.clamp(-1.0, 1.0);
             }
         }
 
@@ -2668,8 +2669,9 @@ impl DAWProject {
                             .or_else(|| p.get_attr_or_text("Value"))
                     })
                     .and_then(|v| v.parse::<f32>().ok())
+                    .filter(|p| p.is_finite())
                 {
-                    mixer.pan = pan;
+                    mixer.pan = pan.clamp(-1.0, 1.0);
                 }
                 let speaker_active = mixer_node
                     .find_child("Speaker")
@@ -3672,5 +3674,26 @@ mod tests {
         let mut zero_sr = wav_data_first.clone();
         zero_sr[36..40].copy_from_slice(&0u32.to_le_bytes());
         assert!(decode_wav_bytes(&zero_sr, 0.0).is_err(), "sample_rate=0 must return Err");
+    }
+
+    #[test]
+    fn test_als_import_sanitizes_non_finite_pan() {
+        let xml = r#"<?xml version="1.0" encoding="UTF-8"?>
+<Ableton MajorVersion="5" MinorVersion="12.0">
+  <LiveSet>
+    <MainTrack Id="0">
+      <DeviceChain><Mixer><Tempo><Manual Value="120.0"/></Tempo><Pan><Manual Value="NaN"/></Pan></Mixer></DeviceChain>
+    </MainTrack>
+    <Tracks>
+      <MidiTrack Id="1">
+        <Name><EffectiveName Value="T"/></Name>
+        <DeviceChain><Mixer><Pan><Manual Value="inf"/></Pan></Mixer></DeviceChain>
+      </MidiTrack>
+    </Tracks>
+  </LiveSet>
+</Ableton>"#;
+        let proj = DAWProject::from_als_xml(xml).unwrap();
+        assert!(proj.master_track.pan.is_finite());
+        assert!(proj.tracks[0].mixer.pan.is_finite());
     }
 }

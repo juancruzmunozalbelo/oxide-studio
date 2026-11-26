@@ -931,7 +931,7 @@ impl OxideStudioApp {
             self.timeline.tracks.clear();
             self.track_device_chains.clear();
 
-            for (idx, trk) in proj.tracks.iter().enumerate() {
+            for trk in &proj.tracks {
                 if trk.track_type == TrackType::Return {
                     continue;
                 }
@@ -992,10 +992,11 @@ impl OxideStudioApp {
                 self.timeline.tracks.push(arr_trk);
 
                 let is_drum = trk.track_type == TrackType::DrumRack;
-                let chain = DeviceChainViewState::default_for_track(idx, is_drum);
+                let compacted_idx = self.track_device_chains.len();
+                let chain = DeviceChainViewState::default_for_track(compacted_idx, is_drum);
                 self.track_device_chains.push(chain);
 
-                if idx == 0 {
+                if compacted_idx == 0 {
                     if let InstrumentConfig::BuiltinSubtractiveSynth(ref patch) = trk.instrument {
                         self.synth_state.cutoff_hz = patch.filter_frequency.clamp(20.0, 20000.0);
                         self.synth_state.resonance = (patch.filter_resonance * 5.0).clamp(0.0, 5.0);
@@ -1029,6 +1030,10 @@ impl OxideStudioApp {
             if !self.track_device_chains.is_empty() {
                 self.selected_track = self.selected_track.min(self.track_device_chains.len() - 1);
                 self.device_chain = self.track_device_chains[self.selected_track].clone();
+            } else {
+                self.selected_track = 0;
+                self.device_chain = DeviceChainViewState::default();
+                self.device_chain.devices.clear();
             }
         }
 
@@ -1316,6 +1321,7 @@ impl OxideStudioApp {
                         crossfader_assign: CrossfaderAssign::Off,
                     });
                     self.track_device_chains.push(DeviceChainViewState::default_for_track(track_id, false));
+                    self.timeline.tracks.push(ArrangementTrack::new((track_id + 1) as u32, &name, "Audio"));
                     self.status_message = format!("Inserted {}", name);
                 }
                 crate::shortcuts::StudioShortcutAction::NewMidiTrack => {
@@ -1336,6 +1342,7 @@ impl OxideStudioApp {
                         crossfader_assign: CrossfaderAssign::Off,
                     });
                     self.track_device_chains.push(DeviceChainViewState::default_for_track(track_id, false));
+                    self.timeline.tracks.push(ArrangementTrack::new((track_id + 1) as u32, &name, "MidiSynth"));
                     self.status_message = format!("Inserted {}", name);
                 }
                 crate::shortcuts::StudioShortcutAction::NewReturnTrack => {
@@ -1379,10 +1386,13 @@ impl OxideStudioApp {
                         dup_track.name = format!("{} (Copy)", dup_track.name);
                         let mut dup_gui = orig_gui;
                         dup_gui.name = dup_track.name.clone();
+                        let dup_tl_name = dup_track.name.clone();
                         self.matrix.tracks.push(dup_track);
                         self.tracks_gui.push(dup_gui);
                         let dup_chain = self.track_device_chains.get(sel_track).cloned().unwrap_or_else(|| DeviceChainViewState::default_for_track(new_id, false));
                         self.track_device_chains.push(dup_chain);
+                        let dup_tl_type = self.timeline.tracks.get(sel_track).map(|t| t.track_type.clone()).unwrap_or_else(|| "MidiSynth".to_string());
+                        self.timeline.tracks.push(ArrangementTrack::new((new_id + 1) as u32, &dup_tl_name, &dup_tl_type));
                         self.status_message = format!("Duplicated Track {}", sel_track + 1);
                     }
                 }
@@ -2630,5 +2640,42 @@ mod tests {
         let hh_item = BrowserItem::new("drum_909_hihat", "909 Closed Hat", BrowserCategory::Drums, &["Hat"], "CH", [0.5; 8]);
         app.handle_browser_load(&hh_item);
         assert!(app.status_message.contains("(Pad 9)")); // index 8 -> Pad 9
+    }
+
+    #[test]
+    fn test_mgw6_mgw14_track_shortcut_timeline_sync_and_als_return_tracks() {
+        let mut app = OxideStudioApp::new_mock(44100.0);
+        let ctx = egui::Context::default();
+        let screen_rect = egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(1440.0, 900.0));
+        let budget = crate::layout::ViewportBudget::compute(screen_rect, true, false);
+
+        let mut raw = egui::RawInput {
+            screen_rect: Some(screen_rect),
+            ..Default::default()
+        };
+        raw.events.push(egui::Event::Key {
+            key: egui::Key::T,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers: egui::Modifiers { command: true, ..Default::default() },
+        });
+        let _ = ctx.run(raw, |ctx| {
+            app.render_frame_with_budget(ctx, &budget);
+        });
+        assert_eq!(app.matrix.tracks.len(), app.timeline.tracks.len());
+
+        // MGW-14: ALS with Return tracks only must not leave selected_track / device_chain stale
+        let als_path = std::env::temp_dir().join("mgw14_return_only.als");
+        let mut proj = oxide_project::DAWProject::new("ReturnOnly");
+        proj.tracks.push(oxide_project::TrackDefinition::new_return(0, "Only Return"));
+        proj.save_als(&als_path).unwrap();
+
+        app.selected_track = 2;
+        app.import_als_project(&als_path).unwrap();
+        let _ = std::fs::remove_file(&als_path);
+        assert_eq!(app.selected_track, 0);
+        assert!(app.track_device_chains.is_empty());
+        assert_eq!(app.device_chain.devices.len(), 0);
     }
 }

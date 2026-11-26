@@ -23,8 +23,8 @@ pub struct DemoArrangementRenderer {
 
 impl DemoArrangementRenderer {
     pub fn new(sample_rate: f32, bpm: f64) -> Self {
-        let sr = if sample_rate <= 0.0 { 44100.0 } else { sample_rate };
-        let b = if bpm <= 0.0 { 120.0 } else { bpm };
+        let sr = if sample_rate.is_finite() && sample_rate > 0.0 { sample_rate } else { 44100.0 };
+        let b = if bpm.is_finite() && bpm > 0.0 { bpm } else { 120.0 };
         Self {
             sample_rate: sr,
             bpm: b,
@@ -199,7 +199,7 @@ fn compute_project_duration_seconds(project: &DAWProject, bpm: f64) -> f64 {
     for track in &project.tracks {
         for clip in &track.arrangement_clips {
             let end = clip.timeline_end_beat();
-            if end > max_beat {
+            if end.is_finite() && end > max_beat {
                 max_beat = end;
             }
         }
@@ -207,7 +207,11 @@ fn compute_project_duration_seconds(project: &DAWProject, bpm: f64) -> f64 {
 
     if max_beat > 0.0 {
         (max_beat * 60.0 / bpm).clamp(4.0, 3600.0)
-    } else if project.transport.loop_enabled && project.transport.loop_end_beat > 0.0 {
+    } else if project.transport.loop_enabled
+        && project.transport.loop_end_beat.is_finite()
+        && project.transport.loop_start_beat.is_finite()
+        && project.transport.loop_end_beat > 0.0
+    {
         ((project.transport.loop_end_beat - project.transport.loop_start_beat) * 60.0 / bpm)
             .clamp(4.0, 3600.0)
     } else {
@@ -221,10 +225,10 @@ pub fn render_project_to_wav(
     project: &DAWProject,
     out_path: impl AsRef<Path>,
 ) -> Result<Vec<f32>, BounceError> {
-    let bpm = if project.transport.bpm <= 0.0 {
-        120.0
-    } else {
+    let bpm = if project.transport.bpm.is_finite() && project.transport.bpm > 0.0 {
         project.transport.bpm
+    } else {
+        120.0
     };
 
     let duration_seconds = compute_project_duration_seconds(project, bpm);
@@ -240,12 +244,16 @@ pub fn render_project_window_to_wav(
     bit_depth: u16,
 ) -> Result<Vec<f32>, BounceError> {
     let sample_rate = 44100.0f32;
-    let bpm = if project.transport.bpm <= 0.0 {
-        120.0
-    } else {
+    let bpm = if project.transport.bpm.is_finite() && project.transport.bpm > 0.0 {
         project.transport.bpm
+    } else {
+        120.0
     };
-    let duration_seconds = duration_seconds.clamp(0.5, 3600.0);
+    let duration_seconds = if duration_seconds.is_finite() {
+        duration_seconds.clamp(0.5, 3600.0)
+    } else {
+        4.0
+    };
     let total_frames = (duration_seconds * sample_rate as f64).ceil() as usize;
 
     let (master_l, master_r) = if project.tracks.is_empty() {
@@ -377,5 +385,18 @@ mod tests {
         long_proj.tracks.push(trk);
         let dur = compute_project_duration_seconds(&long_proj, 120.0);
         assert!((dur - 300.0).abs() < 1e-6, "Expected 300.0s, got {}", dur);
+    }
+
+    #[test]
+    fn test_non_finite_bpm_and_duration_safe_defaults() {
+        let mut project = DAWProject::new("NaN Transport");
+        project.transport.bpm = f64::NAN;
+        let samples = render_project_window_to_wav(&project, "", 0.0, f64::NAN, 16).unwrap();
+        assert!(!samples.is_empty(), "NaN duration/bpm must fall back safely rather than returning 0 frames");
+        assert!(samples.iter().all(|s| s.is_finite()));
+
+        let demo = DemoArrangementRenderer::new(f32::NAN, f64::NAN);
+        assert!(demo.sample_rate.is_finite() && demo.sample_rate > 0.0);
+        assert!(demo.bpm.is_finite() && demo.bpm > 0.0);
     }
 }

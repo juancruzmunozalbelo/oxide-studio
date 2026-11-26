@@ -75,10 +75,10 @@ impl<'a> ZdfCurveWidget<'a> {
         let (rect, mut response) = ui.allocate_exact_size(self.size, Sense::drag());
 
         // Handle interactive drag on cutoff/resonance
-        if response.dragged() {
+        if response.dragged() && rect.width() > 1.0 && rect.height() > 1.0 {
             if let Some(pos) = response.interact_pointer_pos() {
-                let norm_x = ((pos.x - rect.left()) / rect.width()).clamp(0.0, 1.0);
-                let norm_y = ((rect.bottom() - pos.y) / rect.height()).clamp(0.0, 1.0);
+                let norm_x = ((pos.x - rect.left()) / rect.width().max(1.0)).clamp(0.0, 1.0);
+                let norm_y = ((rect.bottom() - pos.y) / rect.height().max(1.0)).clamp(0.0, 1.0);
 
                 *self.cutoff_hz = Self::norm_x_to_freq(norm_x);
                 *self.resonance = norm_y;
@@ -252,5 +252,57 @@ mod tests {
         // Resonance peak check
         let peak_db = ZdfCurveWidget::magnitude_db(1000.0, 1000.0, 0.9);
         assert!(peak_db > passband_db, "Resonance must boost cutoff frequency");
+    }
+
+    #[test]
+    fn test_mgw10_zero_size_rect_pointer_interactions_stay_finite() {
+        use crate::visualizers::*;
+        let ctx = egui::Context::default();
+        let mut raw = egui::RawInput::default();
+        raw.events.push(egui::Event::PointerButton {
+            pos: egui::pos2(0.0, 0.0),
+            button: egui::PointerButton::Primary,
+            pressed: true,
+            modifiers: egui::Modifiers::NONE,
+        });
+        raw.events.push(egui::Event::PointerMoved(egui::pos2(0.0, 0.0)));
+
+        let mut cutoff = 1000.0_f32;
+        let mut res = 0.5_f32;
+        let mut af = AutoFilterVisualizerState::default();
+        let mut dr = DrumRackVisualizerState::default();
+        let mut eq = EqEightVisualizerState::default();
+        let bins = [0.0_f32; 64];
+        let mut glue = GlueCompressorVisualizerState::default();
+        let mut ott = OttVisualizerState::default();
+        let mut roar = RoarVisualizerState::default();
+        let mut simpler = SimplerVisualizerState::default();
+        let mut wt = WavetableVisualizerState::default();
+        let zero = egui::vec2(0.0, 0.0);
+
+        let _ = ctx.run(raw, |ctx| {
+            egui::CentralPanel::default().show(ctx, |ui| {
+                let zero_rect = egui::Rect::from_min_size(egui::pos2(0.0, 0.0), zero);
+                ui.allocate_new_ui(egui::UiBuilder::new().max_rect(zero_rect), |zui| {
+                    zui.add(ZdfCurveWidget::new(&mut cutoff, &mut res, None, zero));
+                    zui.add(AutoFilterVisualizerWidget::new(&mut af, zero));
+                    zui.add(DrumRackVisualizerWidget::new(&mut dr, zero));
+                    zui.add(EqEightVisualizerWidget::new(&mut eq, &bins, zero));
+                    zui.add(GlueCompressorVisualizerWidget::new(&mut glue, zero));
+                    zui.add(OttVisualizerWidget::new(&mut ott, zero));
+                    zui.add(RoarVisualizerWidget::new(&mut roar, zero));
+                    zui.add(SimplerVisualizerWidget::new(&mut simpler, zero));
+                    zui.add(WavetableVisualizerWidget::new(&mut wt, zero));
+                });
+            });
+        });
+
+        assert!(cutoff.is_finite() && res.is_finite());
+        assert!(af.cutoff_hz.is_finite() && af.resonance.is_finite());
+        assert!(eq.bands[1].freq_hz.is_finite() && eq.bands[1].gain_db.is_finite());
+        assert!(glue.threshold_db.is_finite() && glue.ratio.is_finite());
+        assert!(ott.low.above_thresh_db.is_finite() && ott.depth.is_finite());
+        assert!(roar.drive_db.is_finite());
+        assert!(wt.table_pos.is_finite());
     }
 }

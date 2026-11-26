@@ -142,6 +142,9 @@ impl HardwareIoMatrix {
         if bus >= MAX_HARDWARE_INPUT_BUSES {
             return Err(IoRoutingError::InvalidBusIndex(bus));
         }
+        if !trim_db.is_finite() {
+            return Ok(());
+        }
         let clamped = trim_db.clamp(-24.0, 24.0);
         self.inputs[bus].gain_trim_db = clamped;
         self.inputs[bus].gain_linear = 10.0_f32.powf(clamped / 20.0);
@@ -216,6 +219,9 @@ impl HardwareIoMatrix {
         if track_id >= MAX_RECORDING_TRACKS {
             return Err(IoRoutingError::InvalidTrackIndex(track_id));
         }
+        if !trim_db.is_finite() {
+            return Ok(());
+        }
         let clamped = trim_db.clamp(-24.0, 24.0);
         self.track_routes[track_id].input_trim_db = clamped;
         self.track_routes[track_id].input_trim_linear = 10.0_f32.powf(clamped / 20.0);
@@ -246,7 +252,9 @@ impl HardwareIoMatrix {
 
     /// Check if routing `in_bus` to `out_bus` is considered a hardware loopback.
     pub fn is_loopback(&self, in_bus: usize, out_bus: usize) -> bool {
-        in_bus == out_bus && self.outputs[out_bus].loopback_protected
+        out_bus < MAX_HARDWARE_OUTPUT_BUSES
+            && in_bus == out_bus
+            && self.outputs[out_bus].loopback_protected
     }
 
     /// Zero-allocation hardware input processing: routes hardware buses to tracks
@@ -1243,6 +1251,20 @@ mod tests {
             track_inputs[1],
             [0.0, 0.0],
             "Conflicting loopback route must be muted during audio processing"
+        );
+    }
+
+    #[test]
+    fn test_dsp14_io_matrix_oob_loopback_and_nan_trim() {
+        let mut matrix = HardwareIoMatrix::new();
+        assert!(!matrix.is_loopback(20, 20), "Out-of-bounds bus must return false without panicking");
+
+        let _ = matrix.set_input_trim_db(0, f32::NAN);
+        let _ = matrix.set_track_input_trim_db(0, f32::NAN);
+        assert!(matrix.inputs[0].gain_linear.is_finite(), "NaN input trim must not poison gain_linear");
+        assert!(
+            matrix.track_routes[0].input_trim_linear.is_finite(),
+            "NaN track trim must not poison input_trim_linear"
         );
     }
 }

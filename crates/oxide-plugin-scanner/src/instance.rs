@@ -81,7 +81,7 @@ impl PluginInstance for HostedPluginInstance {
     }
 
     fn initialize(&mut self, sample_rate: f64, max_block_size: usize) -> Result<(), String> {
-        if sample_rate <= 0.0 {
+        if !sample_rate.is_finite() || sample_rate <= 0.0 {
             return Err("Invalid sample rate".into());
         }
         self.sample_rate = sample_rate;
@@ -191,11 +191,12 @@ impl PluginInstance for HostedPluginInstance {
         }
 
         if let Some(param_meta) = self.descriptor.parameters.get(idx) {
-            let clamped = value.clamp(param_meta.min_value, param_meta.max_value);
+            let (_, _, clamped) =
+                crate::types::clamp_param_bounds(value, param_meta.min_value, param_meta.max_value);
             self.param_values[idx] = clamped;
             Ok(())
         } else {
-            self.param_values[idx] = value;
+            self.param_values[idx] = if value.is_finite() { value } else { 0.0 };
             Ok(())
         }
     }
@@ -425,5 +426,29 @@ mod tests {
 
         let peak = buf.left[0..256].iter().fold(0.0_f32, |acc, &s| acc.max(s.abs()));
         assert!(peak > 0.05, "HostedPluginDevice in DeviceChain synthesized non-zero audio: {}", peak);
+    }
+
+    #[test]
+    fn test_hosted_plugin_rejects_nan_sample_rate_and_inverted_param_bounds() {
+        let mut bad_param = PluginParameter::new(0, "P", 0.0, 1.0, 0.5);
+        bad_param.min_value = 2.0;
+        bad_param.max_value = 1.0;
+        let desc = PluginDescriptor::new_valid(
+            "Edge",
+            "com.oxide.Edge",
+            "Oxide",
+            "1.0",
+            PluginCategory::Effect,
+            PluginFormat::Vst3,
+            PathBuf::from("/tmp/Edge.vst3"),
+            2,
+            2,
+            vec![bad_param],
+            vec!["arm64".into()],
+            1,
+        );
+        let mut inst = HostedPluginInstance::new(desc).unwrap();
+        assert!(inst.initialize(f64::NAN, 512).is_err());
+        assert!(inst.set_parameter(0, 1.5).is_ok());
     }
 }

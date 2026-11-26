@@ -259,7 +259,7 @@ impl CrossoverSvf {
 
     fn update_coeffs(&mut self, sample_rate: f32) {
         let sr = if sample_rate > 0.0 { sample_rate } else { 44100.0 };
-        let fc = self.cutoff_hz.clamp(20.0, sr * 0.45);
+        let fc = self.cutoff_hz.clamp(20.0, (sr * 0.45).max(20.0));
         let g = (PI * fc / sr).tan();
         let k = 2.0f32;
         self.a1 = 1.0 / (1.0 + g * (g + k));

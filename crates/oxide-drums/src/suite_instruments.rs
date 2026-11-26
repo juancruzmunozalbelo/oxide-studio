@@ -142,6 +142,10 @@ impl SamplerEngine {
     }
 
     pub fn trigger_note_on(&mut self, note: u8, velocity: u8) {
+        if velocity == 0 {
+            self.trigger_note_off(note);
+            return;
+        }
         let voice_idx = self.voices.iter().position(|v| !v.active).unwrap_or_else(|| {
             // Voice steal oldest or lowest envelope
             let mut min_val = f32::MAX;
@@ -169,6 +173,7 @@ impl SamplerEngine {
         voice.velocity = velocity;
         voice.zone_index = zone_index;
         voice.position = 0.0;
+        voice.pitch_bend_semi = 0.0;
 
         let root_freq = 440.0 * 2.0f32.powf((60.0 - 69.0) / 12.0); // C4 root
         let note_freq = 440.0 * 2.0f32.powf((note as f32 - 69.0) / 12.0);
@@ -343,7 +348,11 @@ impl GranulatorIIIEngine {
         self.is_playing = false;
     }
 
-    pub fn trigger_note_on(&mut self, note: u8, _velocity: u8) {
+    pub fn trigger_note_on(&mut self, note: u8, velocity: u8) {
+        if velocity == 0 {
+            self.trigger_note_off(note);
+            return;
+        }
         self.current_note = note;
         self.is_playing = true;
         self.spawn_counter = 0.0;
@@ -1058,5 +1067,36 @@ mod tests {
 
         // Test all notes off
         engine.all_notes_off();
+    }
+
+    #[test]
+    fn test_dsp5_sampler_and_granulator_velocity_zero_releases_and_resets_bend() {
+        let mut sampler = SamplerEngine::new(44100.0);
+        sampler.trigger_note_on(60, 100);
+        sampler.set_pitch_bend(7.0);
+        for _ in 0..256 {
+            sampler.process_stereo_sample();
+        }
+        // Standard MIDI running-status NoteOff (velocity == 0)
+        sampler.trigger_note_on(60, 0);
+        for _ in 0..44100 {
+            sampler.process_stereo_sample();
+        }
+        assert!(
+            !sampler.voices.iter().any(|v| v.active),
+            "SamplerEngine NoteOn(vel=0) must release playing voice instead of sticking"
+        );
+        // Reusing voice slot must reset stale pitch bend
+        sampler.trigger_note_on(64, 100);
+        assert_eq!(sampler.voices[0].pitch_bend_semi, 0.0, "Stale pitch bend leaked on voice reuse");
+
+        let mut gran = GranulatorIIIEngine::new(44100.0);
+        gran.trigger_note_on(60, 100);
+        assert!(gran.is_playing);
+        gran.trigger_note_on(60, 0);
+        assert!(
+            !gran.is_playing,
+            "GranulatorIIIEngine NoteOn(vel=0) must stop grain cloud instead of sticking"
+        );
     }
 }

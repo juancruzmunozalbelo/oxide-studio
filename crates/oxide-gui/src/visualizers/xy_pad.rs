@@ -246,10 +246,13 @@ impl<'a> XyPerformPadWidget<'a> {
                         );
 
                         // Handle direct mouse drag / click on canvas
-                        if pad_response.dragged() || pad_response.clicked() {
+                        if (pad_response.dragged() || pad_response.clicked())
+                            && pad_rect.width() > 1.0
+                            && pad_rect.height() > 1.0
+                        {
                             if let Some(pos) = pad_response.interact_pointer_pos() {
-                                let norm_x = ((pos.x - pad_rect.left()) / pad_rect.width()).clamp(0.0, 1.0);
-                                let norm_y = ((pad_rect.bottom() - pos.y) / pad_rect.height()).clamp(0.0, 1.0);
+                                let norm_x = ((pos.x - pad_rect.left()) / pad_rect.width().max(1.0)).clamp(0.0, 1.0);
+                                let norm_y = ((pad_rect.bottom() - pos.y) / pad_rect.height().max(1.0)).clamp(0.0, 1.0);
 
                                 self.state.x = norm_x;
                                 self.state.y = norm_y;
@@ -515,10 +518,13 @@ impl<'a> XyPerformPadWidget<'a> {
                     Sense::drag(),
                 );
 
-                if pad_response.dragged() || pad_response.clicked() {
+                if (pad_response.dragged() || pad_response.clicked())
+                    && pad_rect.width() > 1.0
+                    && pad_rect.height() > 1.0
+                {
                     if let Some(pos) = pad_response.interact_pointer_pos() {
-                        let norm_x = ((pos.x - pad_rect.left()) / pad_rect.width()).clamp(0.0, 1.0);
-                        let norm_y = ((pad_rect.bottom() - pos.y) / pad_rect.height()).clamp(0.0, 1.0);
+                        let norm_x = ((pos.x - pad_rect.left()) / pad_rect.width().max(1.0)).clamp(0.0, 1.0);
+                        let norm_y = ((pad_rect.bottom() - pos.y) / pad_rect.height().max(1.0)).clamp(0.0, 1.0);
                         self.state.x = norm_x;
                         self.state.y = norm_y;
                         self.state.sync_mapped_macros();

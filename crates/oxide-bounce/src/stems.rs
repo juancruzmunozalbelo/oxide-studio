@@ -672,7 +672,7 @@ fn db_to_linear_gain(db: f32) -> f32 {
 
 fn apply_gain_and_pan(left: &mut [f32], right: &mut [f32], volume_db: f32, pan: f32) {
     let gain = db_to_linear_gain(volume_db);
-    let p = pan.clamp(-1.0, 1.0);
+    let p = if pan.is_finite() { pan.clamp(-1.0, 1.0) } else { 0.0 };
     // Stereo balance law: unity (1.0, 1.0) at center pan == 0.0, attenuates opposite side when panned.
     let l_gain = gain * (1.0 - p.max(0.0)).sqrt();
     let r_gain = gain * (1.0 + p.min(0.0)).sqrt();
@@ -1228,33 +1228,38 @@ pub(crate) fn apply_master_fx_and_limiter(
     sample_rate: f32,
     bpm: f64,
 ) {
+    let safe_bpm = if bpm.is_finite() && bpm > 0.0 { bpm } else { 120.0 };
     if master_track.saturator_enabled {
         let mut sat = Saturator::new();
-        sat.set_drive_db(master_track.saturator_drive_db);
-        sat.set_output_gain_db(master_track.saturator_output_db);
+        sat.set_drive_db(if master_track.saturator_drive_db.is_finite() { master_track.saturator_drive_db } else { 0.0 });
+        sat.set_output_gain_db(if master_track.saturator_output_db.is_finite() { master_track.saturator_output_db } else { 0.0 });
         if master_track.saturator_curve > 0.0 && master_track.saturator_curve.is_finite() {
             sat.wet = master_track.saturator_curve.clamp(0.0, 1.0);
         }
         sat.process_block(master_l, master_r);
     }
-    if master_track.delay_mix > 0.0 {
-        let mut delay = TempoDelay::new(sample_rate, bpm);
-        let time_beats = if master_track.delay_time_beats > 0.0 {
+    if master_track.delay_mix.is_finite() && master_track.delay_mix > 0.0 {
+        let mut delay = TempoDelay::new(sample_rate, safe_bpm);
+        let time_beats = if master_track.delay_time_beats.is_finite() && master_track.delay_time_beats > 0.0 {
             master_track.delay_time_beats as f64
         } else {
             0.5
         };
-        let delay_samples = (time_beats * (60.0 / bpm) * sample_rate as f64).round() as usize;
+        let delay_samples = (time_beats * (60.0 / safe_bpm) * sample_rate as f64).round() as usize;
         let clamped = delay_samples.clamp(1, MAX_DELAY_SAMPLES - 1);
         delay.delay_samples_l = clamped;
         delay.delay_samples_r = clamped;
-        delay.feedback = master_track.delay_feedback.clamp(0.0, 0.98);
+        delay.feedback = if master_track.delay_feedback.is_finite() {
+            master_track.delay_feedback.clamp(0.0, 0.98)
+        } else {
+            0.0
+        };
         delay.wet = master_track.delay_mix.clamp(0.0, 1.0);
         delay.process_block(master_l, master_r);
     }
-    if master_track.reverb_mix > 0.0 {
+    if master_track.reverb_mix.is_finite() && master_track.reverb_mix > 0.0 {
         let mut rev = FdnReverb::new(sample_rate);
-        let decay_ms = if master_track.reverb_decay_ms > 0.0 {
+        let decay_ms = if master_track.reverb_decay_ms.is_finite() && master_track.reverb_decay_ms > 0.0 {
             master_track.reverb_decay_ms
         } else {
             1500.0
@@ -1269,8 +1274,57 @@ pub(crate) fn apply_master_fx_and_limiter(
     apply_gain_and_pan(master_l, master_r, master_track.volume_db, master_track.pan);
 
     let mut limiter = MasterLimiter::new(sample_rate);
-    limiter.ceiling = 10.0_f32.powf(master_track.limiter_ceiling_db.clamp(-24.0, 0.0) / 20.0);
+    let ceiling_db = if master_track.limiter_ceiling_db.is_finite() {
+        master_track.limiter_ceiling_db.clamp(-24.0, 0.0)
+    } else {
+        -0.3
+    };
+    limiter.ceiling = 10.0_f32.powf(ceiling_db / 20.0);
     process_master_limiter_compensated(&mut limiter, master_l, master_r);
+}
+
+fn compute_export_duration_seconds(project: &DAWProject, bpm: f64) -> f64 {
+    let mut max_beat = 0.0f64;
+    for track in &project.tracks {
+        for clip in &track.arrangement_clips {
+            let end = clip.timeline_end_beat();
+            if end.is_finite() && end > max_beat {
+                max_beat = end;
+            }
+        }
+    }
+
+    if max_beat > 0.0 {
+        (max_beat * 60.0 / bpm).clamp(4.0, 3600.0)
+    } else if project.transport.loop_enabled
+        && project.transport.loop_end_beat.is_finite()
+        && project.transport.loop_start_beat.is_finite()
+        && project.transport.loop_end_beat > 0.0
+    {
+        ((project.transport.loop_end_beat - project.transport.loop_start_beat) * 60.0 / bpm)
+            .clamp(4.0, 3600.0)
+    } else {
+        4.0
+    }
+}
+
+fn route_sends_to_returns(
+    track: &TrackDefinition,
+    src_l: &[f32],
+    src_r: &[f32],
+    return_buses: &mut [(Vec<f32>, Vec<f32>)],
+) {
+    let len = src_l.len().min(src_r.len());
+    for (send_idx, (ret_l, ret_r)) in return_buses.iter_mut().enumerate() {
+        let send_db = track.mixer.get_send_db(send_idx);
+        if send_db.is_finite() && send_db > -69.9 {
+            let send_gain = 10.0_f32.powf(send_db.clamp(-70.0, 6.0) / 20.0);
+            for i in 0..len {
+                ret_l[i] += src_l[i] * send_gain;
+                ret_r[i] += src_r[i] * send_gain;
+            }
+        }
+    }
 }
 
 pub(crate) fn render_project_mix_with_stems(
@@ -1281,6 +1335,22 @@ pub(crate) fn render_project_mix_with_stems(
     duration_seconds: f64,
     collect_all_stems: bool,
 ) -> (Vec<f32>, Vec<f32>, Vec<(Vec<f32>, Vec<f32>)>) {
+    let sample_rate = if sample_rate.is_finite() && sample_rate > 0.0 {
+        sample_rate
+    } else {
+        44100.0
+    };
+    let bpm = if bpm.is_finite() && bpm > 0.0 { bpm } else { 120.0 };
+    let duration_seconds = if duration_seconds.is_finite() {
+        duration_seconds.clamp(0.0, 3600.0)
+    } else {
+        4.0
+    };
+    let start_beat_offset = if start_beat_offset.is_finite() {
+        start_beat_offset
+    } else {
+        0.0
+    };
     let total_frames = (duration_seconds * sample_rate as f64).ceil() as usize;
     let mut master_l = vec![0.0f32; total_frames];
     let mut master_r = vec![0.0f32; total_frames];
@@ -1290,6 +1360,7 @@ pub(crate) fn render_project_mix_with_stems(
         Vec::new()
     };
 
+    let n_tracks = project.tracks.len();
     let any_source_solo = project
         .tracks
         .iter()
@@ -1298,6 +1369,62 @@ pub(crate) fn render_project_mix_with_stems(
         .tracks
         .iter()
         .any(|t| t.track_type == TrackType::Return && t.mixer.solo);
+
+    let mut group_id_to_idx = std::collections::HashMap::new();
+    let mut group_indices = Vec::new();
+    for (i, t) in project.tracks.iter().enumerate() {
+        if t.track_type == TrackType::Group {
+            group_id_to_idx.entry(t.id).or_insert(i);
+            group_indices.push(i);
+        }
+    }
+
+    // Propagate Group solo downward to children, and child solo upward to parent Groups.
+    let mut soloed_down = vec![false; n_tracks];
+    for (i, t) in project.tracks.iter().enumerate() {
+        if t.track_type == TrackType::Group && t.mixer.solo {
+            soloed_down[i] = true;
+        }
+    }
+    for _ in 0..n_tracks {
+        let mut changed = false;
+        for (i, t) in project.tracks.iter().enumerate() {
+            if t.track_type != TrackType::Return && !soloed_down[i] {
+                if let Some(g_idx) = t.group_id.and_then(|gid| group_id_to_idx.get(&gid).copied()) {
+                    if soloed_down[g_idx] {
+                        soloed_down[i] = true;
+                        changed = true;
+                    }
+                }
+            }
+        }
+        if !changed {
+            break;
+        }
+    }
+    let mut soloed_up = vec![false; n_tracks];
+    for (i, t) in project.tracks.iter().enumerate() {
+        if t.track_type != TrackType::Return && (t.mixer.solo || soloed_down[i]) {
+            soloed_up[i] = true;
+        }
+    }
+    for _ in 0..n_tracks {
+        let mut changed = false;
+        for (i, t) in project.tracks.iter().enumerate() {
+            if t.track_type != TrackType::Return && soloed_up[i] {
+                if let Some(g_idx) = t.group_id.and_then(|gid| group_id_to_idx.get(&gid).copied()) {
+                    if !soloed_up[g_idx] {
+                        soloed_up[g_idx] = true;
+                        changed = true;
+                    }
+                }
+            }
+        }
+        if !changed {
+            break;
+        }
+    }
+
     let return_indices: Vec<usize> = project
         .tracks
         .iter()
@@ -1308,14 +1435,20 @@ pub(crate) fn render_project_mix_with_stems(
     let mut return_buses: Vec<(Vec<f32>, Vec<f32>)> = (0..return_indices.len())
         .map(|_| (vec![0.0f32; total_frames], vec![0.0f32; total_frames]))
         .collect();
+    let mut group_buses: std::collections::HashMap<usize, (Vec<f32>, Vec<f32>)> = group_indices
+        .iter()
+        .map(|&gi| (gi, (vec![0.0f32; total_frames], vec![0.0f32; total_frames])))
+        .collect();
 
-    // 1. Render all non-Return tracks, mix into Master and accumulate Sends into Return buses
+    // 1. Render all non-Return, non-Group tracks, mix into parent Group or Master, and accumulate Sends
     for (idx, track) in project.tracks.iter().enumerate() {
-        if track.track_type == TrackType::Return {
+        if track.track_type == TrackType::Return || track.track_type == TrackType::Group {
             continue;
         }
-        let is_source_selected = !track.mixer.mute && (!any_source_solo || track.mixer.solo);
-        let dry_to_master = is_source_selected && (!any_return_solo || (any_source_solo && track.mixer.solo));
+        let is_track_solo = track.mixer.solo || soloed_down[idx];
+        let is_source_selected = !track.mixer.mute && (!any_source_solo || is_track_solo);
+        let dry_to_dest =
+            is_source_selected && (!any_return_solo || (any_source_solo && is_track_solo));
 
         if is_source_selected || collect_all_stems {
             let (trk_l, trk_r) = if track.mixer.mute {
@@ -1332,22 +1465,23 @@ pub(crate) fn render_project_mix_with_stems(
             };
 
             if is_source_selected {
-                if dry_to_master {
+                let parent_group = track
+                    .group_id
+                    .and_then(|gid| group_id_to_idx.get(&gid).copied());
+                if let Some(g_idx) = parent_group {
+                    if let Some((gl, gr)) = group_buses.get_mut(&g_idx) {
+                        for i in 0..total_frames {
+                            gl[i] += trk_l[i];
+                            gr[i] += trk_r[i];
+                        }
+                    }
+                } else if dry_to_dest {
                     for i in 0..total_frames {
                         master_l[i] += trk_l[i];
                         master_r[i] += trk_r[i];
                     }
                 }
-                for (send_idx, (ret_l, ret_r)) in return_buses.iter_mut().enumerate() {
-                    let send_db = track.mixer.get_send_db(send_idx);
-                    if send_db > -69.9 {
-                        let send_gain = 10.0_f32.powf(send_db.clamp(-70.0, 6.0) / 20.0);
-                        for i in 0..total_frames {
-                            ret_l[i] += trk_l[i] * send_gain;
-                            ret_r[i] += trk_r[i] * send_gain;
-                        }
-                    }
-                }
+                route_sends_to_returns(track, &trk_l, &trk_r, &mut return_buses);
             }
 
             if collect_all_stems {
@@ -1356,7 +1490,71 @@ pub(crate) fn render_project_mix_with_stems(
         }
     }
 
-    // 2. Process Return tracks (Insert FX -> Volume/Pan -> Master)
+    // 2. Process Group tracks bottom-up (Insert FX -> Volume/Pan -> Sends -> Parent Group or Master)
+    let mut group_processed = vec![false; n_tracks];
+    let mut remaining_groups = group_indices.clone();
+    while !remaining_groups.is_empty() {
+        let mut ready_pos = None;
+        for (pos, &g_idx) in remaining_groups.iter().enumerate() {
+            let g_id = project.tracks[g_idx].id;
+            let has_unprocessed_child_group = remaining_groups.iter().any(|&other_idx| {
+                other_idx != g_idx && project.tracks[other_idx].group_id == Some(g_id)
+            });
+            if !has_unprocessed_child_group {
+                ready_pos = Some(pos);
+                break;
+            }
+        }
+        let g_idx = remaining_groups.remove(ready_pos.unwrap_or(0));
+        group_processed[g_idx] = true;
+        let track = &project.tracks[g_idx];
+        let (mut grp_l, mut grp_r) = group_buses
+            .remove(&g_idx)
+            .unwrap_or_else(|| (vec![0.0f32; total_frames], vec![0.0f32; total_frames]));
+        let is_group_solo = soloed_up[g_idx];
+        let is_group_selected = !track.mixer.mute && (!any_source_solo || is_group_solo);
+        let dry_to_dest =
+            is_group_selected && (!any_return_solo || (any_source_solo && is_group_solo));
+
+        if !is_group_selected {
+            grp_l.fill(0.0);
+            grp_r.fill(0.0);
+        } else {
+            process_insert_fx_chain(
+                &track.insert_fx,
+                &mut grp_l,
+                &mut grp_r,
+                sample_rate,
+                bpm,
+                start_beat_offset,
+            );
+            apply_gain_and_pan(&mut grp_l, &mut grp_r, track.mixer.volume_db, track.mixer.pan);
+            route_sends_to_returns(track, &grp_l, &grp_r, &mut return_buses);
+            let parent_group = track
+                .group_id
+                .and_then(|gid| group_id_to_idx.get(&gid).copied())
+                .filter(|&p| p != g_idx && !group_processed[p]);
+            if let Some(p_idx) = parent_group {
+                if let Some((pl, pr)) = group_buses.get_mut(&p_idx) {
+                    for i in 0..total_frames {
+                        pl[i] += grp_l[i];
+                        pr[i] += grp_r[i];
+                    }
+                }
+            } else if dry_to_dest {
+                for i in 0..total_frames {
+                    master_l[i] += grp_l[i];
+                    master_r[i] += grp_r[i];
+                }
+            }
+        }
+
+        if collect_all_stems {
+            per_track_stems[g_idx] = (grp_l, grp_r);
+        }
+    }
+
+    // 3. Process Return tracks (Insert FX -> Volume/Pan -> Master)
     for (ret_slot, &track_idx) in return_indices.iter().enumerate() {
         let track = &project.tracks[track_idx];
         let (mut ret_l, mut ret_r) = std::mem::take(&mut return_buses[ret_slot]);
@@ -1385,7 +1583,7 @@ pub(crate) fn render_project_mix_with_stems(
         }
     }
 
-    // 3. Apply Master FX, Volume/Pan, and Brickwall Limiter
+    // 4. Apply Master FX, Volume/Pan, and Brickwall Limiter
     apply_master_fx_and_limiter(
         &project.master_track,
         &mut master_l,
@@ -1406,30 +1604,13 @@ pub fn export_all_tracks_as_stems(
     fs::create_dir_all(out_dir).map_err(BounceError::Io)?;
 
     let sample_rate = 44100u32;
-    let bpm = if project.transport.bpm <= 0.0 {
-        120.0
-    } else {
+    let bpm = if project.transport.bpm.is_finite() && project.transport.bpm > 0.0 {
         project.transport.bpm
-    };
-
-    let mut max_beat = 0.0f64;
-    for track in &project.tracks {
-        for clip in &track.arrangement_clips {
-            let end = clip.timeline_end_beat();
-            if end > max_beat {
-                max_beat = end;
-            }
-        }
-    }
-
-    let duration_seconds = if max_beat > 0.0 {
-        (max_beat * 60.0 / bpm).max(4.0)
-    } else if project.transport.loop_enabled && project.transport.loop_end_beat > 0.0 {
-        ((project.transport.loop_end_beat - project.transport.loop_start_beat) * 60.0 / bpm).max(4.0)
     } else {
-        4.0
+        120.0
     };
 
+    let duration_seconds = compute_export_duration_seconds(project, bpm);
     let total_frames = (duration_seconds * sample_rate as f64).ceil() as usize;
     let mut exported_paths = Vec::new();
 
@@ -1444,12 +1625,18 @@ pub fn export_all_tracks_as_stems(
             mr[i] = interleaved[i * 2 + 1];
         }
 
+        apply_master_fx_and_limiter(&project.master_track, &mut ml, &mut mr, sample_rate as f32, bpm);
+
+        let mut demo_limited = Vec::with_capacity(total_frames * 2);
+        for i in 0..total_frames {
+            demo_limited.push(ml[i]);
+            demo_limited.push(mr[i]);
+        }
         let demo_path = out_dir.join("track_01_master.wav");
-        WavWriter::write_wav_16bit(&demo_path, sample_rate, 2, &interleaved)
+        WavWriter::write_wav_16bit(&demo_path, sample_rate, 2, &demo_limited)
             .map_err(BounceError::Render)?;
         exported_paths.push(demo_path);
 
-        apply_master_fx_and_limiter(&project.master_track, &mut ml, &mut mr, sample_rate as f32, bpm);
         (ml, mr)
     } else {
         let (ml, mr, per_track_stems) = render_project_mix_with_stems(
@@ -3244,5 +3431,122 @@ mod tests {
             "Overriding preset params back to Init defaults must alter rendered audio (diff={})",
             diff
         );
+    }
+
+    #[test]
+    fn test_group_track_routing_fx_mute_solo_and_stems() {
+        use oxide_timeline::{ArrangementClip, MidiNote};
+
+        let mut project = DAWProject::new("Group Routing");
+        project.transport.bpm = 120.0;
+
+        let mut grp = TrackDefinition::new_group(10, "Synth Bus");
+        grp.mixer.volume_db = -12.0;
+        let mut child = TrackDefinition::new_synth(1, "Bass");
+        child.group_id = Some(10);
+        let mut mp = MidiPattern::new(2.0);
+        mp.notes.push(MidiNote::new(48, 120, 0.0, 1.0));
+        child.arrangement_clips.push(ArrangementClip::new(1, "Clip", 0.0, 2.0, ClipPattern::Midi(mp)));
+
+        let mut other = TrackDefinition::new_synth(2, "Pad");
+        let mut mp2 = MidiPattern::new(2.0);
+        mp2.notes.push(MidiNote::new(67, 120, 0.0, 1.0));
+        other.arrangement_clips.push(ArrangementClip::new(2, "PadClip", 0.0, 2.0, ClipPattern::Midi(mp2)));
+
+        project.tracks.push(grp);
+        project.tracks.push(child);
+        project.tracks.push(other);
+
+        // 1. Muting Group must silence child audio in master (only Pad sounds, or with Pad muted -> silence)
+        project.tracks[2].mixer.mute = true;
+        project.tracks[0].mixer.mute = true;
+        let (ml_muted, _, stems_muted) = render_project_mix_with_stems(&project, 44100.0, 120.0, 0.0, 1.0, true);
+        let e_muted: f32 = ml_muted.iter().map(|s| s * s).sum();
+        assert!(e_muted < 1e-9, "Muting Group track must silence its children on master, got {}", e_muted);
+        let grp_stem_muted: f32 = stems_muted[0].0.iter().map(|s| s * s).sum();
+        assert!(grp_stem_muted < 1e-9);
+
+        // 2. Unmuting Group and soloing Group must include child audio (and silence Pad when Pad is unmuted)
+        project.tracks[0].mixer.mute = false;
+        project.tracks[0].mixer.solo = true;
+        project.tracks[2].mixer.mute = false;
+        let (ml_grp_solo, _, stems_grp) = render_project_mix_with_stems(&project, 44100.0, 120.0, 0.0, 1.0, true);
+        let e_grp_solo: f32 = ml_grp_solo.iter().map(|s| s * s).sum();
+        let e_grp_stem: f32 = stems_grp[0].0.iter().map(|s| s * s).sum();
+        assert!(e_grp_solo > 1e-4, "Soloing Group must route child audio through Group to master");
+        assert!(e_grp_stem > 1e-4, "Group stem must contain summed/processed child audio");
+
+        // 3. Group volume attenuation (-12 dB) must attenuate child vs 0 dB group
+        project.tracks[0].mixer.solo = false;
+        project.tracks[2].mixer.mute = true;
+        let (ml_att, _, _) = render_project_mix_with_stems(&project, 44100.0, 120.0, 0.0, 1.0, false);
+        project.tracks[0].mixer.volume_db = 0.0;
+        let (ml_unity, _, _) = render_project_mix_with_stems(&project, 44100.0, 120.0, 0.0, 1.0, false);
+        let rms_att: f32 = ml_att.iter().map(|s| s * s).sum();
+        let rms_unity: f32 = ml_unity.iter().map(|s| s * s).sum();
+        assert!(rms_att < rms_unity * 0.15, "Group -12dB must attenuate child ({} vs {})", rms_att, rms_unity);
+
+        // 4. Soloing child must keep Group audible while silencing unrelated Pad
+        project.tracks[2].mixer.mute = false;
+        project.tracks[1].mixer.solo = true;
+        let (ml_child_solo, _, _) = render_project_mix_with_stems(&project, 44100.0, 120.0, 0.0, 1.0, false);
+        let e_child_solo: f32 = ml_child_solo.iter().map(|s| s * s).sum();
+        assert!(e_child_solo > 1e-4, "Soloing child must keep parent Group audible");
+
+        // 5. Soloing Return track must still receive post-fader sends from Group fed by child track
+        project.tracks[1].mixer.solo = false;
+        project.tracks[0].mixer.set_send_db(0, 0.0);
+        let mut ret = TrackDefinition::new_return(20, "Soloed Return");
+        ret.mixer.solo = true;
+        ret.insert_fx.push(InsertEffectConfig::Reverb {
+            ir_path: None,
+            decay_ms: 1000.0,
+            mix: 1.0,
+        });
+        project.tracks.push(ret);
+        let (ml_ret_solo, _, stems_ret) =
+            render_project_mix_with_stems(&project, 44100.0, 120.0, 0.0, 1.0, true);
+        let e_ret_solo: f32 = ml_ret_solo.iter().map(|s| s * s).sum();
+        let e_ret_stem: f32 = stems_ret[3].0.iter().map(|s| s * s).sum();
+        assert!(e_ret_solo > 1e-4, "Soloed Return must output wet audio fed by Group send");
+        assert!(e_ret_stem > 1e-4, "Soloed Return stem must receive Group send audio");
+    }
+
+    #[test]
+    fn test_nan_pan_bpm_and_empty_master_stem_parity() {
+        use oxide_timeline::{ArrangementClip, MidiNote};
+
+        let mut project = DAWProject::new("NaN Guard");
+        project.transport.bpm = f64::NAN;
+        project.master_track.pan = f32::NAN;
+        project.master_track.delay_mix = 0.5;
+        project.master_track.delay_feedback = f32::NAN;
+        let mut trk = TrackDefinition::new_synth(1, "Synth");
+        trk.mixer.pan = f32::NAN;
+        let mut mp = MidiPattern::new(2.0);
+        mp.notes.push(MidiNote::new(60, 110, 0.0, 1.0));
+        trk.arrangement_clips.push(ArrangementClip::new(1, "C", 0.0, 2.0, ClipPattern::Midi(mp)));
+        project.tracks.push(trk);
+
+        let (ml, mr, _) = render_project_mix_with_stems(&project, 44100.0, 120.0, 0.0, 1.0, false);
+        assert!(ml.iter().chain(mr.iter()).all(|s| s.is_finite()), "NaN pan/feedback must never poison master output");
+
+        let dir = std::env::temp_dir().join(format!("oxide_empty_stem_parity_{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        let mut empty_proj = DAWProject::new("Empty Limiter");
+        empty_proj.master_track.limiter_ceiling_db = -12.0;
+        let files = export_all_tracks_as_stems(&empty_proj, &dir).unwrap();
+        let (_, _, samples) = read_wav_file(&files[0]).unwrap();
+        let peak = samples.iter().map(|s| s.abs()).fold(0.0f32, f32::max);
+        assert!(peak <= 0.28, "Empty project track_01_master.wav must respect -12 dBFS limiter ceiling (~0.251), got {}", peak);
+        let _ = fs::remove_dir_all(&dir);
+
+        // Huge clip end beat must not OOM in export_all_tracks_as_stems
+        let mut huge_proj = DAWProject::new("Huge Duration");
+        let mut huge_trk = TrackDefinition::new_synth(1, "Huge");
+        huge_trk.arrangement_clips.push(ArrangementClip::new(1, "Far", 1_000_000_000.0, 4.0, ClipPattern::Midi(MidiPattern::new(4.0))));
+        huge_proj.tracks.push(huge_trk);
+        // Just verify duration helper behavior indirectly by calling export on a smaller bounded clip if needed:
+        assert!(super::compute_export_duration_seconds(&huge_proj, 120.0) <= 3600.0);
     }
 }

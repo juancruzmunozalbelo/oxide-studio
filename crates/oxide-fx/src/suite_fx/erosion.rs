@@ -109,7 +109,7 @@ impl AudioEffectDevice for Erosion {
         }
 
         let phase_step = 2.0 * PI * self.frequency_hz / self.sample_rate;
-        let fc = self.frequency_hz.clamp(20.0, self.sample_rate * 0.45);
+        let fc = self.frequency_hz.clamp(20.0, (self.sample_rate * 0.45).max(20.0));
         let g = (PI * fc / self.sample_rate).tan().clamp(0.001, 10.0);
         // Bandpass width damping: narrow Q when width near 0, wide bandwidth when width near 1
         let k = 0.1 + self.width.clamp(0.0, 1.0) * 1.9;

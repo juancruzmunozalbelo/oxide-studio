@@ -484,6 +484,9 @@ impl AutomationLane {
     /// Evaluate the automation curve at `beat`.
     /// Returns `default_value` if lane has no points.
     pub fn interpolate_at(&self, beat: f64, default_value: f32) -> f32 {
+        if !beat.is_finite() {
+            return default_value;
+        }
         match self.points.len() {
             0 => default_value,
             1 => self.points[0].value_norm,
@@ -539,7 +542,13 @@ impl AutomationLane {
 
     /// Draw stepped grid automation across `[start_beat, end_beat]` with quantization `grid_step`.
     pub fn draw_stepped(&mut self, start_beat: f64, end_beat: f64, value_norm: f32, grid_step: f64) {
-        if grid_step <= 0.0 || end_beat <= start_beat {
+        if !start_beat.is_finite()
+            || !end_beat.is_finite()
+            || !value_norm.is_finite()
+            || !grid_step.is_finite()
+            || grid_step <= 0.0
+            || end_beat <= start_beat
+        {
             return;
         }
         let step_size = grid_step.max(0.0625);

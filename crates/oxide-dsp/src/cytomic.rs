@@ -86,6 +86,19 @@ impl CytomicSvfStage {
         model: CircuitModel,
         drive: f32,
     ) -> (f32, f32, f32, f32) {
+        let flush = |v: f32| -> f32 {
+            if !v.is_finite() || v.abs() < 1e-20 {
+                0.0
+            } else {
+                v
+            }
+        };
+
+        let input = if input.is_finite() { input.clamp(-16.0, 16.0) } else { 0.0 };
+        let drive = if drive.is_finite() { drive.clamp(0.0, 16.0) } else { 1.0 };
+        let s1 = flush(self.s1);
+        let s2 = flush(self.s2);
+
         let driven_in = match model {
             CircuitModel::Clean => {
                 if drive > 1.0001 {
@@ -109,41 +122,41 @@ impl CytomicSvfStage {
             CircuitModel::PRD => (input * drive).tanh(),
         };
 
-        let g_eff = g.clamp(0.0001, 10.0);
-        let k_eff = k.max(0.001);
+        let g_eff = if g.is_finite() { g.clamp(0.0001, 10.0) } else { 0.1 };
+        let k_eff = if k.is_finite() { k.max(0.001) } else { 1.0 };
 
         // Compute highpass component v0 using zero-delay feedback
         let v0 = match model {
             CircuitModel::MS2 => {
                 // Non-linear feedback resonance clipping (MS-20 Sallen-Key diode clamp)
-                let s1_sat = Self::soft_clip(self.s1 * 1.4);
+                let s1_sat = Self::soft_clip(s1 * 1.4);
                 let denom = 1.0 + g_eff * (k_eff + g_eff);
-                (driven_in - (k_eff + g_eff) * s1_sat - self.s2) / denom
+                (driven_in - (k_eff + g_eff) * s1_sat - s2) / denom
             }
             CircuitModel::PRD => {
                 // Transistor ladder style non-linear feedback
                 let denom = 1.0 + g_eff * (k_eff + g_eff);
-                let diff = driven_in - (k_eff + g_eff) * self.s1 - self.s2;
+                let diff = driven_in - (k_eff + g_eff) * s1 - s2;
                 Self::soft_clip(diff / denom)
             }
             _ => {
                 let denom = 1.0 + g_eff * (k_eff + g_eff);
-                (driven_in - (k_eff + g_eff) * self.s1 - self.s2) / denom
+                (driven_in - (k_eff + g_eff) * s1 - s2) / denom
             }
         };
 
         // Integrator outputs
-        let v1 = self.s1 + g_eff * v0;
-        let v2 = self.s2 + g_eff * v1;
+        let v1 = s1 + g_eff * v0;
+        let v2 = s2 + g_eff * v1;
 
-        // State update with bounded limits to prevent numerical explosion during self-oscillation
-        self.s1 = (2.0 * v1 - self.s1).clamp(-4.0, 4.0);
-        self.s2 = (2.0 * v2 - self.s2).clamp(-4.0, 4.0);
+        // State update with bounded limits, NaN recovery, and denormal flush
+        self.s1 = flush((2.0 * v1 - s1).clamp(-4.0, 4.0));
+        self.s2 = flush((2.0 * v2 - s2).clamp(-4.0, 4.0));
 
-        let lp = v2;
-        let bp = v1;
-        let hp = v0;
-        let notch = v0 + v2;
+        let lp = flush(v2);
+        let bp = flush(v1);
+        let hp = flush(v0);
+        let notch = flush(v0 + v2);
 
         (lp, bp, hp, notch)
     }
@@ -162,7 +175,11 @@ pub struct CytomicZdfFilter {
 impl CytomicZdfFilter {
     pub fn new(sample_rate: f32) -> Self {
         Self {
-            sample_rate: if sample_rate <= 0.0 { 44100.0 } else { sample_rate },
+            sample_rate: if sample_rate.is_finite() && sample_rate > 0.0 {
+                sample_rate
+            } else {
+                44100.0
+            },
             filter_type: CytomicFilterType::Lowpass24,
             circuit_model: CircuitModel::Clean,
             stage1: CytomicSvfStage::new(),
@@ -171,7 +188,7 @@ impl CytomicZdfFilter {
     }
 
     pub fn set_sample_rate(&mut self, sample_rate: f32) {
-        if sample_rate > 0.0 {
+        if sample_rate.is_finite() && sample_rate > 0.0 {
             self.sample_rate = sample_rate;
         }
     }
@@ -197,18 +214,24 @@ impl CytomicZdfFilter {
         drive_db: f32,
     ) -> f32 {
         let sr = self.sample_rate;
-        let nyquist_limit = (sr * 0.48).min(20000.0);
-        let fc = cutoff_hz.clamp(10.0, nyquist_limit);
+        let nyquist_limit = (sr * 0.48).clamp(10.0, 20000.0);
+        let safe_cutoff = if cutoff_hz.is_finite() { cutoff_hz } else { 1000.0 };
+        let fc = safe_cutoff.clamp(10.0, nyquist_limit);
 
         // Prewarped cutoff parameter g = tan(pi * fc / fs)
         let g = (PI * fc / sr).tan().clamp(0.0001, 20.0);
 
         // Resonance mapping: 0.0 -> damping k = 2.0 (Q = 0.5, critical); 1.0 -> damping k = 0.01 (Q = 100)
-        let res = resonance_norm.clamp(0.0, 1.0);
+        let res = if resonance_norm.is_finite() {
+            resonance_norm.clamp(0.0, 1.0)
+        } else {
+            0.0
+        };
         let k = 2.0 * (1.0 - 0.995 * res.powf(0.75));
 
         // Drive linear scale
-        let drive = 10.0f32.powf(drive_db.clamp(0.0, 24.0) / 20.0);
+        let safe_drive_db = if drive_db.is_finite() { drive_db } else { 0.0 };
+        let drive = 10.0f32.powf(safe_drive_db.clamp(0.0, 24.0) / 20.0);
 
         let (lp1, bp1, hp1, notch1) = self.stage1.process(input, g, k, self.circuit_model, drive);
 
@@ -384,5 +407,26 @@ mod tests {
             let out = filter.process_sample(0.5, 1000.0, 0.5, 0.0, 6.0);
             assert!(out.is_finite());
         }
+    }
+
+    #[test]
+    fn test_dsp7_cytomic_nan_inf_recovery_and_denormal_flush() {
+        let mut filter = CytomicZdfFilter::new(44100.0);
+        let _ = filter.process_sample(f32::INFINITY, 1000.0, 0.5, 0.0, 0.0);
+        let _ = filter.process_sample(f32::NAN, 1000.0, 0.5, 0.0, 0.0);
+        for i in 0..64 {
+            let y = filter.process_sample(0.5, 1000.0, 0.5, 0.0, 0.0);
+            assert!(y.is_finite(), "CytomicZdfFilter latched NaN at sample {}", i);
+        }
+
+        let mut silent = CytomicZdfFilter::new(44100.0);
+        let _ = silent.process_sample(1e-18, 500.0, 0.0, 0.0, 0.0);
+        for _ in 0..4000 {
+            let _ = silent.process_sample(0.0, 500.0, 0.0, 0.0, 0.0);
+        }
+        assert!(
+            !silent.stage1.s1.is_subnormal() && !silent.stage1.s2.is_subnormal(),
+            "Cytomic filter leaked subnormal states"
+        );
     }
 }

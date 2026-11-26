@@ -29,6 +29,17 @@ impl Random {
             active_shifts: Vec::with_capacity(16),
         }
     }
+    fn pop_shift(&mut self, channel: u8, note: u8) -> i16 {
+        if let Some(idx) = self
+            .active_shifts
+            .iter()
+            .position(|(ch, p, _)| *ch == channel && *p == note)
+        {
+            self.active_shifts.swap_remove(idx).2
+        } else {
+            0
+        }
+    }
 }
 
 impl Default for Random {
@@ -73,6 +84,15 @@ impl MidiEffectDevice for Random {
 
         for ev in events_in {
             match ev {
+                MidiEvent::NoteOn { channel, note, velocity } if *velocity == 0 => {
+                    let shift = self.pop_shift(*channel, *note);
+                    let new_note = (*note as i16 + shift).clamp(0, 127) as u8;
+                    events_out.push(MidiEvent::NoteOn {
+                        channel: *channel,
+                        note: new_note,
+                        velocity: 0,
+                    });
+                }
                 MidiEvent::NoteOn { channel, note, velocity } => {
                     let rand_val = ((*note as f32 * 1234.567 + *velocity as f32 * 98.76).sin()).abs();
                     let shift = if rand_val < self.chance {
@@ -96,15 +116,7 @@ impl MidiEffectDevice for Random {
                     });
                 }
                 MidiEvent::NoteOff { channel, note } => {
-                    let shift = if let Some(idx) = self
-                        .active_shifts
-                        .iter()
-                        .position(|(ch, p, _)| ch == channel && p == note)
-                    {
-                        self.active_shifts.swap_remove(idx).2
-                    } else {
-                        0
-                    };
+                    let shift = self.pop_shift(*channel, *note);
                     let new_note = (*note as i16 + shift).clamp(0, 127) as u8;
                     events_out.push(MidiEvent::NoteOff {
                         channel: *channel,

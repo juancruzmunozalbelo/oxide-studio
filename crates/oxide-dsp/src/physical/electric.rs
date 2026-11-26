@@ -142,7 +142,7 @@ impl ElectricDevice {
         v.reset();
         v.active = true;
 
-        let pulse_samples = (3.0 + (1.0 - self.hammer_hardness) * 12.0) as usize;
+        let pulse_samples = ((3.0 + (1.0 - self.hammer_hardness) * 12.0) * (self.sample_rate / 44100.0)).round() as usize;
         v.hammer_pulse_left = pulse_samples.max(2);
         v.hammer_force = v.velocity;
 
@@ -174,12 +174,16 @@ impl ElectricDevice {
 
         let base_vol = self.master_volume;
 
-        // Advance Tremolo LFO
-        if self.tremolo_enabled {
+        // Advance Tremolo LFO (unity gain when disabled so L/R never freezes imbalanced)
+        let (trem_mod_l, trem_mod_r) = if self.tremolo_enabled {
             self.tremolo_phase = (self.tremolo_phase + self.tremolo_rate * inv_sr).fract();
-        }
-        let trem_mod_l = 1.0 + self.tremolo_depth * (2.0 * PI * self.tremolo_phase).sin();
-        let trem_mod_r = 1.0 + self.tremolo_depth * (2.0 * PI * (self.tremolo_phase + 0.5)).sin();
+            (
+                1.0 + self.tremolo_depth * (2.0 * PI * self.tremolo_phase).sin(),
+                1.0 + self.tremolo_depth * (2.0 * PI * (self.tremolo_phase + 0.5)).sin(),
+            )
+        } else {
+            (1.0, 1.0)
+        };
 
         for voice in &mut self.voices {
             if !voice.active {
@@ -347,5 +351,36 @@ mod tests {
             energy += buf.left[i] * buf.left[i];
         }
         assert!(energy > 0.0001, "Electric piano must render audible audio");
+    }
+
+    #[test]
+    fn test_dsp11_electric_tremolo_disable_balanced_and_sr_scaled_hammer() {
+        let mut electric = ElectricDevice::new(44100.0);
+        electric.tremolo_enabled = true;
+        electric.tremolo_depth = 0.5;
+        electric.tremolo_phase = 0.25; // Peak L/R imbalance
+        electric.tremolo_enabled = false;
+        electric.trigger_note_on(60, 110);
+
+        for _ in 0..64 {
+            let (l, r) = electric.process_stereo_sample();
+            assert!(
+                (l - r).abs() < 1e-6,
+                "Disabled tremolo must output balanced L/R, got L={} R={}",
+                l,
+                r
+            );
+        }
+
+        let mut e44 = ElectricDevice::new(44100.0);
+        let mut e96 = ElectricDevice::new(96000.0);
+        e44.trigger_note_on(60, 100);
+        e96.trigger_note_on(60, 100);
+        assert!(
+            e96.voices[0].hammer_pulse_left > e44.voices[0].hammer_pulse_left + 4,
+            "Hammer pulse samples must scale with sample rate: 44.1k={}, 96k={}",
+            e44.voices[0].hammer_pulse_left,
+            e96.voices[0].hammer_pulse_left
+        );
     }
 }

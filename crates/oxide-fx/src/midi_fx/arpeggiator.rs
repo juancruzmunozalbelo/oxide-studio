@@ -28,6 +28,7 @@ pub struct Arpeggiator {
     current_index: usize,
     up_direction: bool,
     active_playing_note: Option<(u8, u8)>, // (channel, note)
+    active_playing_chord: Vec<(u8, u8)>,
     sorted_scratch: Vec<(u8, u8, u8)>,
     full_scratch: Vec<(u8, u8, u8)>,
     seq_scratch: Vec<(u8, u8, u8)>,
@@ -48,6 +49,7 @@ impl Arpeggiator {
             current_index: 0,
             up_direction: true,
             active_playing_note: None,
+            active_playing_chord: Vec::with_capacity(64),
             sorted_scratch: Vec::with_capacity(16),
             full_scratch: Vec::with_capacity(64),
             seq_scratch: Vec::with_capacity(128),
@@ -159,6 +161,7 @@ impl Device for Arpeggiator {
         self.current_index = 0;
         self.up_direction = true;
         self.active_playing_note = None;
+        self.active_playing_chord.clear();
     }
 }
 
@@ -197,6 +200,9 @@ impl MidiEffectDevice for Arpeggiator {
             if let Some((ch, note)) = self.active_playing_note.take() {
                 events_out.push(MidiEvent::NoteOff { channel: ch, note });
             }
+            for (ch, note) in self.active_playing_chord.drain(..) {
+                events_out.push(MidiEvent::NoteOff { channel: ch, note });
+            }
             return;
         }
 
@@ -211,8 +217,11 @@ impl MidiEffectDevice for Arpeggiator {
         if step != self.last_step {
             self.last_step = step;
 
-            // Turn off previous note
+            // Turn off previous note(s)
             if let Some((ch, note)) = self.active_playing_note.take() {
+                events_out.push(MidiEvent::NoteOff { channel: ch, note });
+            }
+            for (ch, note) in self.active_playing_chord.drain(..) {
                 events_out.push(MidiEvent::NoteOff { channel: ch, note });
             }
 
@@ -220,6 +229,7 @@ impl MidiEffectDevice for Arpeggiator {
             match self.pattern {
                 ArpPattern::ChordTrigger => {
                     for &(ch, p, v) in &self.seq_scratch {
+                        self.active_playing_chord.push((ch, p));
                         events_out.push(MidiEvent::NoteOn { channel: ch, note: p, velocity: v });
                     }
                 }

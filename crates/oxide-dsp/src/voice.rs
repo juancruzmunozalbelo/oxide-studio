@@ -89,6 +89,8 @@ pub enum VoiceTriggerAction {
     TriggerAttack,
     /// Gate was already open: continues in legato mode without re-triggering attack.
     LegatoGlide,
+    /// NoteOn with velocity 0 emptied the stack: triggers release on envelopes.
+    TriggerRelease,
 }
 
 /// Action to be taken on note releases.
@@ -141,7 +143,7 @@ impl MonophonicVoice {
     pub fn note_on(&mut self, note: u8, velocity: u8, glide_ms: f32) -> VoiceTriggerAction {
         if velocity == 0 {
             match self.note_off(note) {
-                VoiceReleaseAction::TriggerRelease => VoiceTriggerAction::TriggerAttack,
+                VoiceReleaseAction::TriggerRelease => VoiceTriggerAction::TriggerRelease,
                 VoiceReleaseAction::LegatoRestore(_) => VoiceTriggerAction::LegatoGlide,
             }
         } else {

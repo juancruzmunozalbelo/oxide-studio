@@ -157,7 +157,7 @@ impl ClipEnvelopeLoop {
             self.loop_start_beat + (((rel % env_len) + env_len) % env_len)
         } else {
             // One-shot unlinked envelope: clamped to bounds
-            clip_beat.clamp(self.loop_start_beat, self.loop_end_beat)
+            clip_beat.clamp(self.loop_start_beat, self.loop_end_beat.max(self.loop_start_beat))
         }
     }
 }

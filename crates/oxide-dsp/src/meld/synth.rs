@@ -402,6 +402,9 @@ impl MeldDevice {
         v.note = note;
         v.velocity = velocity as f32 / 127.0;
         v.age = self.voice_counter;
+        v.pitch_bend_semitones = 0.0;
+        v.slide = 0.0;
+        v.pressure = 0.0;
         v.env_a.trigger_attack();
         v.env_b.trigger_attack();
         v.filter_a.reset();
@@ -738,5 +741,21 @@ mod tests {
             energy += buf.left[i] * buf.left[i];
         }
         assert!(energy > 0.0001, "Meld with MPE modulation must generate audible sound");
+    }
+
+    #[test]
+    fn test_dsp12_meld_trigger_resets_stale_mpe() {
+        let mut meld = MeldDevice::new(44100.0);
+        meld.trigger_note_on(60, 100);
+        meld.set_pitch_bend(7.0);
+        meld.set_mpe_slide(0.9);
+        meld.set_mpe_pressure(0.8);
+        // Simulate voice finishing naturally without full reset()
+        meld.voices[0].active = false;
+
+        meld.trigger_note_on(64, 100);
+        assert_eq!(meld.voices[0].pitch_bend_semitones, 0.0, "Stale MPE pitch bend leaked");
+        assert_eq!(meld.voices[0].slide, 0.0, "Stale MPE slide leaked");
+        assert_eq!(meld.voices[0].pressure, 0.0, "Stale MPE pressure leaked");
     }
 }

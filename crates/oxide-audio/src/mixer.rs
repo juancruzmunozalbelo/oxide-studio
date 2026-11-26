@@ -284,7 +284,11 @@ impl Default for ModularAudioMixer {
 
 impl ModularAudioMixer {
     pub fn new(sample_rate: f32) -> Self {
-        let sr = if sample_rate <= 0.0 { 44100.0 } else { sample_rate };
+        let sr = if sample_rate.is_finite() && sample_rate > 0.0 {
+            sample_rate
+        } else {
+            44100.0
+        };
         let meter_alpha = 1.0 - (-1.0 / (METER_WINDOW_SECONDS * sr)).exp();
         let peak_decay_coeff = (-1.0 / (1.5 * sr)).exp();
 
@@ -322,11 +326,21 @@ impl ModularAudioMixer {
     }
 
     pub fn set_sample_rate(&mut self, sample_rate: f32) {
-        if sample_rate > 0.0 {
+        if sample_rate.is_finite() && sample_rate > 0.0 {
             self.sample_rate = sample_rate;
             self.meter_alpha = 1.0 - (-1.0 / (METER_WINDOW_SECONDS * sample_rate)).exp();
             self.peak_decay_coeff = (-1.0 / (1.5 * sample_rate)).exp();
             self.master_limiter.set_sample_rate(sample_rate);
+
+            let needed_frames = ((MAX_DELAY_MS / 1000.0) * sample_rate.max(44100.0)).ceil() as usize + 64;
+            for ch in &mut self.channels {
+                if ch.delay_buf_l.len() < needed_frames {
+                    ch.delay_buf_l.resize(needed_frames, 0.0);
+                    ch.delay_buf_r.resize(needed_frames, 0.0);
+                    ch.delay_write_ptr %= ch.delay_buf_l.len();
+                }
+                ch.set_track_delay(ch.track_delay_ms, sample_rate);
+            }
         }
     }
 
@@ -392,6 +406,53 @@ impl ModularAudioMixer {
     /// Check if any channel or return bus is soloed.
     pub fn is_any_solo(&self) -> bool {
         self.channels.iter().any(|c| c.solo) || self.returns.iter().any(|r| r.solo)
+    }
+
+    /// Returns true if `channel_idx` is solo-audible: directly soloed, routed into a soloed
+    /// ancestor GroupTrack, or a GroupTrack with a soloed descendant child routed into it.
+    fn is_channel_solo_effective(&self, channel_idx: usize) -> bool {
+        let ch = &self.channels[channel_idx];
+        if ch.solo {
+            return true;
+        }
+        // Upward walk: soloing a Group makes its routed children solo-audible
+        let max_depth = self.channels.len();
+        let mut dest = &ch.output_destination;
+        for _ in 0..max_depth {
+            if let OutputDestination::GroupTrack(gid) = *dest {
+                if let Some(parent) = self.channels.iter().find(|c| c.id == gid) {
+                    if parent.solo {
+                        return true;
+                    }
+                    dest = &parent.output_destination;
+                    continue;
+                }
+            }
+            break;
+        }
+        // Downward check: soloing a child makes its parent GroupTrack(s) solo-audible
+        if ch.track_type == TrackType::Group {
+            let group_id = ch.id;
+            for candidate in &self.channels {
+                if !candidate.solo {
+                    continue;
+                }
+                let mut cur_dest = &candidate.output_destination;
+                for _ in 0..max_depth {
+                    if let OutputDestination::GroupTrack(gid) = *cur_dest {
+                        if gid == group_id {
+                            return true;
+                        }
+                        if let Some(parent) = self.channels.iter().find(|c| c.id == gid) {
+                            cur_dest = &parent.output_destination;
+                            continue;
+                        }
+                    }
+                    break;
+                }
+            }
+        }
+        false
     }
 
     /// Equal-power DJ Crossfader curve calculation.
@@ -473,14 +534,11 @@ impl ModularAudioMixer {
         }
 
         let any_solo = self.is_any_solo();
+        let solo_effective = !any_solo || self.is_channel_solo_effective(channel_idx);
         let ch = &mut self.channels[channel_idx];
-        let len = left.len().min(right.len());
+        let len = left.len().min(right.len()).min(self.master_bus_l_f64.len());
 
-        let is_audible = if any_solo {
-            ch.solo && !ch.mute
-        } else {
-            !ch.mute
-        };
+        let is_audible = solo_effective && !ch.mute;
 
         // 0. Fold accumulated GroupTrack child audio into this channel's input (regardless of track delay)
         let grp_avail = len.min(ch.group_bus_l.len()).min(ch.group_bus_r.len());
@@ -612,7 +670,8 @@ impl ModularAudioMixer {
             }
             OutputDestination::SendsOnly => {}
             OutputDestination::Resampling => {
-                for i in 0..len {
+                let res_len = len.min(self.resampling_bus_l.len()).min(self.resampling_bus_r.len());
+                for i in 0..res_len {
                     left[i] = self.resampling_bus_l[i];
                     right[i] = self.resampling_bus_r[i];
                     self.master_bus_l_f64[i] += left[i] as f64;
@@ -640,6 +699,7 @@ impl ModularAudioMixer {
             return;
         }
 
+        let frames = frames.min(self.master_bus_l_f64.len());
         let any_solo = self.is_any_solo();
         let ret = &mut self.returns[return_idx];
         ret.ensure_capacity(frames);
@@ -922,5 +982,77 @@ mod tests {
         let mut out_r = vec![0.0f32; frames];
         mixer.end_block(&mut out_l, &mut out_r);
         assert!(out_l[200] > 0.1, "GroupTrack mix must reach Master bus");
+    }
+
+    #[test]
+    fn test_dsp8_mixer_oob_guard_group_solo_and_sample_rate_delay() {
+        // (a) Calling process_channel / process_return with frames > master_bus must not panic
+        let mut mixer_oob = ModularAudioMixer::new(44100.0);
+        let ch = mixer_oob.add_channel("LargeBlock", TrackType::Audio);
+        let mut big_l = vec![0.2f32; 9000];
+        let mut big_r = vec![0.2f32; 9000];
+        mixer_oob.process_channel(ch, &mut big_l, &mut big_r);
+        mixer_oob.process_return(0, |_l, _r| {}, 9000);
+
+        // (b) GroupTrack + Solo propagation (both directions)
+        let mut mixer = ModularAudioMixer::new(44100.0);
+        let child = mixer.add_channel("Child", TrackType::Audio);
+        let group = mixer.add_channel("Group", TrackType::Group);
+        let group_id = mixer.channels[group].id;
+        mixer.channels[child].output_destination = OutputDestination::GroupTrack(group_id);
+        mixer.channels[group].output_destination = OutputDestination::Master;
+
+        // Solo Group -> child must feed Group -> Master receives audio
+        mixer.channels[group].solo = true;
+        mixer.begin_block(256);
+        let mut cl = vec![0.5f32; 256];
+        let mut cr = vec![0.5f32; 256];
+        mixer.process_channel(child, &mut cl, &mut cr);
+        let mut gl = vec![0.0f32; 256];
+        let mut gr = vec![0.0f32; 256];
+        mixer.process_channel(group, &mut gl, &mut gr);
+        let mut out_l = vec![0.0f32; 256];
+        let mut out_r = vec![0.0f32; 256];
+        mixer.end_block(&mut out_l, &mut out_r);
+        assert!(
+            out_l[200] > 0.05,
+            "Soloing GroupTrack must keep its children audible, got {}",
+            out_l[200]
+        );
+
+        // Solo Child -> parent GroupTrack must pass audio through to Master
+        mixer.channels[group].solo = false;
+        mixer.channels[child].solo = true;
+        mixer.begin_block(256);
+        let mut cl2 = vec![0.5f32; 256];
+        let mut cr2 = vec![0.5f32; 256];
+        mixer.process_channel(child, &mut cl2, &mut cr2);
+        let mut gl2 = vec![0.0f32; 256];
+        let mut gr2 = vec![0.0f32; 256];
+        mixer.process_channel(group, &mut gl2, &mut gr2);
+        let mut out_l2 = vec![0.0f32; 256];
+        let mut out_r2 = vec![0.0f32; 256];
+        mixer.end_block(&mut out_l2, &mut out_r2);
+        assert!(
+            out_l2[200] > 0.05,
+            "Soloing child track must keep parent GroupTrack audible, got {}",
+            out_l2[200]
+        );
+
+        // (c) set_sample_rate must resize delay buffers and recompute delay_samples; reject NaN/Inf
+        let mut mixer_sr = ModularAudioMixer::new(44100.0);
+        let dch = mixer_sr.add_channel("Delayed", TrackType::Audio);
+        mixer_sr.channels[dch].set_track_delay(100.0, 44100.0);
+        assert_eq!(mixer_sr.channels[dch].delay_samples, 4410);
+
+        mixer_sr.set_sample_rate(96000.0);
+        assert_eq!(
+            mixer_sr.channels[dch].delay_samples, 9600,
+            "set_sample_rate(96000) must resize delay buffer and recompute 100ms delay to 9600 samples"
+        );
+        mixer_sr.set_sample_rate(f32::INFINITY);
+        assert!(mixer_sr.sample_rate.is_finite());
+        let mixer_nan = ModularAudioMixer::new(f32::NAN);
+        assert!(mixer_nan.sample_rate.is_finite() && mixer_nan.sample_rate > 0.0);
     }
 }

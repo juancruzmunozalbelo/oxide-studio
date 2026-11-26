@@ -69,13 +69,13 @@ impl<'a> Widget for EqEightVisualizerWidget<'a> {
         let log_min = (20.0_f32).ln();
         let log_max = (20000.0_f32).ln();
 
-        if response.dragged() || response.clicked() {
+        if (response.dragged() || response.clicked()) && rect.width() > 1.0 && rect.height() > 1.0 {
             if let Some(pos) = response.interact_pointer_pos() {
                 // If dragging, update the selected band's freq and gain
                 let sel = self.state.selected_band.min(self.state.bands.len().saturating_sub(1));
-                let norm_x = ((pos.x - rect.left()) / rect.width()).clamp(0.0, 1.0);
+                let norm_x = ((pos.x - rect.left()) / rect.width().max(1.0)).clamp(0.0, 1.0);
                 let new_freq = (log_min + norm_x * (log_max - log_min)).exp();
-                let norm_y = ((pos.y - rect.center().y) / (rect.height() * 0.45)).clamp(-1.0, 1.0);
+                let norm_y = ((pos.y - rect.center().y) / (rect.height() * 0.45).max(1.0)).clamp(-1.0, 1.0);
                 let new_gain = -norm_y * 15.0;
 
                 self.state.bands[sel].freq_hz = new_freq.clamp(20.0, 20000.0);

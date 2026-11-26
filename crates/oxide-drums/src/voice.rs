@@ -44,6 +44,9 @@ impl DrumVoice {
     /// Read sample with linear interpolation.
     #[inline(always)]
     pub fn interpolate_linear(sample_data: &[f32], channels: usize, phase: f64) -> f32 {
+        if channels == 0 || !phase.is_finite() || phase < 0.0 {
+            return 0.0;
+        }
         let total_frames = sample_data.len() / channels;
         let frame_idx = phase as usize;
         if frame_idx >= total_frames {
@@ -62,6 +65,9 @@ impl DrumVoice {
     /// Read sample with 4-point Hermite cubic interpolation for higher fidelity.
     #[inline(always)]
     pub fn interpolate_cubic(sample_data: &[f32], channels: usize, phase: f64) -> f32 {
+        if channels == 0 || !phase.is_finite() || phase < 0.0 {
+            return 0.0;
+        }
         let total_frames = sample_data.len() / channels;
         let idx = phase as usize;
         if idx >= total_frames {
@@ -92,5 +98,19 @@ impl DrumVoice {
         let c3 = 0.5 * (s2 - s_prev) + 1.5 * (s0 - s1);
 
         ((c3 * frac + c2) * frac + c1) * frac + c0
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_dsp13_interpolate_guards_zero_channels_and_negative_phase() {
+        let data = [0.5f32, 0.25, -0.5, 0.75];
+        assert_eq!(DrumVoice::interpolate_linear(&data, 0, 0.0), 0.0);
+        assert_eq!(DrumVoice::interpolate_cubic(&data, 0, 0.0), 0.0);
+        assert_eq!(DrumVoice::interpolate_linear(&data, 1, -1.5), 0.0);
+        assert_eq!(DrumVoice::interpolate_cubic(&data, 1, f64::NAN), 0.0);
     }
 }

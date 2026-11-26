@@ -59,6 +59,11 @@ impl Default for GrooveTemplate {
     }
 }
 
+#[inline]
+fn finite_or_zero(x: f32) -> f32 {
+    if x.is_finite() { x } else { 0.0 }
+}
+
 impl GrooveTemplate {
     pub fn new(name: impl Into<String>) -> Self {
         Self {
@@ -73,7 +78,7 @@ impl GrooveTemplate {
     /// extracting timing displacement in ticks (-120..+120) and relative velocity dynamics.
     pub fn extract_groove_from_audio(samples: &[f32], sample_rate: u32, bpm: f64) -> Self {
         let mut template = Self::default();
-        if samples.is_empty() || sample_rate == 0 || bpm <= 0.0 {
+        if samples.is_empty() || sample_rate == 0 || !bpm.is_finite() || bpm <= 0.0 {
             return template;
         }
 
@@ -98,7 +103,7 @@ impl GrooveTemplate {
             let mut max_val = 0.0f32;
             let mut peak_idx = window_start;
             for idx in window_start..window_end {
-                let abs_s = samples[idx].abs();
+                let abs_s = finite_or_zero(samples[idx]).abs();
                 if abs_s > max_val {
                     max_val = abs_s;
                     peak_idx = idx;
@@ -129,7 +134,8 @@ impl GrooveTemplate {
         for step in 0..16 {
             template.timing_offsets[step] = step_offsets_ticks[step];
             if step_peaks[step] > 0.001 && avg_peak > 0.001 {
-                let scale = (step_peaks[step] / avg_peak).clamp(0.0, 2.0);
+                let ratio = step_peaks[step] / avg_peak;
+                let scale = if ratio.is_finite() { ratio.clamp(0.0, 2.0) } else { 1.0 };
                 template.velocity_scalings[step] = scale;
             } else {
                 template.velocity_scalings[step] = 1.0;
@@ -143,7 +149,26 @@ impl GrooveTemplate {
     ///
     /// Notes are tuples of `(pitch, velocity, start_beat, duration_beats)`.
     pub fn apply_groove_to_notes(&self, notes: &mut [(u8, u8, f64, f64)]) {
+        let timing_amt = if self.timing_amount.is_finite() {
+            self.timing_amount.clamp(0.0, 2.0)
+        } else {
+            1.0
+        };
+        let quantize_amt = if self.quantize_amount.is_finite() {
+            self.quantize_amount.clamp(0.0, 1.0)
+        } else {
+            0.0
+        };
+        let random_amt = if self.random_amount.is_finite() {
+            self.random_amount.clamp(0.0, 1.0)
+        } else {
+            0.0
+        };
+
         for (pitch, vel, start_beat, _duration) in notes.iter_mut() {
+            if !start_beat.is_finite() {
+                *start_beat = 0.0;
+            }
             // Find closest 16th grid step
             let step_float = *start_beat / 0.25;
             let grid_step = step_float.round();
@@ -151,29 +176,33 @@ impl GrooveTemplate {
             let step_idx = (grid_step as usize) % 16;
 
             // 1. Pre-quantize toward straight grid
-            if self.quantize_amount > 0.0 {
-                let q = self.quantize_amount as f64;
+            if quantize_amt > 0.0 {
+                let q = quantize_amt as f64;
                 *start_beat = *start_beat * (1.0 - q) + grid_beat * q;
             }
 
             // 2. Timing offset displacement (ticks / 480 ticks per beat)
             let tick_offset = self.timing_offsets[step_idx] as f64;
-            let timing_shift = (tick_offset / 480.0) * (self.timing_amount as f64);
+            let timing_shift = (tick_offset / 480.0) * (timing_amt as f64);
 
             // 3. Random humanization
             let mut rand_shift = 0.0;
-            if self.random_amount > 0.0 {
+            if random_amt > 0.0 {
                 // Deterministic pseudo-random variation based on note and step
                 let seed = (*pitch as u32).wrapping_mul(1103515245).wrapping_add(step_idx as u32 * 12345);
                 let rnd_norm = ((seed % 1000) as f64 / 500.0) - 1.0; // -1.0 .. 1.0
-                rand_shift = (rnd_norm * 16.0 / 480.0) * (self.random_amount as f64);
+                rand_shift = (rnd_norm * 16.0 / 480.0) * (random_amt as f64);
             }
 
             *start_beat = (*start_beat + timing_shift + rand_shift).max(0.0);
 
             // 4. Velocity scaling
-            let v_scale = self.velocity_scalings[step_idx];
-            let effective_scale = 1.0 + (v_scale - 1.0) * self.timing_amount;
+            let v_scale = if self.velocity_scalings[step_idx].is_finite() {
+                self.velocity_scalings[step_idx].clamp(0.0, 2.0)
+            } else {
+                1.0
+            };
+            let effective_scale = 1.0 + (v_scale - 1.0) * timing_amt;
             let new_vel = (*vel as f32 * effective_scale).round().clamp(1.0, 127.0);
             *vel = new_vel as u8;
         }
@@ -196,7 +225,7 @@ impl AudioToMidiConverter {
         bpm: f64,
     ) -> Vec<TranscribedMidiNote> {
         let mut results = Vec::new();
-        if samples.is_empty() || sample_rate == 0 || bpm <= 0.0 {
+        if samples.is_empty() || sample_rate == 0 || !bpm.is_finite() || bpm <= 0.0 {
             return results;
         }
 
@@ -204,15 +233,16 @@ impl AudioToMidiConverter {
         let mut i = 0;
 
         while i < samples.len() {
-            let s = samples[i].abs();
+            let s = finite_or_zero(samples[i]).abs();
             if s > 0.08 {
                 // Local peak scan within window
                 let mut peak_val = s;
                 let mut peak_pos = i;
                 let scan_limit = (i + min_peak_distance / 2).min(samples.len());
                 for j in i..scan_limit {
-                    if samples[j].abs() > peak_val {
-                        peak_val = samples[j].abs();
+                    let sj = finite_or_zero(samples[j]).abs();
+                    if sj > peak_val {
+                        peak_val = sj;
                         peak_pos = j;
                     }
                 }
@@ -226,6 +256,10 @@ impl AudioToMidiConverter {
                     let slice = &samples[start..end];
                     let (centroid, low_en, mid_en, high_en) =
                         compute_spectral_analysis(slice, sample_rate);
+                    if low_en + mid_en + high_en <= 1e-6 {
+                        i = peak_pos + min_peak_distance;
+                        continue;
+                    }
 
                     let note = if centroid < 400.0 || (low_en > 2.0 * mid_en && low_en > 2.0 * high_en) {
                         36 // Kick (C1)
@@ -259,7 +293,7 @@ impl AudioToMidiConverter {
         bpm: f64,
     ) -> Vec<TranscribedMidiNote> {
         let mut results = Vec::new();
-        if samples.is_empty() || sample_rate == 0 || bpm <= 0.0 {
+        if samples.is_empty() || sample_rate == 0 || !bpm.is_finite() || bpm <= 0.0 {
             return results;
         }
 
@@ -276,7 +310,7 @@ impl AudioToMidiConverter {
             let frame_beat = (pos as f64 / sample_rate as f64) * (bpm / 60.0);
 
             // Compute frame RMS energy
-            let sum_sq: f32 = frame.iter().map(|&x| x * x).sum();
+            let sum_sq: f32 = frame.iter().map(|&x| { let s = finite_or_zero(x); s * s }).sum();
             let rms = (sum_sq / window_size as f32).sqrt();
 
             let detected = if rms > 0.015 {
@@ -333,7 +367,7 @@ impl AudioToMidiConverter {
         bpm: f64,
     ) -> Vec<TranscribedMidiNote> {
         let mut results = Vec::new();
-        if samples.is_empty() || sample_rate == 0 || bpm <= 0.0 {
+        if samples.is_empty() || sample_rate == 0 || !bpm.is_finite() || bpm <= 0.0 {
             return results;
         }
 
@@ -477,7 +511,7 @@ fn compute_spectral_analysis(samples: &[f32], sample_rate: u32) -> (f64, f64, f6
 
         for (i, &s) in samples.iter().enumerate() {
             let w = 0.5 * (1.0 - (2.0 * PI * i as f64 / n as f64).cos());
-            let win_s = s as f64 * w;
+            let win_s = finite_or_zero(s) as f64 * w;
             let angle = 2.0 * PI * (k * i) as f64 / n as f64;
             real += win_s * angle.cos();
             imag -= win_s * angle.sin();
@@ -516,7 +550,7 @@ fn estimate_pitch_yin(samples: &[f32], sample_rate: u32) -> Option<f64> {
     for tau in 1..max_tau {
         let mut sum = 0.0f64;
         for i in 0..max_tau {
-            let diff = samples[i] as f64 - samples[i + tau] as f64;
+            let diff = finite_or_zero(samples[i]) as f64 - finite_or_zero(samples[i + tau]) as f64;
             sum += diff * diff;
         }
         d[tau] = sum;
@@ -586,16 +620,21 @@ fn estimate_pitch_yin(samples: &[f32], sample_rate: u32) -> Option<f64> {
     }
 }
 
-/// Helper: Compute discrete Fourier magnitude at exact target frequency.
+/// Helper: Compute discrete Fourier magnitude at exact target frequency (DC-removed).
 fn compute_fourier_magnitude_at_freq(samples: &[f32], sample_rate: u32, freq: f64) -> f32 {
     let mut real = 0.0f64;
     let mut imag = 0.0f64;
     let n = samples.len();
+    if n == 0 {
+        return 0.0;
+    }
+    let mean = samples.iter().map(|&s| finite_or_zero(s) as f64).sum::<f64>() / n as f64;
 
     for (i, &s) in samples.iter().enumerate() {
         let angle = 2.0 * PI * freq * (i as f64) / (sample_rate as f64);
-        real += s as f64 * angle.cos();
-        imag -= s as f64 * angle.sin();
+        let centered = finite_or_zero(s) as f64 - mean;
+        real += centered * angle.cos();
+        imag -= centered * angle.sin();
     }
 
     ((real * real + imag * imag).sqrt() / n as f64 * 2.0) as f32
@@ -858,5 +897,40 @@ mod tests {
             "Multi-window harmony must transcribe chord change in second half, got {:?}",
             chord_notes
         );
+    }
+
+    #[test]
+    fn test_audio_to_midi_nan_inf_dc_and_non_finite_bpm_guards() {
+        let sr = 44100u32;
+        // 1. High-freq 8 kHz hi-hat with a single NaN sample inside window must NOT become Kick (36)
+        let mut hat = vec![0.0f32; 4096];
+        for (i, sample) in hat.iter_mut().enumerate() {
+            let t = i as f64 / sr as f64;
+            *sample = (2.0 * PI * 8000.0 * t).sin() as f32 * (-t * 45.0).exp() as f32 * 0.8;
+        }
+        hat[300] = f32::NAN;
+        let drums = AudioToMidiConverter::convert_drums_to_midi(&hat, sr, 120.0);
+        assert!(!drums.is_empty());
+        assert_ne!(drums[0].note, 36, "Single NaN in hi-hat window must not misclassify as Kick (36)");
+
+        // 2. Pure DC offset in short harmony buffer must produce 0 chord notes
+        let dc_short = vec![0.5f32; 256];
+        let dc_chord = AudioToMidiConverter::convert_harmony_to_midi(&dc_short, sr, 120.0);
+        assert!(dc_chord.is_empty(), "Pure DC offset must not emit phantom harmony notes: {:?}", dc_chord);
+
+        // 3. NaN BPM must safely return empty
+        assert!(AudioToMidiConverter::convert_drums_to_midi(&hat, sr, f64::NAN).is_empty());
+        assert!(AudioToMidiConverter::convert_melody_to_midi(&hat, sr, f64::NAN).is_empty());
+        assert!(AudioToMidiConverter::convert_harmony_to_midi(&hat, sr, f64::NAN).is_empty());
+
+        // 4. Inf in groove extraction & NaN timing_amount in apply_groove_to_notes
+        let mut inf_audio = vec![0.0f32; 44100];
+        inf_audio[100] = f32::INFINITY;
+        let mut groove = GrooveTemplate::extract_groove_from_audio(&inf_audio, sr, 120.0);
+        assert!(groove.velocity_scalings.iter().all(|v| v.is_finite()));
+        groove.timing_amount = f32::NAN;
+        let mut notes = vec![(60u8, 100u8, 0.25f64, 0.25f64)];
+        groove.apply_groove_to_notes(&mut notes);
+        assert!(notes[0].1 >= 1 && notes[0].2.is_finite());
     }
 }
