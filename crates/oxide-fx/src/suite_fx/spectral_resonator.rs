@@ -120,10 +120,11 @@ impl AudioEffectDevice for SpectralResonator {
 
             for h in 0..num_harmonics {
                 let harmonic_mult = (h + 1) as f32;
+                let max_fc = (self.sample_rate * 0.45).max(20.0);
                 let freq_l = (self.root_hz * harmonic_mult * (1.0 - self.unison_spread * 0.02))
-                    .clamp(20.0, self.sample_rate * 0.45);
+                    .clamp(20.0, max_fc);
                 let freq_r = (self.root_hz * harmonic_mult * (1.0 + self.unison_spread * 0.02))
-                    .clamp(20.0, self.sample_rate * 0.45);
+                    .clamp(20.0, max_fc);
 
                 let period_l = (self.sample_rate / freq_l) as usize;
                 let period_r = (self.sample_rate / freq_r) as usize;

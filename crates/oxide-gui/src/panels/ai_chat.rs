@@ -382,10 +382,19 @@ impl AiCopilotState {
         let k = self.api_key.trim();
         if k.is_empty() {
             "No Key".to_string()
-        } else if k.len() <= 8 {
+        } else if k.chars().count() <= 8 {
             "••••••••".to_string()
         } else {
-            format!("{}•••{}", &k[..4], &k[k.len() - 4..])
+            let prefix: String = k.chars().take(4).collect();
+            let suffix: String = k
+                .chars()
+                .rev()
+                .take(4)
+                .collect::<Vec<_>>()
+                .into_iter()
+                .rev()
+                .collect();
+            format!("{}•••{}", prefix, suffix)
         }
     }
 
@@ -1761,5 +1770,13 @@ mod tests {
         assert!(asst_msg_es.text.contains("OKF-06"));
         assert!(asst_msg_es.text.contains("Simpler"));
         assert!(asst_msg_es.mcp_badges.contains(&"simpler_slice_to_drum_rack".to_string()));
+    }
+
+    #[test]
+    fn test_mgw8_masked_key_preview_utf8_no_panic() {
+        let mut state = AiCopilotState::new();
+        state.api_key = "sk-éabcdef".to_string();
+        let preview = state.masked_key_preview();
+        assert!(preview.starts_with("sk-é") && preview.ends_with("cdef"), "got {}", preview);
     }
 }

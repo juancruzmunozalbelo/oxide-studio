@@ -261,17 +261,37 @@ impl ArrangementTrack {
             ClipPattern::Midi(merged_midi)
         };
 
-        // Remove fully encompassed clips; trim partially overlapping clips
+        // Remove fully encompassed clips; split or trim partially overlapping clips
+        let mut next_split_id = self
+            .clips
+            .iter()
+            .map(|c| c.id)
+            .max()
+            .unwrap_or(consolidated_id)
+            .max(consolidated_id)
+            .saturating_add(1);
+        let mut right_pieces = Vec::new();
         let mut i = 0;
         while i < self.clips.len() {
-            let c = &self.clips[i];
-            if c.timeline_start_beat >= start_beat && c.timeline_end_beat() <= end_beat {
+            let c_start = self.clips[i].timeline_start_beat;
+            let c_end = self.clips[i].timeline_end_beat();
+            if c_start >= start_beat && c_end <= end_beat {
                 self.clips.remove(i);
-            } else if c.timeline_start_beat < start_beat && c.timeline_end_beat() > start_beat && c.timeline_end_beat() <= end_beat {
-                self.clips[i].duration_beats = start_beat - self.clips[i].timeline_start_beat;
+            } else if c_start < start_beat && c_end > end_beat {
+                let mut right = self.clips[i].clone();
+                right.id = next_split_id;
+                next_split_id = next_split_id.saturating_add(1);
+                right.timeline_start_beat = end_beat;
+                right.duration_beats = c_end - end_beat;
+                right.pattern_offset_beats += end_beat - c_start;
+                self.clips[i].duration_beats = start_beat - c_start;
+                right_pieces.push(right);
                 i += 1;
-            } else if c.timeline_start_beat >= start_beat && c.timeline_start_beat < end_beat && c.timeline_end_beat() > end_beat {
-                let trim = end_beat - self.clips[i].timeline_start_beat;
+            } else if c_start < start_beat && c_end > start_beat && c_end <= end_beat {
+                self.clips[i].duration_beats = start_beat - c_start;
+                i += 1;
+            } else if c_start >= start_beat && c_start < end_beat && c_end > end_beat {
+                let trim = end_beat - c_start;
                 self.clips[i].timeline_start_beat = end_beat;
                 self.clips[i].duration_beats = (self.clips[i].duration_beats - trim).max(0.0);
                 self.clips[i].pattern_offset_beats += trim;
@@ -280,6 +300,7 @@ impl ArrangementTrack {
                 i += 1;
             }
         }
+        self.clips.extend(right_pieces);
 
         let consolidated = ArrangementClip::new(
             consolidated_id,

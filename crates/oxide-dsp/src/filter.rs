@@ -21,7 +21,11 @@ impl MystranZdfLadder {
     /// Create a new ladder filter initialized with a given sample rate.
     pub fn new(sample_rate: f32) -> Self {
         Self {
-            sample_rate: if sample_rate <= 0.0 { 44100.0 } else { sample_rate },
+            sample_rate: if sample_rate.is_finite() && sample_rate > 0.0 {
+                sample_rate
+            } else {
+                44100.0
+            },
             s1: 0.0,
             s2: 0.0,
             s3: 0.0,
@@ -41,7 +45,7 @@ impl MystranZdfLadder {
 
     /// Update sample rate.
     pub fn set_sample_rate(&mut self, sample_rate: f32) {
-        if sample_rate > 0.0 {
+        if sample_rate.is_finite() && sample_rate > 0.0 {
             self.sample_rate = sample_rate;
         }
     }
@@ -68,9 +72,19 @@ impl MystranZdfLadder {
     /// Returns the filtered sample with passband resonance gain compensation.
     #[allow(clippy::excessive_precision)]
     pub fn process_sample(&mut self, x: f32, cutoff_hz: f32, resonance_norm: f32) -> f32 {
+        let flush = |v: f32| -> f32 {
+            if !v.is_finite() || v.abs() < 1e-20 {
+                0.0
+            } else {
+                v
+            }
+        };
+
+        let x = if x.is_finite() { x.clamp(-16.0, 16.0) } else { 0.0 };
         let sr = self.sample_rate;
-        let nyquist_limit = (sr * 0.45).min(18000.0);
-        let fc = cutoff_hz.clamp(15.0, nyquist_limit);
+        let nyquist_limit = (sr * 0.45).clamp(15.0, 18000.0);
+        let safe_cutoff = if cutoff_hz.is_finite() { cutoff_hz } else { 1000.0 };
+        let fc = safe_cutoff.clamp(15.0, nyquist_limit);
 
         // Prewarped cutoff at 2x oversampled rate: w = pi * fc / (2 * fs)
         let w = (fc * PI) / (2.0 * sr);
@@ -79,21 +93,22 @@ impl MystranZdfLadder {
             / (1.0 - 0.42986726 * w2 + 0.009981878 * w2 * w2);
 
         // Resonance mapping: 0..1 -> k in 0..4.35
-        let res_clamped = resonance_norm.clamp(0.0, 1.0);
+        let safe_res = if resonance_norm.is_finite() { resonance_norm } else { 0.0 };
+        let res_clamped = safe_res.clamp(0.0, 1.0);
         let r = 4.35 * res_clamped.powf(0.85);
 
-        let mut y4 = self.s4;
-        let prev_x = self.prev_input;
+        let mut y4 = flush(self.s4);
+        let prev_x = flush(self.prev_input);
         self.prev_input = x;
 
         // 2x oversampling loop: linear midpoint interpolation
         for pass in 0..2 {
             let in_sample = if pass == 0 { 0.5 * (x + prev_x) } else { x };
 
-            let s1 = self.s1;
-            let s2 = self.s2;
-            let s3 = self.s3;
-            let s4 = self.s4;
+            let s1 = flush(self.s1);
+            let s2 = flush(self.s2);
+            let s3 = flush(self.s3);
+            let s4 = flush(self.s4);
 
             // Input saturation + feedback linearization
             let zi = in_sample - r * s4;
@@ -122,7 +137,7 @@ impl MystranZdfLadder {
                 + f0 * in_sample;
 
             let denom = 1.0 + r * f0;
-            y4 = num / denom;
+            y4 = flush(num / denom);
 
             // Back-substitute through the 4 ZDF integrator stages
             let u0 = t0 * (in_sample - r * y4);
@@ -130,14 +145,14 @@ impl MystranZdfLadder {
             let v2 = g1 * (s2 + f * t1 * v1);
             let v3 = g2 * (s3 + f * t2 * v2);
 
-            self.s1 = 2.0 * v1 - s1;
-            self.s2 = 2.0 * v2 - s2;
-            self.s3 = 2.0 * v3 - s3;
-            self.s4 = 2.0 * y4 - s4;
+            self.s1 = flush(2.0 * v1 - s1);
+            self.s2 = flush(2.0 * v2 - s2);
+            self.s3 = flush(2.0 * v3 - s3);
+            self.s4 = flush(2.0 * y4 - s4);
         }
 
         // Passband resonance gain compensation
-        y4 * (1.0 + 0.25 * res_clamped)
+        flush(y4 * (1.0 + 0.25 * res_clamped))
     }
 
     /// Process a block of samples in-place or into an output slice.
@@ -197,5 +212,24 @@ mod tests {
             assert!(y.is_finite(), "Output must be finite");
             assert!(y.abs() < 2.0, "Self-oscillation must stay bounded within |y| < 2.0, got {}", y);
         }
+    }
+
+    #[test]
+    fn test_dsp7_mystran_nan_inf_recovery_and_denormal_flush() {
+        let mut filter = MystranZdfLadder::new(44100.0);
+        let _ = filter.process_sample(f32::INFINITY, 1000.0, 0.5);
+        let _ = filter.process_sample(f32::NAN, 1000.0, 0.5);
+        for i in 0..64 {
+            let y = filter.process_sample(0.5, 1000.0, 0.5);
+            assert!(y.is_finite(), "MystranZdfLadder latched NaN at sample {}", i);
+        }
+
+        // Impulse followed by silence must flush subnormals instead of decaying into denormals
+        let mut silent = MystranZdfLadder::new(44100.0);
+        let _ = silent.process_sample(1e-18, 500.0, 0.0);
+        for _ in 0..4000 {
+            let _ = silent.process_sample(0.0, 500.0, 0.0);
+        }
+        assert!(!silent.s1.is_subnormal() && !silent.s4.is_subnormal(), "Filter leaked subnormal states");
     }
 }

@@ -1071,17 +1071,18 @@ impl WarpedAudioClip {
         samples: Vec<f32>,
         bpm: f64,
     ) -> Self {
-        let sr = sample_rate as f32;
+        let sr = if sample_rate == 0 { 44100.0 } else { sample_rate as f32 };
+        let safe_bpm = if bpm.is_finite() && bpm > 0.0 { bpm } else { 120.0 };
         let mut warper = OWarper::new(sr, WarperConfig::default());
-        warper.analyze_and_init(&samples, channels as usize, bpm);
+        warper.analyze_and_init(&samples, channels as usize, safe_bpm);
 
         let total_frames = samples.len() / (channels as usize).max(1);
         let total_sec = total_frames as f64 / sr as f64;
-        let length_beats = total_sec * (bpm / 60.0);
+        let length_beats = total_sec * (safe_bpm / 60.0);
 
         Self {
             name: name.into(),
-            sample_rate,
+            sample_rate: sr as u32,
             channels,
             length_beats,
             is_warped: true,
@@ -1109,6 +1110,14 @@ impl WarpedAudioClip {
     pub fn render_at_bpm(&self, project_bpm: f64) -> Vec<f32> {
         if !self.is_warped {
             return self.raw_samples.clone();
+        }
+        if self.raw_samples.is_empty()
+            || self.channels == 0
+            || self.sample_rate == 0
+            || !self.length_beats.is_finite()
+            || self.length_beats <= 0.0
+        {
+            return Vec::new();
         }
         let clip_bpm = (self.length_beats / (self.raw_samples.len() as f64 / (self.channels as usize * self.sample_rate as usize) as f64)) * 60.0;
         let stretch = (clip_bpm / project_bpm.max(20.0)).clamp(0.1, 10.0);

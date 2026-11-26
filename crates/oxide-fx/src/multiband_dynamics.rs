@@ -23,7 +23,7 @@ struct Biquad2 {
 
 impl Biquad2 {
     fn new_lowpass(fc: f32, sr: f32) -> Self {
-        let w0 = 2.0 * PI * fc.clamp(20.0, sr * 0.45) / sr;
+        let w0 = 2.0 * PI * fc.clamp(20.0, (sr * 0.45).max(20.0)) / sr;
         let cos_w0 = w0.cos();
         let sin_w0 = w0.sin();
         let alpha = sin_w0 / (2.0 * (1.0 / (2.0_f32).sqrt()));
@@ -46,7 +46,7 @@ impl Biquad2 {
     }
 
     fn new_highpass(fc: f32, sr: f32) -> Self {
-        let w0 = 2.0 * PI * fc.clamp(20.0, sr * 0.45) / sr;
+        let w0 = 2.0 * PI * fc.clamp(20.0, (sr * 0.45).max(20.0)) / sr;
         let cos_w0 = w0.cos();
         let sin_w0 = w0.sin();
         let alpha = sin_w0 / (2.0 * (1.0 / (2.0_f32).sqrt()));

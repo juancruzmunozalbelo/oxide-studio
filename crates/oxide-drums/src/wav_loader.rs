@@ -55,6 +55,9 @@ pub fn load_wav_file<P: AsRef<Path>>(path: P) -> Result<DecodedWav, String> {
                 return Err("Invalid channel count (0) in WAV".into());
             }
             sample_rate = u32::from_le_bytes(bytes[pos + 4..pos + 8].try_into().unwrap());
+            if sample_rate == 0 {
+                return Err("Invalid sample_rate (0) in WAV".into());
+            }
             bits_per_sample = u16::from_le_bytes(bytes[pos + 14..pos + 16].try_into().unwrap());
 
             if audio_format == 3 {
@@ -122,7 +125,7 @@ pub fn load_wav_file<P: AsRef<Path>>(path: P) -> Result<DecodedWav, String> {
             // 32-bit float IEEE-754
             for chunk in data_slice.chunks_exact(4) {
                 let s_f32 = f32::from_le_bytes(chunk.try_into().unwrap());
-                samples.push(s_f32);
+                samples.push(if s_f32.is_finite() { s_f32 } else { 0.0 });
             }
         } else {
             // 32-bit signed integer PCM

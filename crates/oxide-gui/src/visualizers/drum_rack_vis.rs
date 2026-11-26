@@ -83,12 +83,12 @@ impl<'a> Widget for DrumRackVisualizerWidget<'a> {
     fn ui(self, ui: &mut Ui) -> Response {
         let (rect, mut response) = ui.allocate_exact_size(self.size, Sense::click());
 
-        if response.clicked() {
+        if response.clicked() && rect.width() > 48.0 && rect.height() > 24.0 {
             if let Some(pos) = response.interact_pointer_pos() {
                 // Check if clicking bank buttons on left
                 let bank_w = 40.0;
                 if pos.x < rect.left() + bank_w {
-                    let bank_h = rect.height() / 8.0;
+                    let bank_h = (rect.height() / 8.0).max(1.0);
                     let bank_idx = (((pos.y - rect.top()) / bank_h).floor() as usize).min(7);
                     self.state.bank = bank_idx;
                     // Update pad notes for the bank
@@ -100,9 +100,9 @@ impl<'a> Widget for DrumRackVisualizerWidget<'a> {
                 } else {
                     // Check 4x4 pad grid
                     let grid_left = rect.left() + bank_w + 6.0;
-                    let grid_w = rect.width() - bank_w - 12.0;
+                    let grid_w = (rect.width() - bank_w - 12.0).max(4.0);
                     let pad_w = grid_w / 4.0;
-                    let pad_h = (rect.height() - 20.0) / 4.0;
+                    let pad_h = ((rect.height() - 20.0) / 4.0).max(1.0);
                     let grid_top = rect.top() + 18.0;
 
                     if pos.x >= grid_left && pos.y >= grid_top {

@@ -518,20 +518,28 @@ impl ModularPatchGraph {
                     state.outlets[0] = val;
                 }
                 PatchNodeKind::StateVariableFilter { cutoff, resonance, mode } => {
-                    let in_sig = state.inlets[0];
-                    let mod_cutoff = (cutoff + state.inlets[1]).clamp(20.0, sr * 0.45);
-                    let q = (resonance + state.inlets[2]).clamp(0.1, 10.0);
+                    let in_sig = if state.inlets[0].is_finite() { state.inlets[0] } else { 0.0 };
+                    let cut_mod = if state.inlets[1].is_finite() { state.inlets[1] } else { 0.0 };
+                    let res_mod = if state.inlets[2].is_finite() { state.inlets[2] } else { 0.0 };
+                    let nyquist = (sr * 0.45).max(20.0);
+                    let mod_cutoff = (cutoff + cut_mod).clamp(20.0, nyquist);
+                    let q = (resonance + res_mod).clamp(0.1, 10.0);
 
-                    // Chamberlin SVF topology
-                    let f = 2.0 * (PI * mod_cutoff / sr).sin();
-                    let damp = 1.0 / q;
+                    // Unconditionally stable Cytomic ZDF SVF topology
+                    let g = (PI * mod_cutoff / sr).tan().clamp(0.0001, 20.0);
+                    let k = 1.0 / q;
+                    let denom = 1.0 + g * (k + g);
+                    let s1 = if state.svf_ic1eq.is_finite() { state.svf_ic1eq } else { 0.0 };
+                    let s2 = if state.svf_ic2eq.is_finite() { state.svf_ic2eq } else { 0.0 };
 
-                    let hp = in_sig - state.svf_ic2eq - damp * state.svf_ic1eq;
-                    let bp = state.svf_ic1eq + f * hp;
-                    let lp = state.svf_ic2eq + f * bp;
+                    let hp = (in_sig - (k + g) * s1 - s2) / denom;
+                    let bp = s1 + g * hp;
+                    let lp = s2 + g * bp;
 
-                    state.svf_ic1eq = bp;
-                    state.svf_ic2eq = lp;
+                    let next_s1 = (2.0 * bp - s1).clamp(-4.0, 4.0);
+                    let next_s2 = (2.0 * lp - s2).clamp(-4.0, 4.0);
+                    state.svf_ic1eq = if !next_s1.is_finite() || next_s1.abs() < 1e-20 { 0.0 } else { next_s1 };
+                    state.svf_ic2eq = if !next_s2.is_finite() || next_s2.abs() < 1e-20 { 0.0 } else { next_s2 };
 
                     let out_val = match mode {
                         PatchFilterMode::Lowpass => lp,
@@ -539,10 +547,10 @@ impl ModularPatchGraph {
                         PatchFilterMode::Bandpass => bp,
                         PatchFilterMode::Notch => lp + hp,
                     };
-                    state.outlets[0] = out_val;
-                    state.outlets[1] = bp;
-                    state.outlets[2] = hp;
-                    state.outlets[3] = lp;
+                    state.outlets[0] = if out_val.is_finite() { out_val.clamp(-4.0, 4.0) } else { 0.0 };
+                    state.outlets[1] = if bp.is_finite() { bp.clamp(-4.0, 4.0) } else { 0.0 };
+                    state.outlets[2] = if hp.is_finite() { hp.clamp(-4.0, 4.0) } else { 0.0 };
+                    state.outlets[3] = if lp.is_finite() { lp.clamp(-4.0, 4.0) } else { 0.0 };
                 }
                 PatchNodeKind::EnvFollower { attack_ms, release_ms } => {
                     let in_sig = state.inlets[0].abs();
@@ -1291,5 +1299,27 @@ mod tests {
             graph.remove_node(99),
             Err(PatchGraphError::InvalidNodeId(99))
         );
+    }
+
+    #[test]
+    fn test_dsp2_svf_high_cutoff_remains_stable_and_finite() {
+        let mut graph = ModularPatchGraph::new(44100.0);
+        let svf = graph
+            .add_node(PatchNodeKind::StateVariableFilter {
+                cutoff: 14000.0,
+                resonance: 1.5,
+                mode: PatchFilterMode::Lowpass,
+            })
+            .expect("SVF");
+        graph.audio_input_node = Some(svf);
+        graph.audio_output_node_l = Some(svf);
+        graph.audio_output_node_r = Some(svf);
+
+        for i in 0..512 {
+            let x = if i == 0 { 1.0 } else { 0.0 };
+            let (l, r, _) = graph.process_frame(x, x);
+            assert!(l.is_finite() && r.is_finite(), "SVF exploded to non-finite at frame {}", i);
+            assert!(l.abs() < 4.0, "SVF unstable at frame {}: {}", i, l);
+        }
     }
 }

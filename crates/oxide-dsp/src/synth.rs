@@ -92,6 +92,10 @@ impl SynthEngine {
             VoiceTriggerAction::LegatoGlide => {
                 // Legato: gate remains open, envelopes do not retrigger
             }
+            VoiceTriggerAction::TriggerRelease => {
+                self.mod_env.trigger_release();
+                self.amp_env.trigger_release();
+            }
         }
     }
 
@@ -463,5 +467,31 @@ mod tests {
         let elapsed = start.elapsed();
         // 44100 samples in < 15ms in debug mode demonstrates sub-microsecond zero-alloc speed
         assert!(elapsed.as_millis() < 500, "Steady-state rendering must be sub-realtime fast: {:?}", elapsed);
+    }
+
+    #[test]
+    fn test_dsp1_note_on_velocity_zero_releases_instead_of_sticking() {
+        let mut synth = SynthEngine::new(44100.0);
+        synth.set_parameter("amplitude_envelope_attack", 1.0);
+        synth.set_parameter("amplitude_envelope_sustain", 0.8);
+        synth.set_parameter("amplitude_envelope_release", 20.0);
+
+        synth.note_on(60, 100);
+        for _ in 0..1024 {
+            synth.process_sample();
+        }
+        assert!(synth.amp_env.value > 0.4, "Note should be sustaining before NoteOn(vel=0)");
+
+        // Standard MIDI running-status NoteOff: NoteOn with velocity 0
+        synth.note_on(60, 0);
+        for _ in 0..8000 {
+            synth.process_sample();
+        }
+        assert!(
+            synth.amp_env.is_idle(),
+            "NoteOn with velocity 0 must release amp_env to Idle, got stage {:?} val {}",
+            synth.amp_env.stage,
+            synth.amp_env.value
+        );
     }
 }

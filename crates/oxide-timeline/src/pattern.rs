@@ -265,7 +265,7 @@ impl MidiPattern {
     /// Both note start positions and durations are scaled, clamped within pattern length.
     pub fn stretch_notes(&mut self, factor: f64, origin_beat: f64) {
         let f = factor.max(0.01);
-        let len = self.length_beats;
+        let len = self.length_beats.max(0.0);
         for note in &mut self.notes {
             let rel_start = note.start_beat - origin_beat;
             note.start_beat = (origin_beat + rel_start * f).clamp(0.0, len);

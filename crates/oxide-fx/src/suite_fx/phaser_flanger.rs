@@ -148,8 +148,9 @@ impl AudioEffectDevice for PhaserFlanger {
             let (wet_l, wet_r) = match self.mode {
                 PhaserFlangerMode::Phaser => {
                     // Sweep cutoff frequency
-                    let mod_l = (self.base_freq_hz * 2.0_f32.powf(lfo_l * self.depth * 2.0)).clamp(50.0, self.sample_rate * 0.45);
-                    let mod_r = (self.base_freq_hz * 2.0_f32.powf(lfo_r * self.depth * 2.0)).clamp(50.0, self.sample_rate * 0.45);
+                    let max_fc = (self.sample_rate * 0.45).max(50.0);
+                    let mod_l = (self.base_freq_hz * 2.0_f32.powf(lfo_l * self.depth * 2.0)).clamp(50.0, max_fc);
+                    let mod_r = (self.base_freq_hz * 2.0_f32.powf(lfo_r * self.depth * 2.0)).clamp(50.0, max_fc);
 
                     let w_l = PI * mod_l / self.sample_rate;
                     let w_r = PI * mod_r / self.sample_rate;

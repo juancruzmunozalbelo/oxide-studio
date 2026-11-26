@@ -821,6 +821,7 @@
 
   function updateFilterFromPointer(e) {
     const rect = filterCanvas.getBoundingClientRect();
+    if (!rect.width || !rect.height) return;
     const x = Math.max(0, Math.min(rect.width, e.clientX - rect.left));
     const y = Math.max(0, Math.min(rect.height, e.clientY - rect.top));
 
@@ -1310,8 +1311,12 @@
 
         stepBtn.addEventListener('click', () => {
           initAudio();
-          patternGrid[trackName][step] = patternGrid[trackName][step] ? 0 : 1;
-          stepBtn.classList.toggle('active');
+          const active = !patternGrid[trackName][step];
+          patternGrid[trackName][step] = active ? 1 : 0;
+          stepBtn.classList.toggle('active', active);
+          stepBtn.classList.toggle('active-snare', active && trackName === 'snare');
+          stepBtn.classList.toggle('active-hat', active && (trackName === 'closedHat' || trackName === 'openHat'));
+          stepBtn.classList.toggle('active-clap', active && trackName === 'clap');
 
           if (patternGrid[trackName][step]) {
             // Preview sound on trigger
@@ -1354,11 +1359,9 @@
       const isActive = patternGrid[track] && patternGrid[track][step];
 
       btn.classList.toggle('active', !!isActive);
-      if (isActive) {
-        if (track === 'snare') btn.classList.add('active-snare');
-        if (track === 'closedHat' || track === 'openHat') btn.classList.add('active-hat');
-        if (track === 'clap') btn.classList.add('active-clap');
-      }
+      btn.classList.toggle('active-snare', !!isActive && track === 'snare');
+      btn.classList.toggle('active-hat', !!isActive && (track === 'closedHat' || track === 'openHat'));
+      btn.classList.toggle('active-clap', !!isActive && track === 'clap');
     });
   }
 

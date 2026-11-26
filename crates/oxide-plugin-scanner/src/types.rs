@@ -68,21 +68,34 @@ pub struct PluginParameter {
     pub current_value: f32,
 }
 
+pub fn clamp_param_bounds(value: f32, min_value: f32, max_value: f32) -> (f32, f32, f32) {
+    let min_safe = if min_value.is_finite() { min_value } else { 0.0 };
+    let max_safe = if max_value.is_finite() { max_value } else { min_safe.max(1.0) };
+    let (lo, hi) = if min_safe <= max_safe {
+        (min_safe, max_safe)
+    } else {
+        (max_safe, min_safe)
+    };
+    let val_safe = if value.is_finite() { value } else { lo };
+    (lo, hi, val_safe.clamp(lo, hi))
+}
+
 impl PluginParameter {
     pub fn new(index: u32, name: impl Into<String>, min_value: f32, max_value: f32, default_value: f32) -> Self {
-        let default_clamped = default_value.clamp(min_value, max_value);
+        let (lo, hi, default_clamped) = clamp_param_bounds(default_value, min_value, max_value);
         Self {
             index,
             name: name.into(),
-            min_value,
-            max_value,
+            min_value: lo,
+            max_value: hi,
             default_value: default_clamped,
             current_value: default_clamped,
         }
     }
 
     pub fn set_value(&mut self, value: f32) {
-        self.current_value = value.clamp(self.min_value, self.max_value);
+        let (_, _, clamped) = clamp_param_bounds(value, self.min_value, self.max_value);
+        self.current_value = clamped;
     }
 }
 
@@ -261,5 +274,21 @@ impl PluginManifest {
 impl Default for PluginManifest {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_plugin_parameter_inverted_and_nan_bounds_do_not_panic() {
+        let mut p = PluginParameter::new(0, "Inverted", 1.0, 0.0, 0.5);
+        assert!(p.min_value <= p.max_value);
+        p.set_value(0.25);
+        assert!(p.current_value.is_finite());
+
+        let p_nan = PluginParameter::new(1, "NaN", f32::NAN, 1.0, f32::NAN);
+        assert!(p_nan.min_value <= p_nan.max_value && p_nan.current_value.is_finite());
     }
 }

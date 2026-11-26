@@ -55,10 +55,10 @@ impl<'a> Widget for RoarVisualizerWidget<'a> {
     fn ui(self, ui: &mut Ui) -> Response {
         let (rect, mut response) = ui.allocate_exact_size(self.size, Sense::click_and_drag());
 
-        if response.dragged() || response.clicked() {
+        if (response.dragged() || response.clicked()) && rect.width() > 1.0 && rect.height() > 1.0 {
             if let Some(pos) = response.interact_pointer_pos() {
                 // Dragging horizontally adjusts drive dB
-                let norm_x = ((pos.x - rect.left()) / rect.width()).clamp(0.0, 1.0);
+                let norm_x = ((pos.x - rect.left()) / rect.width().max(1.0)).clamp(0.0, 1.0);
                 self.state.drive_db = norm_x * 36.0;
                 response.mark_changed();
             }

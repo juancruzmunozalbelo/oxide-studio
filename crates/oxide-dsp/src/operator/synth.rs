@@ -400,7 +400,7 @@ impl OperatorDevice {
                 let op = &self.ops[i];
                 let f = match op.freq_mode {
                     OperatorFreqMode::Ratio => {
-                        let fine_ratio = 1.0 + 0.01 * op.fine;
+                        let fine_ratio = 2.0_f32.powf(op.fine.clamp(-100.0, 100.0) / 1200.0);
                         (note_freq * op.coarse * fine_ratio).clamp(1.0, sr * 0.48)
                     }
                     OperatorFreqMode::Fixed => op.fixed_hz.clamp(1.0, sr * 0.48),
@@ -751,5 +751,33 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn test_dsp12_operator_negative_fine_stays_in_tune() {
+        let mut op = OperatorDevice::new(44100.0);
+        op.algorithm = FmAlgorithm::Alg11;
+        op.filter_enabled = false;
+        op.ops[1].enabled = false;
+        op.ops[2].enabled = false;
+        op.ops[3].enabled = false;
+        op.ops[0].coarse = 1.0;
+        op.ops[0].fine = -100.0; // -100 cents (1 semitone down from A4 = 415.3 Hz)
+        op.ops[0].level = 1.0;
+        op.trigger_note_on(69, 127);
+
+        let mut samples = [0.0f32; 1024];
+        for s in &mut samples {
+            *s = op.process_stereo_sample().0;
+        }
+        let zc = samples
+            .windows(2)
+            .filter(|w| (w[0] <= 0.0 && w[1] > 0.0) || (w[0] >= 0.0 && w[1] < 0.0))
+            .count();
+        assert!(
+            zc >= 14,
+            "op.fine = -100.0 must tune near 415 Hz (~19 crossings/1024), got {} crossings",
+            zc
+        );
     }
 }

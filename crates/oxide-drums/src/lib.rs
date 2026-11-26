@@ -158,4 +158,53 @@ mod tests {
             let _ = std::fs::remove_file(&wav_path);
         }
     }
+
+    #[test]
+    fn test_dsp13_wav_loader_rejects_zero_sr_and_sanitizes_nan() {
+        // 1. WAV with sample_rate == 0 must return Err
+        let zero_sr_path = std::env::temp_dir().join("oxide_drums_dsp13_zero_sr.wav");
+        let mut zbytes = Vec::new();
+        zbytes.extend_from_slice(b"RIFF");
+        zbytes.extend_from_slice(&40u32.to_le_bytes());
+        zbytes.extend_from_slice(b"WAVE");
+        zbytes.extend_from_slice(b"fmt ");
+        zbytes.extend_from_slice(&16u32.to_le_bytes());
+        zbytes.extend_from_slice(&1u16.to_le_bytes()); // PCM
+        zbytes.extend_from_slice(&1u16.to_le_bytes()); // Mono
+        zbytes.extend_from_slice(&0u32.to_le_bytes()); // sample_rate = 0
+        zbytes.extend_from_slice(&0u32.to_le_bytes());
+        zbytes.extend_from_slice(&2u16.to_le_bytes());
+        zbytes.extend_from_slice(&16u16.to_le_bytes());
+        zbytes.extend_from_slice(b"data");
+        zbytes.extend_from_slice(&4u32.to_le_bytes());
+        zbytes.extend_from_slice(&[0u8; 4]);
+        std::fs::write(&zero_sr_path, &zbytes).unwrap();
+        let res_zero = load_wav_file(&zero_sr_path);
+        let _ = std::fs::remove_file(&zero_sr_path);
+        assert!(res_zero.is_err(), "WAV with sample_rate == 0 must be rejected");
+
+        // 2. 32-bit float WAV with NaN/Inf must sanitize to finite 0.0
+        let nan_path = std::env::temp_dir().join("oxide_drums_dsp13_nan_f32.wav");
+        let mut fbytes = Vec::new();
+        fbytes.extend_from_slice(b"RIFF");
+        fbytes.extend_from_slice(&48u32.to_le_bytes());
+        fbytes.extend_from_slice(b"WAVE");
+        fbytes.extend_from_slice(b"fmt ");
+        fbytes.extend_from_slice(&16u32.to_le_bytes());
+        fbytes.extend_from_slice(&3u16.to_le_bytes()); // IEEE float
+        fbytes.extend_from_slice(&1u16.to_le_bytes());
+        fbytes.extend_from_slice(&44100u32.to_le_bytes());
+        fbytes.extend_from_slice(&(44100u32 * 4).to_le_bytes());
+        fbytes.extend_from_slice(&4u16.to_le_bytes());
+        fbytes.extend_from_slice(&32u16.to_le_bytes());
+        fbytes.extend_from_slice(b"data");
+        fbytes.extend_from_slice(&12u32.to_le_bytes());
+        fbytes.extend_from_slice(&0.5f32.to_le_bytes());
+        fbytes.extend_from_slice(&f32::NAN.to_le_bytes());
+        fbytes.extend_from_slice(&f32::INFINITY.to_le_bytes());
+        std::fs::write(&nan_path, &fbytes).unwrap();
+        let decoded = load_wav_file(&nan_path).expect("Valid float WAV should load");
+        let _ = std::fs::remove_file(&nan_path);
+        assert_eq!(decoded.samples, vec![0.5, 0.0, 0.0]);
+    }
 }

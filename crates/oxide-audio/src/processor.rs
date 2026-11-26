@@ -64,6 +64,8 @@ pub struct AudioEngineProcessor {
     send_b_r: Box<[f32]>,
     send_a_active_tail: bool,
     send_b_active_tail: bool,
+    send_a_tail_frames: usize,
+    send_b_tail_frames: usize,
 
     // Oscilloscope ring buffer & precomputed 64-band Goertzel analyzer
     osc_buffer: [f32; 256],
@@ -140,6 +142,8 @@ impl AudioEngineProcessor {
             send_b_r: vec![0.0; MAX_BLOCK_FRAMES].into_boxed_slice(),
             send_a_active_tail: false,
             send_b_active_tail: false,
+            send_a_tail_frames: 0,
+            send_b_tail_frames: 0,
             osc_buffer: [0.0; 256],
             osc_write_pos: 0,
             spec_hann,
@@ -185,8 +189,12 @@ impl AudioEngineProcessor {
                 synth.all_notes_off();
             }
             AudioCommand::SetTempo(bpm) => {
-                transport.bpm = bpm;
-                delay.set_tempo(bpm);
+                if bpm.is_finite() {
+                    let clamped = bpm.clamp(20.0, 999.0);
+                    transport.bpm = clamped;
+                    delay.set_tempo(clamped);
+                    params.set(PARAM_BPM, clamped as f32);
+                }
             }
             AudioCommand::NoteOn { track_id, note, velocity } => {
                 if track_id == 1 {
@@ -537,8 +545,17 @@ impl AudioEngineProcessor {
         let send_b_active =
             (track0_active && xf_gain_0 > 0.0 && send_b_0 > 0.0001)
                 || (track1_active && xf_gain_1 > 0.0 && send_b_1 > 0.0001);
-        let process_return_a = send_a_active || self.send_a_active_tail;
-        let process_return_b = send_b_active || self.send_b_active_tail;
+        let tail_horizon = (self.sample_rate * 2.0) as usize;
+        if send_a_active {
+            self.send_a_tail_frames = tail_horizon;
+            self.send_a_active_tail = true;
+        }
+        if send_b_active {
+            self.send_b_tail_frames = tail_horizon;
+            self.send_b_active_tail = true;
+        }
+        let process_return_a = send_a_active || self.send_a_tail_frames > 0;
+        let process_return_b = send_b_active || self.send_b_tail_frames > 0;
 
         if !any_track_audible && !process_return_a && !process_return_b && !test_tone_active {
             self.scratch_l[..frames].fill(0.0);
@@ -573,7 +590,12 @@ impl AudioEngineProcessor {
                     self.scratch_r[i] += r;
                     peak_ret = peak_ret.max(l.abs()).max(r.abs());
                 }
-                self.send_a_active_tail = peak_ret > 1e-6;
+                if peak_ret > 1e-6 || send_a_active {
+                    self.send_a_tail_frames = tail_horizon;
+                } else {
+                    self.send_a_tail_frames = self.send_a_tail_frames.saturating_sub(frames);
+                }
+                self.send_a_active_tail = self.send_a_tail_frames > 0;
             }
 
             if process_return_b {
@@ -589,7 +611,12 @@ impl AudioEngineProcessor {
                     self.scratch_r[i] += r;
                     peak_ret = peak_ret.max(l.abs()).max(r.abs());
                 }
-                self.send_b_active_tail = peak_ret > 1e-6;
+                if peak_ret > 1e-6 || send_b_active {
+                    self.send_b_tail_frames = tail_horizon;
+                } else {
+                    self.send_b_tail_frames = self.send_b_tail_frames.saturating_sub(frames);
+                }
+                self.send_b_active_tail = self.send_b_tail_frames > 0;
             }
 
             // Test Tone Generator (Chapter 2: Pure reference sine tone injected into master output)
@@ -1234,6 +1261,93 @@ mod tests {
         assert!(
             proc.drum_rack.voices.iter().filter(|v| v.active).count() >= 2,
             "DrumRack must trigger Bank B..H notes outside 36..=51"
+        );
+    }
+
+    #[test]
+    fn test_dsp4_delay_return_tail_survives_mute_before_first_echo() {
+        let queues = AudioQueues::new();
+        let (mut ui, audio) = queues.split();
+        let params = AtomicParameters::new();
+        let mut proc = AudioEngineProcessor::new(44100.0, audio, params);
+
+        // Return B (Delay) 100% wet, Track 0 -> Send B = 1.0
+        ui.send_command(AudioCommand::SetParameter {
+            track_id: 0,
+            param_id: crate::parameters::PARAM_FX_DELAY_WET as u32,
+            value: 1.0,
+        });
+        ui.send_command(AudioCommand::SetParameter {
+            track_id: 0,
+            param_id: PARAM_ID_TRACK_SEND_B_BASE,
+            value: 1.0,
+        });
+        ui.send_command(AudioCommand::Play);
+        ui.send_command(AudioCommand::NoteOn {
+            track_id: 0,
+            note: 60,
+            velocity: 120,
+        });
+
+        // Feed 1 short block (256 frames = 5.8 ms, well before the ~281 ms dotted-8th echo)
+        let mut hit_buf = [0.0f32; 512];
+        proc.process_interleaved(&mut hit_buf);
+
+        // Immediately mute Track 0 before the delayed echo emerges
+        ui.send_command(AudioCommand::SetParameter {
+            track_id: 0,
+            param_id: PARAM_ID_TRACK_MUTE_BASE,
+            value: 1.0,
+        });
+
+        // Render ~0.46s (40 blocks x 512 frames = 20480 frames, past the 12403/16538-sample echoes).
+        // Skip block 0 so MasterLimiter's 128-sample lookahead from the dry hit is excluded.
+        let mut echo_energy = 0.0f32;
+        let mut block = [0.0f32; 1024];
+        for b in 0..40 {
+            block.fill(0.0);
+            proc.process_interleaved(&mut block);
+            if b >= 2 {
+                echo_energy += block.iter().map(|s| s * s).sum::<f32>();
+            }
+        }
+        assert!(
+            echo_energy > 1e-4,
+            "Return B delay echo must emerge after dry track is muted before first tap, got energy={}",
+            echo_energy
+        );
+    }
+
+    #[test]
+    fn test_dsp9_set_tempo_validates_and_syncs_atomic_param() {
+        let queues = AudioQueues::new();
+        let (mut ui, audio) = queues.split();
+        let params = AtomicParameters::new();
+        let mut proc = AudioEngineProcessor::new(44100.0, audio, params);
+
+        ui.send_command(AudioCommand::SetTempo(140.0));
+        proc.process_commands();
+        assert_eq!(proc.transport.bpm, 140.0);
+        assert_eq!(
+            proc.params.get(PARAM_BPM),
+            140.0,
+            "SetTempo must sync AtomicParameters::PARAM_BPM"
+        );
+
+        ui.send_command(AudioCommand::SetTempo(f64::NAN));
+        proc.process_commands();
+        assert!(
+            proc.transport.bpm.is_finite() && proc.transport.bpm >= 20.0,
+            "SetTempo(NaN) must not corrupt transport.bpm, got {}",
+            proc.transport.bpm
+        );
+
+        ui.send_command(AudioCommand::SetTempo(0.0));
+        proc.process_commands();
+        assert!(
+            proc.transport.bpm >= 20.0,
+            "SetTempo(0.0) must clamp to valid BPM floor, got {}",
+            proc.transport.bpm
         );
     }
 }

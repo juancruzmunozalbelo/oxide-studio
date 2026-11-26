@@ -410,6 +410,11 @@ pub struct SpectralWarpProcessor {
 
 impl SpectralWarpProcessor {
     pub fn new(sample_rate: f32) -> Self {
+        let sr = if sample_rate.is_finite() && sample_rate > 0.0 {
+            sample_rate
+        } else {
+            44100.0
+        };
         let mut hann_window = vec![0.0f32; FFT_SIZE].into_boxed_slice();
         for i in 0..FFT_SIZE {
             hann_window[i] = 0.5 * (1.0 - (2.0 * PI * (i as f32) / (FFT_SIZE as f32)).cos());
@@ -419,7 +424,7 @@ impl SpectralWarpProcessor {
             mode: WarpMode::Complex,
             stretch_ratio: 1.0,
             pitch_semitones: 0.0,
-            sample_rate,
+            sample_rate: sr,
             complex_pro_params: ComplexProParams::default(),
             texture_params: TextureParams::default(),
             beats_params: BeatsParams::default(),
@@ -576,7 +581,7 @@ impl SpectralWarpProcessor {
             return;
         }
 
-        let grain_len = (self.sample_rate * 0.035) as usize; // 35 ms PSOLA grain
+        let grain_len = ((self.sample_rate * 0.035) as usize).max(1); // 35 ms PSOLA grain
         let in_len = input.len();
         let pitch_rate = 2.0_f32.powf(self.pitch_semitones / 12.0);
         let advance = 1.0 / (grain_len as f32);
@@ -687,13 +692,15 @@ impl SpectralWarpProcessor {
                 break;
             }
 
-            // Compact OLA buffer
+            // Compact OLA buffer while preserving the overlap-add tail beyond ola_write_pos
             if self.ola_read_pos > 0 {
-                let remaining = self.ola_write_pos - self.ola_read_pos;
-                self.ola_buffer.copy_within(self.ola_read_pos..self.ola_write_pos, 0);
+                let shift = self.ola_read_pos;
+                let remaining = self.ola_write_pos.saturating_sub(shift);
+                let tail_len = MAX_WARP_BUFFER.saturating_sub(shift);
+                self.ola_buffer.copy_within(shift..MAX_WARP_BUFFER, 0);
+                self.ola_buffer[tail_len..].fill(0.0);
                 self.ola_read_pos = 0;
                 self.ola_write_pos = remaining;
-                self.ola_buffer[remaining..].fill(0.0);
             }
 
             // Prepare analysis window
@@ -757,6 +764,27 @@ impl SpectralWarpProcessor {
                         self.synth_phase[k] + (self.phase[k - 1] - self.phase[k]);
                     self.synth_phase[k + 1] =
                         self.synth_phase[k] + (self.phase[k + 1] - self.phase[k]);
+                }
+            }
+
+            // Pitch-shift magnitude spectrum when pitch_semitones != 0.0 (zero-alloc via mag[half..] scratch)
+            if (pitch_factor - 1.0).abs() > 1e-4 {
+                for k in 0..half {
+                    self.mag[half + k] = self.mag[k];
+                }
+                for k in 0..half {
+                    let src_f = (k as f32) / pitch_factor;
+                    let s0 = src_f.floor() as usize;
+                    if s0 + 1 < half {
+                        let frac = src_f - s0 as f32;
+                        let m0 = self.mag[half + s0];
+                        let m1 = self.mag[half + s0 + 1];
+                        self.mag[k] = m0 + frac * (m1 - m0);
+                    } else if s0 < half {
+                        self.mag[k] = self.mag[half + s0];
+                    } else {
+                        self.mag[k] = 0.0;
+                    }
                 }
             }
 
@@ -1084,5 +1112,33 @@ mod tests {
         let prefetch_needed = cache.needs_prefetch(PAGE_SIZE - 100);
         // Page 1 is already loaded at PAGE_SIZE, so no prefetch needed
         assert!(prefetch_needed.is_none());
+    }
+
+    #[test]
+    fn test_dsp3_complex_ola_preserves_overlap_tail_and_tones_zero_sr_safe() {
+        let sr = 44100.0;
+        let input = make_test_tone(sr, 4096);
+        let mut proc = SpectralWarpProcessor::new(sr);
+        proc.set_mode(WarpMode::Complex);
+        proc.set_stretch_ratio(1.0);
+
+        let mut output = vec![0.0f32; 2048];
+        proc.process_block(&input, &mut output);
+
+        // At hop boundary 1024 (after warm-up), true 75% Hann OLA must maintain continuous signal energy
+        // instead of dropping to 0.0 at every hop_s boundary due to wiped overlap tail.
+        let boundary_rms = (output[1024..1056].iter().map(|s| s * s).sum::<f32>() / 32.0).sqrt();
+        assert!(
+            boundary_rms > 0.2,
+            "OLA boundary [1024..1056] collapsed to near-silence (rms={}), overlap tail was wiped",
+            boundary_rms
+        );
+
+        // Tones mode must not divide by zero / emit NaN when constructed with sample_rate <= 0.0
+        let mut zero_sr_proc = SpectralWarpProcessor::new(0.0);
+        zero_sr_proc.set_mode(WarpMode::Tones);
+        let mut out_tones = vec![0.0f32; 256];
+        zero_sr_proc.process_block(&input, &mut out_tones);
+        assert!(out_tones.iter().all(|s| s.is_finite()), "Tones mode with zero SR must stay finite");
     }
 }

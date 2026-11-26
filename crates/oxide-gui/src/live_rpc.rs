@@ -184,8 +184,13 @@ impl OxideGuiRpcServer {
                     }
                     Ok(n) => {
                         client.read_buf.extend_from_slice(&chunk[..n]);
-                        if client.read_buf.len() > MAX_RPC_LINE_BYTES
-                            && !client.read_buf.contains(&b'\n')
+                        let first_line_len = client
+                            .read_buf
+                            .iter()
+                            .position(|&b| b == b'\n')
+                            .unwrap_or(client.read_buf.len());
+                        if first_line_len > MAX_RPC_LINE_BYTES
+                            || client.read_buf.len() > MAX_RPC_LINE_BYTES * 2
                         {
                             client.keep = false;
                             client.read_buf.clear();
@@ -589,6 +594,12 @@ fn execute_method(
                 .get("length_beats")
                 .and_then(|v| v.as_f64())
                 .unwrap_or(4.0);
+            if !length_beats.is_finite() || length_beats <= 0.0 || length_beats > 4096.0 {
+                return Err((
+                    -32602,
+                    "length_beats must be finite and in (0.0, 4096.0]".to_string(),
+                ));
+            }
 
             ensure_rpc_tracks_up_to(app, track_index, true);
 
@@ -768,7 +779,7 @@ fn execute_method(
                 None
             };
 
-            app.ensure_track_device_chain(track_index);
+            ensure_rpc_tracks_up_to(app, track_index, true);
             let Some(kind) = dev_kind else {
                 let device_count = app
                     .track_device_chains
@@ -827,7 +838,7 @@ fn execute_method(
             let value = params.get("value").and_then(|v| v.as_f64()).unwrap_or(0.0);
             let fval = value as f32;
 
-            app.ensure_track_device_chain(track_index);
+            ensure_rpc_tracks_up_to(app, track_index, true);
             let dev_kind = app
                 .track_device_chains
                 .get(track_index)
@@ -1373,5 +1384,71 @@ mod tests {
         std::thread::sleep(Duration::from_millis(30));
         let _ = server.poll_and_apply(&mut app);
         assert!(server.clients.len() <= MAX_RPC_CLIENTS);
+    }
+
+    #[test]
+    fn test_mgw5_mgw6_mgw7_live_rpc_bounds_and_sync() {
+        let mut app = OxideStudioApp::new_mock(44100.0);
+        let mut server = OxideGuiRpcServer::new_on_port(0);
+        let port = server.port;
+        assert_ne!(port, 0);
+
+        let mut client = TcpStream::connect(("127.0.0.1", port)).unwrap();
+        client.set_read_timeout(Some(Duration::from_millis(500))).unwrap();
+
+        // MGW-7: zero or negative length_beats in create_clip must fail with -32602
+        // MGW-6: set_device_param on track_index 5 must sync all track arrays before later create_midi_track
+        let req_bad_clip = json!({
+            "jsonrpc": "2.0", "id": 100, "method": "create_clip",
+            "params": { "track_index": 0, "slot_index": 0, "length_beats": 0.0 }
+        });
+        let req_set_param = json!({
+            "jsonrpc": "2.0", "id": 101, "method": "set_device_param",
+            "params": { "track_index": 5, "device_index": 0, "param_index": 0, "value": 1200.0 }
+        });
+        let req_create_track = json!({
+            "jsonrpc": "2.0", "id": 102, "method": "create_midi_track",
+            "params": { "name": "Synced Track" }
+        });
+
+        let mut wire = Vec::new();
+        for r in [&req_bad_clip, &req_set_param, &req_create_track] {
+            wire.extend_from_slice(r.to_string().as_bytes());
+            wire.push(b'\n');
+        }
+        client.write_all(&wire).unwrap();
+        client.flush().unwrap();
+        std::thread::sleep(Duration::from_millis(30));
+
+        let _ = server.poll_and_apply(&mut app);
+        let mut reader = BufReader::new(&client);
+        let mut r1 = String::new();
+        reader.read_line(&mut r1).unwrap();
+        let v1: Value = serde_json::from_str(&r1).unwrap();
+        assert_eq!(v1["error"]["code"], -32602, "zero length_beats must fail: {}", r1);
+
+        assert_eq!(app.matrix.tracks.len(), app.track_device_chains.len());
+        assert_eq!(app.tracks_gui.len(), app.track_device_chains.len());
+        assert_eq!(app.timeline.tracks.len(), app.track_device_chains.len());
+
+        // MGW-5: 17 newlines + >MAX_RPC_LINE_BYTES without newline must drop oversized client
+        let mut dos_client = TcpStream::connect(("127.0.0.1", port)).unwrap();
+        dos_client.set_nonblocking(true).unwrap();
+        let mut dos_payload = b"{}\n".repeat(17);
+        dos_payload.extend(std::iter::repeat_n(b'a', MAX_RPC_LINE_BYTES + 4096));
+        let mut offset = 0;
+        for _ in 0..40 {
+            if offset < dos_payload.len() {
+                if let Ok(n) = dos_client.write(&dos_payload[offset..]) {
+                    offset += n;
+                }
+            }
+            let _ = server.poll_and_apply(&mut app);
+        }
+        assert!(
+            server.clients.len() <= 1,
+            "oversized unconsumed buffer with newlines must be dropped, clients={}",
+            server.clients.len()
+        );
     }
 }

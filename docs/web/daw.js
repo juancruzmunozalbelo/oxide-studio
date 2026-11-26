@@ -1648,6 +1648,7 @@
       let draggingBode = false;
       const updateFromBodePointer = (e) => {
         const rect = bodeCanvas.getBoundingClientRect();
+        if (!rect.width || !rect.height) return;
         const normX = Math.max(0.02, Math.min(0.98, (e.clientX - rect.left) / rect.width));
         const normY = 1.0 - Math.max(0.02, Math.min(0.98, (e.clientY - rect.top) / rect.height));
         const cutoff = Math.round(40 * Math.pow(18000 / 40, normX));
@@ -2228,9 +2229,28 @@
     masterFader.channelCountMode = STATE.tracks[6].mono ? 'explicit' : 'max';
     masterFader.channelCount = STATE.tracks[6].mono ? 1 : 2;
 
+    // Offline OTT 3-Band Dynamics EQ (matches live audio graph)
+    const ottDepth = STATE.fx.ott.active ? STATE.fx.ott.depth : 0;
+    const offOttLow = offlineCtx.createBiquadFilter();
+    offOttLow.type = 'lowshelf';
+    offOttLow.frequency.setValueAtTime(95, 0);
+    offOttLow.gain.setValueAtTime((STATE.fx.ott.low - 0.5) * 8 * ottDepth, 0);
+    const offOttMid = offlineCtx.createBiquadFilter();
+    offOttMid.type = 'peaking';
+    offOttMid.frequency.setValueAtTime(1250, 0);
+    offOttMid.Q.setValueAtTime(0.9, 0);
+    offOttMid.gain.setValueAtTime((STATE.fx.ott.mid - 0.5) * 6 * ottDepth, 0);
+    const offOttAir = offlineCtx.createBiquadFilter();
+    offOttAir.type = 'highshelf';
+    offOttAir.frequency.setValueAtTime(9500, 0);
+    offOttAir.gain.setValueAtTime((STATE.fx.ott.high - 0.5) * 9 * ottDepth, 0);
+
     masterPre.connect(glueComp);
     glueComp.connect(glueMakeup);
-    glueMakeup.connect(masterOut);
+    glueMakeup.connect(offOttLow);
+    offOttLow.connect(offOttMid);
+    offOttMid.connect(offOttAir);
+    offOttAir.connect(masterOut);
     masterOut.connect(masterFader);
     masterFader.connect(offlineCtx.destination);
 
@@ -2311,7 +2331,10 @@
     );
     const offRoarTone = offlineCtx.createBiquadFilter();
     offRoarTone.type = 'lowpass';
-    offRoarTone.frequency.setValueAtTime(STATE.fx.roar.tone || 4500, 0);
+    offRoarTone.frequency.setValueAtTime(
+      STATE.fx.roar.active ? (STATE.fx.roar.tone || 4500) : 20000,
+      0
+    );
     const offFlt1 = offlineCtx.createBiquadFilter();
     offFlt1.type = 'lowpass';
     offFlt1.frequency.setValueAtTime(STATE.synth.cutoff, 0);
@@ -3027,6 +3050,27 @@ ${tracksXml}
       STATE.pianoNotes = pianoNotes;
     }
 
+    if (['techno', 'house', 'rkt', 'dnb'].includes(presetName)) {
+      const stepRow = (id) => findVoice(id).steps.map(v => (v ? 1 : 0));
+      drumGrid = [
+        stepRow('kick'),
+        stepRow('snare'),
+        stepRow('clap'),
+        stepRow('ch'),
+        stepRow('oh'),
+        presetName === 'house' ? stepRow('rim') : (presetName === 'rkt' ? stepRow('percLow') : stepRow('shaker'))
+      ];
+      STATE.drumGrid = drumGrid;
+      pianoNotes = buildPianoNotes([]);
+      STATE.pianoNotes = pianoNotes;
+      for (let t = 0; t < 4; t++) {
+        STATE.sessionClips[t].forEach((clip, idx) => {
+          clip.state = idx === 0 ? 'playing' : 'stopped';
+        });
+      }
+      STATE.activeScene = 0;
+    }
+
     renderDrumGrid();
     updateSessionClipUI();
     syncMixerTrackGains();
@@ -3611,6 +3655,10 @@ ${tracksXml}
       STATE.fx.roar.drive = v;
       const el = document.getElementById('synth-drive-val');
       if (el) el.textContent = `+${v} dB`;
+      const rdr = document.getElementById('roar-drive');
+      if (rdr) rdr.value = v;
+      const rdrv = document.getElementById('roar-drive-val');
+      if (rdrv) rdrv.textContent = `+${v} dB`;
       if (NODES.roarShaper && STATE.fx.roar.active) {
         NODES.roarShaper.curve = getCachedDistortionCurve(v, STATE.fx.roar.curve);
       }
@@ -3691,8 +3739,13 @@ ${tracksXml}
     });
     setupRangeListener('roar-drive', (v) => {
       STATE.fx.roar.drive = v;
+      STATE.synth.drive = v;
       const el = document.getElementById('roar-drive-val');
       if (el) el.textContent = `+${v} dB`;
+      const sdrv = document.getElementById('synth-drive');
+      if (sdrv) sdrv.value = v;
+      const sdrvv = document.getElementById('synth-drive-val');
+      if (sdrvv) sdrvv.textContent = `+${v} dB`;
       if (NODES.roarShaper && STATE.fx.roar.active) {
         NODES.roarShaper.curve = getCachedDistortionCurve(v, STATE.fx.roar.curve);
       }
@@ -3939,6 +3992,7 @@ ${tracksXml}
       rulerLane.style.cursor = 'pointer';
       rulerLane.addEventListener('click', (e) => {
         const rect = rulerLane.getBoundingClientRect();
+        if (!rect.width) return;
         const pct = Math.max(0, Math.min(100, ((e.clientX - rect.left) / rect.width) * 100));
         const sceneIdx = Math.min(3, Math.floor(pct / 25));
         triggerScene(sceneIdx);

@@ -416,6 +416,24 @@ impl DawState {
         Ok(removed)
     }
 
+    /// Set a session slot clip, growing matrix/slots if needed and clearing stale warped audio clips.
+    pub fn set_session_slot_clip(&mut self, track_id: usize, slot_id: usize, clip: SessionClip) {
+        if !matches!(clip.pattern, ClipPattern::Audio(_)) {
+            self.audio_clips.remove(&(track_id as u32, slot_id as u32));
+        }
+        while self.matrix.tracks.len() <= track_id {
+            let tid = self.matrix.tracks.len() as u32;
+            self.matrix
+                .tracks
+                .push(oxide_timeline::SessionTrack::new(tid, format!("Track {}", tid), 8));
+        }
+        let track = &mut self.matrix.tracks[track_id];
+        while track.slots.len() <= slot_id {
+            track.slots.push(oxide_timeline::SessionSlot::default());
+        }
+        track.slots[slot_id].set_clip(Some(clip));
+    }
+
     /// Push live `self.synth` parameters onto the active synth track in `self.project`.
     pub fn sync_synth_params_to_project(&mut self) {
         let target_idx = self
@@ -1112,5 +1130,42 @@ mod tests {
         state.sync_project_from_state();
         assert_eq!(state.project.master_track.delay_mix, 0.0);
         assert_eq!(state.project.master_track.reverb_mix, 0.0);
+    }
+
+    #[test]
+    fn test_mgw1_midi_overwrite_does_not_resurrect_warped_audio_clip() {
+        let mut state = DawState::new();
+        let wav_path = std::env::temp_dir().join("mgw1_test_warp.wav");
+        oxide_bounce::WavWriter::write_wav_16bit(&wav_path, 44100, 1, &[0.0_f32; 1024]).unwrap();
+        let warp_res = crate::call_tool(
+            &mut state,
+            "audio_clip_create_warped",
+            &serde_json::json!({
+                "track_id": 0,
+                "slot_id": 0,
+                "sample_path": wav_path.to_str().unwrap(),
+                "warp_mode": "Beats"
+            }),
+        );
+        let _ = std::fs::remove_file(&wav_path);
+        assert!(!warp_res.is_error, "{:?}", warp_res);
+
+        let midi_res = crate::call_tool(
+            &mut state,
+            "clip_create_midi",
+            &serde_json::json!({
+                "track_id": 0,
+                "slot_id": 0,
+                "name": "Lead Line",
+                "length_beats": 4.0,
+                "notes": [{ "pitch": 60, "velocity": 100, "start_beat": 0.0, "duration_beats": 1.0 }]
+            }),
+        );
+        assert!(!midi_res.is_error, "{:?}", midi_res);
+
+        state.sync_project_from_state();
+        assert_eq!(state.project.tracks[0].track_type, TrackType::MidiSynth);
+        let clip = state.project.tracks[0].session_clips[0].as_ref().unwrap();
+        assert!(matches!(clip.pattern, ClipPattern::Midi(_)));
     }
 }

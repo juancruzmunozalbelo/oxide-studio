@@ -79,12 +79,12 @@ impl<'a> Widget for AutoFilterVisualizerWidget<'a> {
         let log_min = (20.0_f32).ln();
         let log_max = (20000.0_f32).ln();
 
-        if response.dragged() || response.clicked() {
+        if (response.dragged() || response.clicked()) && rect.width() > 1.0 && rect.height() > 1.0 {
             if let Some(pos) = response.interact_pointer_pos() {
                 // Dragging X adjusts cutoff, Y adjusts resonance
-                let norm_x = ((pos.x - rect.left()) / rect.width()).clamp(0.0, 1.0);
+                let norm_x = ((pos.x - rect.left()) / rect.width().max(1.0)).clamp(0.0, 1.0);
                 let new_fc = (log_min + norm_x * (log_max - log_min)).exp();
-                let norm_y = ((rect.bottom() - pos.y) / rect.height()).clamp(0.0, 1.0);
+                let norm_y = ((rect.bottom() - pos.y) / rect.height().max(1.0)).clamp(0.0, 1.0);
 
                 self.state.cutoff_hz = new_fc.clamp(20.0, 20000.0);
                 self.state.resonance = norm_y;

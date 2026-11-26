@@ -9,7 +9,8 @@ use oxide_drums::load_wav_file;
 // ===========================================================================
 
 const NUM_FDN_LINES: usize = 8;
-const MAX_FDN_DELAY: usize = 4096;
+const MAX_FDN_DELAY: usize = 32768;
+const AP_BUF_LEN: usize = 4096;
 
 pub struct FdnReverb {
     delay_buffers: [Box<[f32]>; NUM_FDN_LINES],
@@ -53,7 +54,7 @@ impl FdnReverb {
         let ap_base = [223, 347, 467, 599];
         let mut ap_lengths = [0usize; 4];
         for i in 0..4 {
-            ap_lengths[i] = ((ap_base[i] as f32 * sr_scale) as usize).clamp(8, 1023);
+            ap_lengths[i] = ((ap_base[i] as f32 * sr_scale) as usize).clamp(8, AP_BUF_LEN - 1);
         }
 
         Self {
@@ -61,7 +62,7 @@ impl FdnReverb {
             write_indices: [0; NUM_FDN_LINES],
             delay_lengths,
             damp_states: [0.0; NUM_FDN_LINES],
-            ap_buffers: std::array::from_fn(|_| vec![0.0; 1024].into_boxed_slice()),
+            ap_buffers: std::array::from_fn(|_| vec![0.0; AP_BUF_LEN].into_boxed_slice()),
             ap_write_indices: [0; 4],
             ap_lengths,
             sample_rate: sr,
@@ -84,7 +85,7 @@ impl FdnReverb {
         }
         let ap_base = [223, 347, 467, 599];
         for i in 0..4 {
-            self.ap_lengths[i] = ((ap_base[i] as f32 * sr_scale) as usize).clamp(8, 1023);
+            self.ap_lengths[i] = ((ap_base[i] as f32 * sr_scale) as usize).clamp(8, AP_BUF_LEN - 1);
         }
         self.sample_rate = sample_rate;
         self.reset();
@@ -109,13 +110,13 @@ impl FdnReverb {
         for stage in 0..4 {
             let len = self.ap_lengths[stage];
             let w = self.ap_write_indices[stage];
-            let r = (w + 1024 - len) % 1024;
+            let r = (w + AP_BUF_LEN - len) % AP_BUF_LEN;
             let delayed = self.ap_buffers[stage][r];
 
             let v = input - AP_GAIN * delayed;
             let output = delayed + AP_GAIN * v;
             self.ap_buffers[stage][w] = v;
-            self.ap_write_indices[stage] = (w + 1) % 1024;
+            self.ap_write_indices[stage] = (w + 1) % AP_BUF_LEN;
             input = output;
         }
         input
@@ -332,5 +333,14 @@ mod tests {
         conv.process_block(&mut left, &mut right);
 
         assert!((left[0] - 0.5).abs() < 1e-4);
+    }
+
+    #[test]
+    fn test_fdn_reverb_192khz_distinct_delays() {
+        let fdn = FdnReverb::new(192000.0);
+        let mut unique = fdn.delay_lengths.to_vec();
+        unique.sort();
+        unique.dedup();
+        assert_eq!(unique.len(), NUM_FDN_LINES);
     }
 }

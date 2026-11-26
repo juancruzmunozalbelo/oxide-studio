@@ -34,7 +34,7 @@ pub enum SuiteAudioEffectKind {
 
 pub const FIR_IR_LEN: usize = 128;
 pub const FDN_LINES: usize = 4;
-pub const FDN_MAX_DELAY: usize = 4096;
+pub const FDN_MAX_DELAY: usize = 16384;
 
 #[derive(Debug, Clone)]
 pub struct HybridReverbEffect {
@@ -231,7 +231,8 @@ impl SpectralResonatorEffect {
         for k in 0..NUM_RESONATOR_COMBS {
             let harmonic = (k + 1) as f32;
             let stretch_factor = harmonic.powf(self.harmonic_stretch.clamp(0.5, 2.0));
-            let target_freq = (self.root_hz * stretch_factor + self.freq_shift).clamp(20.0, self.sample_rate * 0.45);
+            let max_fc = (self.sample_rate * 0.45).max(20.0);
+            let target_freq = (self.root_hz * stretch_factor + self.freq_shift).clamp(20.0, max_fc);
 
             let delay_samples = (self.sample_rate / target_freq) as usize;
             let len = delay_samples.clamp(8, MAX_COMB_SAMPLES - 1);
@@ -701,7 +702,7 @@ impl CorpusModalFilter {
     }
 
     pub fn set_params(&mut self, freq_hz: f32, decay_s: f32, sr: f32) {
-        let f0 = freq_hz.clamp(20.0, sr * 0.45);
+        let f0 = freq_hz.clamp(20.0, (sr * 0.45).max(20.0));
         let tau = decay_s.max(0.01);
         let r = (-1.0 / (tau * sr)).exp();
         let theta = 2.0 * PI * f0 / sr;
@@ -765,9 +766,10 @@ impl CorpusEffect {
     pub fn update_modes(&mut self) {
         let ratios = self.mode.mode_ratios();
         let mat_damping = 1.0 + self.material.clamp(-1.0, 1.0) * 0.4;
+        let max_fc = (self.sample_rate * 0.45).max(20.0);
 
         for k in 0..CORPUS_MODES {
-            let freq = (self.tune_hz * ratios[k]).clamp(20.0, self.sample_rate * 0.45);
+            let freq = (self.tune_hz * ratios[k]).clamp(20.0, max_fc);
             let decay = (self.decay_s / ((k + 1) as f32).powf(mat_damping)).max(0.01);
             self.modes_l[k].set_params(freq, decay, self.sample_rate);
             self.modes_r[k].set_params(freq, decay, self.sample_rate);
@@ -1325,5 +1327,14 @@ mod tests {
                 max_ceiling
             );
         }
+    }
+
+    #[test]
+    fn test_hybrid_reverb_effect_192khz_distinct_delays() {
+        let hr = HybridReverbEffect::new(192000.0);
+        let mut unique = hr.fdn_lengths.to_vec();
+        unique.sort();
+        unique.dedup();
+        assert_eq!(unique.len(), FDN_LINES);
     }
 }

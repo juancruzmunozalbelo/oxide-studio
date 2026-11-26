@@ -289,4 +289,119 @@ mod tests {
         dev.set_enabled(false);
         assert!(!dev.is_enabled());
     }
+
+    #[test]
+    fn test_fxtl_1_to_7_regressions() {
+        use oxide_core::{AudioBuffer, AudioEffectDevice, MidiEffectDevice, MidiEvent, MusicalTime};
+
+        // FXTL-1: Arpeggiator ChordTrigger must send NoteOff on release and step advance
+        let mut arp = Arpeggiator::new();
+        arp.pattern = ArpPattern::ChordTrigger;
+        let mut out = Vec::new();
+        arp.process_midi(
+            &[
+                MidiEvent::NoteOn { channel: 0, note: 60, velocity: 100 },
+                MidiEvent::NoteOn { channel: 0, note: 64, velocity: 100 },
+            ],
+            &mut out,
+            &MusicalTime::new(0.0, 120.0, 4, 4, true),
+        );
+        assert_eq!(out.len(), 2);
+        out.clear();
+        arp.process_midi(
+            &[
+                MidiEvent::NoteOff { channel: 0, note: 60 },
+                MidiEvent::NoteOff { channel: 0, note: 64 },
+            ],
+            &mut out,
+            &MusicalTime::new(0.25, 120.0, 4, 4, true),
+        );
+        assert!(out.contains(&MidiEvent::NoteOff { channel: 0, note: 60 }));
+        assert!(out.contains(&MidiEvent::NoteOff { channel: 0, note: 64 }));
+
+        // FXTL-2: Velocity::remap(0) must preserve velocity 0 (NoteOff)
+        let vel = Velocity::new();
+        assert_eq!(vel.remap(0), 0);
+
+        // FXTL-3: ChordDevice, RandomDevice, Random must release on NoteOn(vel=0)
+        let mut chord_dev = ChordDevice::new();
+        let mut c_out = Vec::new();
+        chord_dev.process_events(
+            &[MidiEvent::NoteOn { channel: 0, note: 60, velocity: 0 }],
+            &mut c_out,
+        );
+        assert_eq!(c_out.len(), 1 + chord_dev.num_shifts);
+        assert!(c_out.iter().all(|e| matches!(e, MidiEvent::NoteOn { velocity: 0, .. })));
+
+        let mut rand_dev = RandomDevice::new();
+        rand_dev.chance = 1.0;
+        let mut r_on = Vec::new();
+        rand_dev.process_events(&[MidiEvent::NoteOn { channel: 0, note: 60, velocity: 100 }], &mut r_on);
+        let shifted = match r_on[0] { MidiEvent::NoteOn { note, .. } => note, _ => panic!() };
+        let mut r_off = Vec::new();
+        rand_dev.process_events(&[MidiEvent::NoteOn { channel: 0, note: 60, velocity: 0 }], &mut r_off);
+        assert_eq!(r_off, vec![MidiEvent::NoteOn { channel: 0, note: shifted, velocity: 0 }]);
+
+        let mut rand = Random::new();
+        rand.chance = 1.0;
+        let mut ro1 = Vec::new();
+        rand.process_midi(&[MidiEvent::NoteOn { channel: 0, note: 60, velocity: 100 }], &mut ro1, &MusicalTime::default());
+        let shifted2 = match ro1[0] { MidiEvent::NoteOn { note, .. } => note, _ => panic!() };
+        let mut ro2 = Vec::new();
+        rand.process_midi(&[MidiEvent::NoteOn { channel: 0, note: 60, velocity: 0 }], &mut ro2, &MusicalTime::default());
+        assert_eq!(ro2, vec![MidiEvent::NoteOn { channel: 0, note: shifted2, velocity: 0 }]);
+
+        // FXTL-4: NoteLength flushes active notes when transport loops backward
+        let mut nl = NoteLength::new();
+        nl.length_beats = 0.5;
+        let mut nl_out = Vec::new();
+        nl.process_midi(
+            &[MidiEvent::NoteOn { channel: 0, note: 60, velocity: 100 }],
+            &mut nl_out,
+            &MusicalTime::new(3.75, 120.0, 4, 4, true),
+        );
+        nl_out.clear();
+        nl.process_midi(&[], &mut nl_out, &MusicalTime::new(0.0, 120.0, 4, 4, true));
+        assert_eq!(nl_out, vec![MidiEvent::NoteOff { channel: 0, note: 60 }]);
+
+        // FXTL-5: Very low positive sample rates must not panic on filter cutoff clamp
+        let mut buf = AudioBuffer::silence(16);
+        let t = MusicalTime::default();
+        let mut eq = EQEight::new(10.0);
+        eq.process_audio(&mut buf, &t);
+        let mut af = AutoFilter::new(10.0);
+        af.process_audio(&mut buf, &t);
+        let mut mb = MultibandDynamics::new(10.0);
+        mb.process_audio(&mut buf, &t);
+        let mut roar = Roar::new(10.0);
+        roar.topology = RoarTopology::Multiband;
+        roar.process_audio(&mut buf, &t);
+        let mut corpus = Corpus::new(10.0);
+        corpus.process_audio(&mut buf, &t);
+        let mut erosion = Erosion::new(10.0);
+        erosion.process_audio(&mut buf, &t);
+        let mut pf = PhaserFlanger::new(10.0);
+        pf.process_audio(&mut buf, &t);
+        let mut sr_res = SpectralResonator::new(10.0);
+        sr_res.process_audio(&mut buf, &t);
+        let mut suite_res = SuiteAudioEffect::new(10.0, SuiteAudioEffectKind::SpectralResonator);
+        suite_res.process_audio(&mut buf, &t);
+        let mut suite_corp = SuiteAudioEffect::new(10.0, SuiteAudioEffectKind::Corpus);
+        suite_corp.process_audio(&mut buf, &t);
+
+        // FXTL-6: 192 kHz reverb FDN must preserve distinct delay lengths
+        let fdn_192 = FdnReverb::new(192000.0);
+        let mut fdn_buf_l = [0.0f32; 64];
+        let mut fdn_buf_r = [0.0f32; 64];
+        fdn_buf_l[0] = 1.0;
+        let mut fdn_192 = fdn_192;
+        fdn_192.process_block(&mut fdn_buf_l, &mut fdn_buf_r);
+        assert!(fdn_buf_l.iter().all(|s| s.is_finite()));
+
+        // FXTL-7: MpeControlDevice must not overflow on i16::MIN pitch bend
+        let mut mpe = MpeControlDevice::new();
+        let mut mpe_out = Vec::new();
+        mpe.process_events(&[MidiEvent::PitchBend { channel: 0, value: i16::MIN }], &mut mpe_out);
+        assert_eq!(mpe_out, vec![MidiEvent::PitchBend { channel: 0, value: -8192 }]);
+    }
 }

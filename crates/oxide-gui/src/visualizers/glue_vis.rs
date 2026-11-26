@@ -68,9 +68,9 @@ impl<'a> Widget for GlueCompressorVisualizerWidget<'a> {
     fn ui(self, ui: &mut Ui) -> Response {
         let (rect, mut response) = ui.allocate_exact_size(self.size, Sense::click_and_drag());
 
-        if response.dragged() || response.clicked() {
+        if (response.dragged() || response.clicked()) && rect.width() > 1.0 && rect.height() > 1.0 {
             if let Some(pos) = response.interact_pointer_pos() {
-                let meter_w = rect.width() * 0.62;
+                let meter_w = (rect.width() * 0.62).max(1.0);
                 let led_rect = Rect::from_min_size(
                     pos2(rect.right() - 48.0, rect.top() + 2.0),
                     egui::vec2(44.0, 18.0),
@@ -83,7 +83,7 @@ impl<'a> Widget for GlueCompressorVisualizerWidget<'a> {
                     self.state.threshold_db = -40.0 + norm_x * 40.0;
                 } else {
                     // Dragging vertically on the right SSL parameter pane adjusts Ratio
-                    let norm_y = ((rect.bottom() - pos.y) / rect.height()).clamp(0.0, 1.0);
+                    let norm_y = ((rect.bottom() - pos.y) / rect.height().max(1.0)).clamp(0.0, 1.0);
                     self.state.ratio = (2.0 + norm_y * 8.0).round();
                 }
                 self.state.recompute_gain_reduction();

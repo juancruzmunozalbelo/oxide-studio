@@ -22,7 +22,7 @@ struct ModalFilter {
 
 impl ModalFilter {
     fn new(freq: f32, decay_s: f32, sr: f32) -> Self {
-        let f0 = freq.clamp(20.0, sr * 0.45);
+        let f0 = freq.clamp(20.0, (sr * 0.45).max(20.0));
         let tau = decay_s.max(0.01);
         let r = (-1.0 / (tau * sr)).exp();
         let theta = 2.0 * PI * f0 / sr;

@@ -360,7 +360,7 @@ fn apply_plist_xml(xml: &str, acc: &mut PlistAccumulator<'_>) {
     if let Some(id) = extract_xml_string(xml, "CFBundleIdentifier") {
         *acc.identifier = id.clone();
         let parts: Vec<&str> = id.split('.').collect();
-        if parts.len() >= 2 && *acc.vendor == "Unknown" {
+        if parts.len() >= 2 && *acc.vendor == "Unknown" && !parts[1].is_empty() {
             *acc.vendor = uppercase_first_letter(parts[1]);
         }
     }
@@ -394,7 +394,18 @@ fn apply_plist_xml(xml: &str, acc: &mut PlistAccumulator<'_>) {
 
 fn extract_xml_string(xml: &str, key: &str) -> Option<String> {
     let key_tag = format!("<key>{}</key>", key);
-    let key_pos = xml.find(&key_tag)?;
+    let mut search_from = 0usize;
+    let key_pos = loop {
+        let pos = search_from + xml[search_from..].find(&key_tag)?;
+        let before = &xml[..pos];
+        let in_comment = before
+            .rfind("<!--")
+            .is_some_and(|c_start| before[c_start + 4..].find("-->").is_none());
+        if !in_comment {
+            break pos;
+        }
+        search_from = pos + key_tag.len();
+    };
     let mut after_key = xml[key_pos + key_tag.len()..].trim_start();
     while let Some(rest) = after_key.strip_prefix("<!--") {
         let end_comment = rest.find("-->")?;
@@ -402,7 +413,14 @@ fn extract_xml_string(xml: &str, key: &str) -> Option<String> {
     }
     let after_open = after_key.strip_prefix("<string>")?;
     let str_end = after_open.find("</string>")?;
-    Some(after_open[..str_end].trim().to_string())
+    let raw = after_open[..str_end].trim();
+    Some(
+        raw.replace("&amp;", "&")
+            .replace("&lt;", "<")
+            .replace("&gt;", ">")
+            .replace("&quot;", "\"")
+            .replace("&apos;", "'"),
+    )
 }
 
 fn uppercase_first_letter(s: &str) -> String {
@@ -622,5 +640,39 @@ mod tests {
         );
 
         let _ = fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn test_xml_comment_and_empty_vendor_segment_guards() {
+        let xml = r#"
+        <dict>
+            <!-- <key>CFBundleIdentifier</key><string>com.evil.Comment</string> -->
+            <key>CFBundleIdentifier</key>
+            <string>com..RealPlugin</string>
+            <key>CFBundleDisplayName</key>
+            <string>Amp &amp; Delay</string>
+        </dict>
+        "#;
+        let mut name = String::new();
+        let mut id = String::new();
+        let mut vendor = "Unknown".to_string();
+        let mut ver = String::new();
+        let mut cat = PluginCategory::Effect;
+        let mut det = false;
+        let mut exec = None;
+        let mut acc = PlistAccumulator {
+            default_name: "Fallback",
+            name: &mut name,
+            identifier: &mut id,
+            vendor: &mut vendor,
+            version: &mut ver,
+            category: &mut cat,
+            category_determined: &mut det,
+            executable_name: &mut exec,
+        };
+        apply_plist_xml(xml, &mut acc);
+        assert_eq!(id, "com..RealPlugin");
+        assert_eq!(vendor, "Unknown");
+        assert_eq!(name, "Amp & Delay");
     }
 }

@@ -293,8 +293,9 @@ impl McpServer {
                 continue;
             }
 
+            let lower = trimmed.to_ascii_lowercase();
             let is_header_line =
-                !trimmed.starts_with('{') && !trimmed.starts_with('[') && trimmed.contains(':');
+                lower.starts_with("content-length:") || lower.starts_with("content-type:");
             if is_header_line {
                 let mut content_length: Option<usize> = None;
                 let mut malformed_content_length = false;
@@ -427,5 +428,17 @@ mod tests {
         assert!(r1.contains("-32602"));
         let r2 = server.handle_line(r#"{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"project_get_overview","arguments":[1]}}"#).unwrap();
         assert!(r2.contains("-32602"));
+    }
+
+    #[test]
+    fn test_mgw4_stdio_non_header_colon_line_returns_parse_error() {
+        let mut server = McpServer::new();
+        let payload = "a:b\n{\"jsonrpc\":\"2.0\",\"id\":9,\"method\":\"ping\"}\n";
+        let mut reader = io::Cursor::new(payload.as_bytes());
+        let mut out = Vec::new();
+        server.process_stdio(&mut reader, &mut out);
+        let out_str = String::from_utf8(out).unwrap();
+        assert!(out_str.contains("-32700"), "Expected Parse error -32700, got {}", out_str);
+        assert!(out_str.contains("\"id\":9"), "Expected second line response, got {}", out_str);
     }
 }

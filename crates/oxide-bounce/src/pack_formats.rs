@@ -419,7 +419,9 @@ impl DawProjectExchange {
         let tempo: f64 = tempo_str
             .trim()
             .parse()
-            .map_err(|_| DawProjectError::XmlParseError("Invalid tempo format".into()))?;
+            .ok()
+            .filter(|t: &f64| t.is_finite() && *t > 0.0)
+            .ok_or_else(|| DawProjectError::XmlParseError("Invalid tempo format".into()))?;
 
         let time_sig_str = find_element_text(&project_nodes, "timeSignature")
             .unwrap_or_else(|| "4/4".to_string());
@@ -433,11 +435,14 @@ impl DawProjectExchange {
             let name = t_el.attr("name").unwrap_or("Track").to_string();
             let volume_db: f32 = t_el
                 .attr("volume")
-                .and_then(|v| v.parse().ok())
+                .and_then(|v| v.parse::<f32>().ok())
+                .filter(|v| v.is_finite())
                 .unwrap_or(0.0);
             let pan: f32 = t_el
                 .attr("pan")
-                .and_then(|v| v.parse().ok())
+                .and_then(|v| v.parse::<f32>().ok())
+                .filter(|v| v.is_finite())
+                .map(|v| v.clamp(-1.0, 1.0))
                 .unwrap_or(0.0);
             let is_muted: bool = t_el.attr("mute").map(|v| v == "true").unwrap_or(false);
 
@@ -446,11 +451,13 @@ impl DawProjectExchange {
                 let clip_name = c_el.attr("name").unwrap_or("Clip").to_string();
                 let clip_start: f64 = c_el
                     .attr("start")
-                    .and_then(|v| v.parse().ok())
+                    .and_then(|v| v.parse::<f64>().ok())
+                    .filter(|v| v.is_finite() && *v >= 0.0)
                     .unwrap_or(0.0);
                 let clip_duration: f64 = c_el
                     .attr("duration")
-                    .and_then(|v| v.parse().ok())
+                    .and_then(|v| v.parse::<f64>().ok())
+                    .filter(|v| v.is_finite() && *v > 0.0)
                     .unwrap_or(4.0);
 
                 let mut notes = Vec::new();
@@ -462,11 +469,13 @@ impl DawProjectExchange {
                         .unwrap_or(100);
                     let start_beat: f64 = n_el
                         .attr("start")
-                        .and_then(|v| v.parse().ok())
+                        .and_then(|v| v.parse::<f64>().ok())
+                        .filter(|v| v.is_finite() && *v >= 0.0)
                         .unwrap_or(0.0);
                     let duration_beats: f64 = n_el
                         .attr("duration")
-                        .and_then(|v| v.parse().ok())
+                        .and_then(|v| v.parse::<f64>().ok())
+                        .filter(|v| v.is_finite() && *v > 0.0)
                         .unwrap_or(1.0);
 
                     notes.push(DawNote {
@@ -971,15 +980,15 @@ impl LosslessFreezeCodec {
         // 2. Map to unsigned ZigZag
         let zigzags: Vec<u32> = residuals.iter().map(|&r| zigzag_encode(r)).collect();
 
-        // 3. Search optimal Rice parameter k (0..16)
+        // 3. Search optimal Rice parameter k (0..=31)
         let mut best_k = 0u8;
         let mut min_total_bits = u64::MAX;
 
-        for k in 0..=16u8 {
+        for k in 0..=31u8 {
             let mut total_bits = 0u64;
             for &u in &zigzags {
-                let q = (u >> k) as u64;
-                total_bits += q + 1 + (k as u64);
+                let q = (u as u64) >> (k as u32);
+                total_bits = total_bits.saturating_add(q + 1 + (k as u64));
             }
             if total_bits < min_total_bits {
                 min_total_bits = total_bits;
@@ -1326,5 +1335,35 @@ mod tests {
             LosslessFreezeCodec::decode_lossless_pcm(&huge_n),
             Err(FreezeCodecError::UnexpectedEof)
         );
+    }
+
+    #[test]
+    fn test_lossless_freeze_codec_high_residual_k_and_dawproject_nan_validation() {
+        // Alternating +/-0.5 f32 flips sign bit -> i32::MIN delta; k up to 31 avoids 8 KiB/sample blowup
+        let mut sq = Vec::with_capacity(200);
+        for i in 0..200 {
+            sq.push(if i % 2 == 0 { 0.5f32 } else { -0.5f32 });
+        }
+        let encoded = LosslessFreezeCodec::encode_lossless_f32(&sq);
+        assert!(
+            encoded.len() < 2048,
+            "Alternating float sign flips must encode compactly (< 2 KiB), got {} bytes",
+            encoded.len()
+        );
+        let decoded = LosslessFreezeCodec::decode_lossless_f32(&encoded).unwrap();
+        assert_eq!(sq, decoded);
+
+        let nan_tempo_xml = "<project><transport><tempo>NaN</tempo></transport><tracks/></project>";
+        assert!(DawProjectExchange::import_dawproject_xml(nan_tempo_xml, "<metadata><title>X</title></metadata>").is_err());
+
+        let neg_tempo_xml = "<project><transport><tempo>-120</tempo></transport><tracks/></project>";
+        assert!(DawProjectExchange::import_dawproject_xml(neg_tempo_xml, "<metadata><title>X</title></metadata>").is_err());
+
+        let nan_attr_xml = "<project><transport><tempo>120</tempo></transport><tracks><track name='T' volume='NaN' pan='inf' mute='false'><clip name='C' start='NaN' duration='-5'><note key='60' velocity='100' start='NaN' duration='NaN'/></clip></track></tracks></project>";
+        let parsed = DawProjectExchange::import_dawproject_xml(nan_attr_xml, "<metadata><title>X</title></metadata>").unwrap();
+        let trk = &parsed.tracks[0];
+        assert!(trk.volume_db.is_finite() && trk.pan.is_finite());
+        assert!(trk.clips[0].start_beat.is_finite() && trk.clips[0].duration_beats > 0.0);
+        assert!(trk.clips[0].notes[0].start_beat.is_finite() && trk.clips[0].notes[0].duration_beats > 0.0);
     }
 }

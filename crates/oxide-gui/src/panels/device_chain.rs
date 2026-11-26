@@ -376,11 +376,17 @@ impl DeviceChainViewState {
     /// Delete device at `idx`.
     pub fn delete_device(&mut self, idx: usize) -> Option<GuiDeviceModule> {
         if idx < self.devices.len() {
-            if self.hot_swap.target_device_idx == Some(idx) {
-                self.hot_swap.cancel();
+            if let Some(target) = self.hot_swap.target_device_idx {
+                if target == idx {
+                    self.hot_swap.cancel();
+                } else if target > idx {
+                    self.hot_swap.target_device_idx = Some(target - 1);
+                }
             }
             let removed = self.devices.remove(idx);
-            if self.selected_device_idx >= self.devices.len() && !self.devices.is_empty() {
+            if self.devices.is_empty() {
+                self.selected_device_idx = 0;
+            } else if self.selected_device_idx >= self.devices.len() {
                 self.selected_device_idx = self.devices.len() - 1;
             }
             Some(removed)
@@ -398,6 +404,11 @@ impl DeviceChainViewState {
             } else if self.selected_device_idx == idx - 1 {
                 self.selected_device_idx += 1;
             }
+            if self.hot_swap.target_device_idx == Some(idx) {
+                self.hot_swap.target_device_idx = Some(idx - 1);
+            } else if self.hot_swap.target_device_idx == Some(idx - 1) {
+                self.hot_swap.target_device_idx = Some(idx);
+            }
             true
         } else {
             false
@@ -412,6 +423,11 @@ impl DeviceChainViewState {
                 self.selected_device_idx += 1;
             } else if self.selected_device_idx == idx + 1 {
                 self.selected_device_idx -= 1;
+            }
+            if self.hot_swap.target_device_idx == Some(idx) {
+                self.hot_swap.target_device_idx = Some(idx + 1);
+            } else if self.hot_swap.target_device_idx == Some(idx + 1) {
+                self.hot_swap.target_device_idx = Some(idx);
             }
             true
         } else {
@@ -1645,5 +1661,24 @@ pub mod tests {
         ott.depth = 0.2;
         ott.recompute_meters();
         assert!(ott.mid.gr_meter.abs() < full_mid.abs());
+    }
+
+    #[test]
+    fn test_mgw9_delete_and_move_track_hot_swap_target_and_empty_selection() {
+        let mut chain = DeviceChainViewState::for_track_1();
+        assert_eq!(chain.devices.len(), 4);
+        assert!(chain.hot_swap_activate(2)); // Roar at index 2
+        assert!(chain.delete_device(0).is_some()); // Shift Roar to index 1
+        assert_eq!(chain.hot_swap.target_device_idx, Some(1));
+        assert!(chain.move_device_right(1)); // Move Roar from 1 to 2
+        assert_eq!(chain.hot_swap.target_device_idx, Some(2));
+        assert!(chain.hot_swap_commit(DeviceKind::GlueCompressor));
+        assert_eq!(chain.devices[2].kind, DeviceKind::GlueCompressor);
+
+        chain.selected_device_idx = 2;
+        while !chain.devices.is_empty() {
+            chain.delete_device(0);
+        }
+        assert_eq!(chain.selected_device_idx, 0);
     }
 }

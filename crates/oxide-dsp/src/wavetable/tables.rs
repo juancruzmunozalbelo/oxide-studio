@@ -104,17 +104,27 @@ impl WavetableSet {
     /// - `table_pos`: normalized position across frames in [0.0, 1.0]
     #[inline(always)]
     pub fn read_interpolated(&self, phase: f32, table_pos: f32) -> f32 {
-        let pos_clamped = table_pos.clamp(0.0, 1.0);
+        let pos_clamped = if table_pos.is_finite() {
+            table_pos.clamp(0.0, 1.0)
+        } else {
+            0.0
+        };
         let frame_float = pos_clamped * (NUM_FRAMES - 1) as f32;
-        let frame_idx = frame_float.floor() as usize;
+        let frame_idx = (frame_float.floor() as usize).min(NUM_FRAMES - 1);
         let frame_frac = frame_float - frame_idx as f32;
         let next_frame_idx = (frame_idx + 1).min(NUM_FRAMES - 1);
 
-        let p = phase.fract();
-        let p_norm = if p < 0.0 { p + 1.0 } else { p };
+        let p = if phase.is_finite() { phase.fract() } else { 0.0 };
+        let p_norm = if p < 0.0 {
+            let wrapped = p + 1.0;
+            if wrapped >= 1.0 { 0.0 } else { wrapped }
+        } else {
+            p
+        };
         let sample_float = p_norm * TABLE_SIZE as f32;
-        let sample_idx = (sample_float.floor() as usize) % TABLE_SIZE;
-        let sample_frac = sample_float - sample_idx as f32;
+        let sample_floor = sample_float.floor();
+        let sample_idx = (sample_floor as usize) % TABLE_SIZE;
+        let sample_frac = sample_float - sample_floor;
         let next_sample_idx = (sample_idx + 1) % TABLE_SIZE;
 
         // Bilinear interpolation between frame and next sample
@@ -127,5 +137,17 @@ impl WavetableSet {
         let interp1 = s10 + sample_frac * (s11 - s10);
 
         interp0 + frame_frac * (interp1 - interp0)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_dsp10_read_interpolated_tiny_negative_phase_bounded() {
+        let table = WavetableSet::generate(WavetableCategory::BasicShapes);
+        let s = table.read_interpolated(-1e-8_f32, 0.0);
+        assert!(s.is_finite() && s.abs() <= 2.0, "Tiny negative phase spiked to {}", s);
     }
 }
